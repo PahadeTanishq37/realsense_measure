@@ -6,16 +6,23 @@ them into a unified point cloud, and measures the target's dimensions.
 
 Example usage
 -------------
-Scan a box with default settings (Open3D windows enabled, 4 mm voxel)::
+Scan a box with default settings (auto-capture every 3.0s, Open3D windows enabled)::
 
     python main.py
+
+Scan with faster continuous capture (e.g. every 1.5s)::
+
+    python main.py --interval 1.5
+
+Manual SPACE-triggered capture::
+
+    python main.py --manual-capture
 
 Specify output directory and target type::
 
     python main.py --target box --out my_scan
 
-Skip the interactive Open3D stage windows (useful on headless machines or
-when scripting back-to-back scans)::
+Skip the interactive Open3D stage windows::
 
     python main.py --no-viz
 
@@ -71,7 +78,12 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         metavar="SEC",
-        help="override automatic frame capture interval in seconds",
+        help="override automatic capture interval in seconds (default: 3.0)",
+    )
+    parser.add_argument(
+        "--manual-capture",
+        action="store_true",
+        help="disable automatic capture and require pressing SPACE for each frame",
     )
 
     return parser
@@ -87,12 +99,15 @@ def main() -> None:
     cfg.target.name        = args.target
     cfg.show_stage_windows = not args.no_viz
 
-    if args.interval is not None:
-        cfg.camera.capture_interval_s = args.interval
-
     if args.voxel is not None:
         cfg.preprocess.voxel_size_m   = args.voxel
         cfg.registration.voxel_size_m = args.voxel
+
+    if args.interval is not None:
+        cfg.camera.capture_interval_s = args.interval
+
+    if args.manual_capture:
+        cfg.camera.auto_capture = False
 
     # ---- run -----------------------------------------------------------
     try:

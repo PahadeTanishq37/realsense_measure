@@ -70,9 +70,6 @@ class CameraConfig:
     height: int = 480
     fps: int = 30
 
-    # Auto-capture interval in seconds (timed continuous capture)
-    capture_interval_s: float = 3.0
-
     # Post-processing filters (applied in order: decimation → spatial →
     # temporal → hole-filling)
     use_decimation: bool = True
@@ -86,6 +83,12 @@ class CameraConfig:
     # 1.2 m clips far background before it pollutes the point cloud.
     depth_min_m: float = 0.15
     depth_max_m: float = 1.20
+
+    # Auto-capture settings
+    auto_capture: bool = True
+    capture_interval_s: float = 3.0   # how often a frame is automatically captured (s)
+    skip_near_duplicate_frames: bool = True
+    duplicate_depth_diff_threshold_m: float = 0.01   # min mean abs depth diff (m) to avoid duplicate capture
 
     # Depth visualisation settings (preview window only — no effect on data).
     depth_vis: DepthVisConfig = field(default_factory=DepthVisConfig)
@@ -120,6 +123,7 @@ class PreprocessConfig:
 # ---------------------------------------------------------------------------
 # Stage: Registration
 # ---------------------------------------------------------------------------
+
 @dataclass
 class RegistrationConfig:
     """Multi-view point-cloud registration (FPFH + RANSAC → ICP) settings."""

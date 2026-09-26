@@ -33,8 +33,7 @@ def _draw_hud(
     n_pts: int,
     vis_min_m: float,
     vis_max_m: float,
-    interval_s: float = 3.0,
-    time_until_next_s: float = 0.0,
+    auto_capture: bool = True,
 ) -> None:
     """
     Render the D455f status HUD onto the depth panel in-place.
@@ -55,10 +54,8 @@ def _draw_hud(
         (0 if no frame captured yet).
     vis_min_m, vis_max_m:
         Configured visualization range (from DepthVisConfig).
-    interval_s:
-        Configured auto-capture interval in seconds.
-    time_until_next_s:
-        Time in seconds until next scheduled auto-capture.
+    auto_capture:
+        Whether continuous automatic capture mode is active.
     """
     valid = depth_m[depth_m > 0]
     n_valid   = int(valid.size)
@@ -67,14 +64,16 @@ def _draw_hud(
     d_max     = float(valid.max())      if n_valid else 0.0
 
     cloud_status = f"{n_pts:,} pts" if n_pts > 0 else "--"
-    countdown_ms = max(0.0, time_until_next_s * 1000.0)
+
+    if auto_capture:
+        legend = "AUTO-CAPTURING -- move camera around object -- press ENTER when done"
+    else:
+        legend = "SPACE: capture  ENTER: finish (2+)  ESC: abort"
 
     lines = [
         "D455f STATUS",
         "",
         f"Frames captured : {n_frames}",
-        f"Auto-interval   : {interval_s:.2f} s",
-        f"Next capture in : {countdown_ms:4.0f} ms",
         f"Valid depth px  : {n_valid:,}",
         f"Point cloud pts : {cloud_status}",
         "",
@@ -85,21 +84,29 @@ def _draw_hud(
         f"Vis range  min  : {vis_min_m:.2f} m",
         f"Vis range  max  : {vis_max_m:.2f} m",
         "",
-        "ENTER: finish (2+)  ESC: abort  SPACE: force",
+        legend,
     ]
 
-    y0, dy = 26, 20
+    y0, dy = 28, 22
     for i, line in enumerate(lines):
         y = y0 + i * dy
         # Shadow (readability over any background color)
         cv2.putText(panel, line, (10, y),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.48,
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.52,
                     (0, 0, 0), 3, cv2.LINE_AA)
         # White text
         color = (0, 255, 255) if line == "D455f STATUS" else (255, 255, 255)
         cv2.putText(panel, line, (10, y),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.48,
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.52,
                     color, 1, cv2.LINE_AA)
+
+
+def _depth_mean_diff(d1: np.ndarray, d2: np.ndarray) -> float:
+    """Compute mean absolute difference between valid depth pixels in two frames (m)."""
+    mask = (d1 > 0) & (d2 > 0)
+    if not np.any(mask):
+        return 0.0
+    return float(np.mean(np.abs(d1[mask] - d2[mask])))
 
 
 class ScanPipeline:
@@ -124,38 +131,43 @@ class ScanPipeline:
 
     def capture_frames(self) -> list[o3d.geometry.PointCloud]:
         """
-        Live camera capture loop — automatically captures frames at a fixed interval.
+        Live camera capture loop — returns a list of raw per-frame PointClouds.
 
         Controls:
+          AUTO-CAPTURE: continuously captures frames at cfg.camera.capture_interval_s
+          SPACE  — capture current frame (when manual capture is enabled)
           ENTER  — finish capture (requires ≥ 2 frames)
           ESC    — abort (raises KeyboardInterrupt)
-          SPACE  — force immediate capture (optional)
 
         Returns
         -------
         list[o3d.geometry.PointCloud]
             Raw point clouds, one per captured frame, in capture order.
         """
-        interval_s = self.cfg.camera.capture_interval_s
         cam = RealSenseCamera(self.cfg.camera).start()
         raw_frames: list[o3d.geometry.PointCloud] = []
 
         print("\n" + "=" * 60)
         print("  Stage 1: Capture")
-        print(f"  Auto-capturing every {interval_s:.2f}s | ENTER = finish | ESC = abort")
+        if self.cfg.camera.auto_capture:
+            print(f"  AUTO-CAPTURE: move camera around object (interval: "
+                  f"{self.cfg.camera.capture_interval_s:.2f}s)")
+            print("  ENTER = finish (requires 2+ frames) | ESC = abort")
+        else:
+            print("  MANUAL CAPTURE: SPACE = capture frame | ENTER = finish | ESC = abort")
         print("=" * 60)
 
-        try:
-            last_n_pts = 0  # point count of the most recently captured cloud
-            next_capture_time = time.perf_counter()  # capture first frame immediately
+        start_capture_time = time.time()
+        last_capture_time = 0.0  # triggers capture on the first valid frame
+        last_captured_depth: np.ndarray | None = None
+        last_skip_warn_time = 0.0
+        last_n_pts = 0  # point count of the most recently captured cloud
 
+        try:
             while True:
                 color_bgr, depth_m, depth_color = cam.read_with_colorized()
                 if color_bgr is None or depth_m is None:
                     continue  # dropped frame — just retry
-
-                now = time.perf_counter()
-                time_until_next = max(0.0, next_capture_time - now)
 
                 # depth_color is the SDK-colorized BGR image (VISUALIZATION ONLY).
                 # depth_m is the raw float32 metres array (used for point cloud).
@@ -176,36 +188,58 @@ class ScanPipeline:
                     n_pts=last_n_pts,
                     vis_min_m=self.cfg.camera.depth_vis.visual_min_m,
                     vis_max_m=self.cfg.camera.depth_vis.visual_max_m,
-                    interval_s=interval_s,
-                    time_until_next_s=time_until_next,
+                    auto_capture=self.cfg.camera.auto_capture,
                 )
 
                 preview = np.hstack([color_bgr, depth_panel])
                 cv2.imshow("Stage 1: D455f Capture (RGB | Depth)", preview)
                 key = cv2.waitKey(1) & 0xFF
 
-                # ---- Timed auto-capture & key handling ------------------
-                should_capture = False
-                if now >= next_capture_time:
-                    should_capture = True
-                    next_capture_time = max(next_capture_time + interval_s, now + interval_s)
-                elif key == 32:  # SPACE — manual force capture
-                    should_capture = True
-                    next_capture_time = now + interval_s
+                now = time.time()
 
-                if should_capture:
+                # ---- Auto-capture logic --------------------------------
+                if self.cfg.camera.auto_capture:
+                    if now - last_capture_time >= self.cfg.camera.capture_interval_s:
+                        is_duplicate = False
+                        if (self.cfg.camera.skip_near_duplicate_frames
+                                and last_captured_depth is not None):
+                            diff_m = _depth_mean_diff(depth_m, last_captured_depth)
+                            if diff_m < self.cfg.camera.duplicate_depth_diff_threshold_m:
+                                is_duplicate = True
+
+                        if is_duplicate:
+                            if now - last_skip_warn_time >= 1.0:
+                                print("  ... camera hasn't moved enough, still waiting ...")
+                                last_skip_warn_time = now
+                        else:
+                            pcd = cam.to_point_cloud(color_bgr, depth_m)
+                            raw_frames.append(pcd)
+                            last_n_pts = len(pcd.points)
+                            last_capture_time = now
+                            last_captured_depth = depth_m.copy()
+                            print(f"  Captured frame {len(raw_frames):2d}: "
+                                  f"{last_n_pts:>7} raw points")
+
+                # ---- Manual capture handling ---------------------------
+                elif key == 32:  # SPACE — manual capture
                     pcd = cam.to_point_cloud(color_bgr, depth_m)
                     raw_frames.append(pcd)
                     last_n_pts = len(pcd.points)
+                    last_captured_depth = depth_m.copy()
                     print(f"  Captured frame {len(raw_frames):2d}: "
                           f"{last_n_pts:>7} raw points")
 
+                # ---- Finish / Abort keys -------------------------------
                 if key == 13:  # ENTER — finish
                     if len(raw_frames) < 2:
-                        print("  [!] Need at least 2 frames before finishing. "
+                        print("  ⚠  Need at least 2 frames before finishing. "
                               "Keep capturing.")
                     else:
-                        print(f"  Capture complete -- {len(raw_frames)} frames.")
+                        elapsed = time.time() - start_capture_time
+                        n_frames = len(raw_frames)
+                        avg_interval = elapsed / n_frames if n_frames > 0 else 0.0
+                        print(f"\n  Capture complete — {n_frames} frames captured in "
+                              f"{elapsed:.1f}s (effective avg interval: {avg_interval:.2f}s/frame).")
                         break
 
                 elif key == 27:  # ESC — abort
@@ -344,7 +378,7 @@ class ScanPipeline:
             display = fused.__copy__() if hasattr(fused, "__copy__") else fused
             display_pcd = o3d.geometry.PointCloud(fused)
             display_pcd.paint_uniform_color([0.65, 0.65, 0.65])  # flat grey
-            show([display_pcd], window_name="Stage 4: fused reconstruction")
+            show(display_pcd, window_name="Stage 4: fused reconstruction")
 
         if self.cfg.save_intermediate:
             out = self.cfg.output_dir / "fused.ply"
@@ -392,7 +426,7 @@ class ScanPipeline:
         print(f"  Length : {obb_info.get('length_m', 0) * 1000:.1f} mm")
         print(f"  Width  : {obb_info.get('width_m',  0) * 1000:.1f} mm")
         print(f"  Height : {obb_info.get('height_m', 0) * 1000:.1f} mm")
-        print(f"  Volume : {obb_info.get('volume_m3', 0) * 1e6:.1f} cm3")
+        print(f"  Volume : {obb_info.get('volume_m3', 0) * 1e6:.1f} cm^3")
         aabb_ext = result.get("axis_aligned_bbox_extent_m", [])
         if aabb_ext:
             ext_mm = [f"{v * 1000:.1f}" for v in aabb_ext]

@@ -10,7 +10,7 @@ The pipeline runs five sequential stages:
 
 | Stage | What happens |
 |---|---|
-| **1. Capture** | Live camera feed shown on screen; automatically grabs frames at configurable intervals, ENTER to finish |
+| **1. Capture** | Live camera feed with automatic timer-based capture as camera moves; ENTER to finish |
 | **2. Isolate** | Each raw frame is denoised, the dominant plane (table/background) is removed, and the largest cluster (the object) is kept |
 | **3. Register** | All isolated frames are aligned into one coordinate system using FPFH feature matching + RANSAC for the global pose, then refined with point-to-plane ICP |
 | **4. Fuse** | All aligned frames are merged into one dense point cloud, then cleaned again |
@@ -35,8 +35,14 @@ pip install -r requirements.txt
 ## Usage
 
 ```bash
-# Scan a box with default settings (Open3D stage windows enabled, 4 mm voxel)
+# Scan a box with default auto-capture (every 3.0s, Open3D stage windows enabled)
 python main.py
+
+# Faster automatic capture interval (e.g. every 1.5s)
+python main.py --interval 1.5
+
+# Manual SPACE-triggered capture
+python main.py --manual-capture
 
 # Specify target type and output directory
 python main.py --target box --out my_scan
@@ -46,17 +52,14 @@ python main.py --no-viz
 
 # Use a finer voxel grid for higher-detail scans (slower)
 python main.py --voxel 0.003
-
-# Change automatic frame capture interval (e.g. 0.5s or 2.0s)
-python main.py --interval 0.5
 ```
 
 ### Capture controls
 
-| Key | Action |
+| Mode / Key | Action |
 |---|---|
-| *(Timer)* | Frames are captured automatically at `capture_interval_s` (default 3.0s) |
-| `SPACE` | Force immediate capture of current frame |
+| **Auto-capture** *(default)* | Move camera around object; frames are captured automatically at the configured interval (skips near-duplicates) |
+| `SPACE` | Capture the current frame manually (when `--manual-capture` is enabled) |
 | `ENTER` | Finish capture and start processing (requires ≥ 2 frames) |
 | `ESC` | Abort the scan |
 

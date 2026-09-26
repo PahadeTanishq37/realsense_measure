@@ -177,7 +177,7 @@ def main() -> None:
     np.random.seed(7)
 
     print("=" * 60)
-    print("  realsense_measure — synthetic end-to-end test")
+    print("  realsense_measure -- synthetic end-to-end test")
     print(f"  Ground truth:  L={TRUE_L*1000:.1f} mm  "
           f"W={TRUE_W*1000:.1f} mm  H={TRUE_H*1000:.1f} mm")
     print("=" * 60)
@@ -259,8 +259,8 @@ def main() -> None:
     for lbl, gt, rc, err in zip(labels, true_dims, rec_dims, errors_mm):
         print(f"  {lbl:<8} {gt*1000:>11.1f} mm  {rc*1000:>9.1f} mm  {err:>7.2f} mm")
 
-    print(f"\n  Volume: {obb_info['volume_m3']*1e6:.1f} cm3  "
-          f"(true: {TRUE_L*TRUE_W*TRUE_H*1e6:.1f} cm3)")
+    print(f"\n  Volume: {obb_info['volume_m3']*1e6:.1f} cm^3  "
+          f"(true: {TRUE_L*TRUE_W*TRUE_H*1e6:.1f} cm^3)")
 
     # ---- assertion -------------------------------------------------------
     # 15 mm tolerance reflects realistic accumulated error from simulated
