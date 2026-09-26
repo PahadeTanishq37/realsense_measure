@@ -128,9 +128,14 @@ class PreprocessConfig:
 class RegistrationConfig:
     """Multi-view point-cloud registration (FPFH + RANSAC → ICP) settings."""
 
-    # Voxel size used when computing FPFH features (slightly coarser than
-    # the preprocessing voxel so features span a meaningful neighbourhood).
-    voxel_size_m: float = 0.005
+    # Voxel size used when computing FPFH features.
+    # Set to 3 mm (denser points feeding feature extraction and matching —
+    # trades some speed for significantly better correspondence counts on low-texture objects).
+    voxel_size_m: float = 0.003
+
+    # FPFH search radius multipliers (relative to voxel_size_m)
+    fpfh_radius_normal_mult: float = 2.0
+    fpfh_radius_feature_mult: float = 8.0   # 8x voxel size captures wider surface context
 
     # RANSAC global registration
     ransac_distance_mult: float = 1.5       # × voxel_size_m → correspondence dist

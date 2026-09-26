@@ -63,6 +63,7 @@ from config import RegistrationConfig
 def _prepare(
     pcd: o3d.geometry.PointCloud,
     voxel_size: float,
+    cfg: RegistrationConfig,
 ) -> tuple[o3d.geometry.PointCloud, o3d.pipelines.registration.Feature]:
     """
     Downsample, estimate normals and compute FPFH features.
@@ -74,6 +75,8 @@ def _prepare(
     voxel_size:
         Voxel size in metres used for downsampling and as the scale
         reference for normal/feature search radii.
+    cfg:
+        Registration configuration with normal and feature radius multipliers.
 
     Returns
     -------
@@ -86,7 +89,7 @@ def _prepare(
 
     down.estimate_normals(
         o3d.geometry.KDTreeSearchParamHybrid(
-            radius=voxel_size * 2,
+            radius=voxel_size * cfg.fpfh_radius_normal_mult,
             max_nn=30,
         )
     )
@@ -94,7 +97,7 @@ def _prepare(
     fpfh = o3d.pipelines.registration.compute_fpfh_feature(
         down,
         o3d.geometry.KDTreeSearchParamHybrid(
-            radius=voxel_size * 5,
+            radius=voxel_size * cfg.fpfh_radius_feature_mult,
             max_nn=100,
         ),
     )
@@ -134,12 +137,16 @@ def _global_register(
     """
     distance_threshold = voxel_size * cfg.ransac_distance_mult
 
+    # mutual_filter=False: Open3D silently falls back to non-mutual correspondences
+    # when the mutual-filtered set is too small, which produces a console warning.
+    # Setting mutual_filter to False directly avoids that redundant first attempt,
+    # eliminates the warning, and is faster with equivalent alignment quality.
     return registration_ransac_based_on_feature_matching(
         source_down,
         target_down,
         source_fpfh,
         target_fpfh,
-        mutual_filter=True,
+        mutual_filter=False,
         max_correspondence_distance=distance_threshold,
         estimation_method=TransformationEstimationPointToPoint(False),
         ransac_n=3,
@@ -254,8 +261,8 @@ def register_frame_pair(
     # 2. Slow / thorough path: full FPFH + RANSAC global registration -> ICP
     voxel_size = cfg.voxel_size_m
 
-    source_down, source_fpfh = _prepare(source, voxel_size)
-    target_down, target_fpfh = _prepare(target, voxel_size)
+    source_down, source_fpfh = _prepare(source, voxel_size, cfg)
+    target_down, target_fpfh = _prepare(target, voxel_size, cfg)
 
     global_result = _global_register(
         source_down, target_down,
