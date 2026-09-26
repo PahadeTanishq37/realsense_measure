@@ -10,7 +10,7 @@ The pipeline runs five sequential stages:
 
 | Stage | What happens |
 |---|---|
-| **1. Capture** | Live camera feed shown on screen; press SPACE to grab a frame, ENTER to finish |
+| **1. Capture** | Live camera feed shown on screen; automatically grabs frames at configurable intervals, ENTER to finish |
 | **2. Isolate** | Each raw frame is denoised, the dominant plane (table/background) is removed, and the largest cluster (the object) is kept |
 | **3. Register** | All isolated frames are aligned into one coordinate system using FPFH feature matching + RANSAC for the global pose, then refined with point-to-plane ICP |
 | **4. Fuse** | All aligned frames are merged into one dense point cloud, then cleaned again |
@@ -52,7 +52,8 @@ python main.py --voxel 0.003
 
 | Key | Action |
 |---|---|
-| `SPACE` | Capture the current frame |
+| *(Timer)* | Frames are captured automatically at `capture_interval_s` (default 0.1s) |
+| `SPACE` | Force immediate capture of current frame |
 | `ENTER` | Finish capture and start processing (requires ≥ 2 frames) |
 | `ESC` | Abort the scan |
 

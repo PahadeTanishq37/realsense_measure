@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import time
 
 import cv2
 import numpy as np
@@ -32,6 +33,8 @@ def _draw_hud(
     n_pts: int,
     vis_min_m: float,
     vis_max_m: float,
+    interval_s: float = 0.1,
+    time_until_next_s: float = 0.0,
 ) -> None:
     """
     Render the D455f status HUD onto the depth panel in-place.
@@ -52,6 +55,10 @@ def _draw_hud(
         (0 if no frame captured yet).
     vis_min_m, vis_max_m:
         Configured visualization range (from DepthVisConfig).
+    interval_s:
+        Configured auto-capture interval in seconds.
+    time_until_next_s:
+        Time in seconds until next scheduled auto-capture.
     """
     valid = depth_m[depth_m > 0]
     n_valid   = int(valid.size)
@@ -60,11 +67,14 @@ def _draw_hud(
     d_max     = float(valid.max())      if n_valid else 0.0
 
     cloud_status = f"{n_pts:,} pts" if n_pts > 0 else "--"
+    countdown_ms = max(0.0, time_until_next_s * 1000.0)
 
     lines = [
         "D455f STATUS",
         "",
         f"Frames captured : {n_frames}",
+        f"Auto-interval   : {interval_s:.2f} s",
+        f"Next capture in : {countdown_ms:4.0f} ms",
         f"Valid depth px  : {n_valid:,}",
         f"Point cloud pts : {cloud_status}",
         "",
@@ -75,20 +85,20 @@ def _draw_hud(
         f"Vis range  min  : {vis_min_m:.2f} m",
         f"Vis range  max  : {vis_max_m:.2f} m",
         "",
-        "SPACE: capture  ENTER: finish (2+)  ESC: abort",
+        "ENTER: finish (2+)  ESC: abort  SPACE: force",
     ]
 
-    y0, dy = 28, 22
+    y0, dy = 26, 20
     for i, line in enumerate(lines):
         y = y0 + i * dy
         # Shadow (readability over any background color)
         cv2.putText(panel, line, (10, y),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.52,
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.48,
                     (0, 0, 0), 3, cv2.LINE_AA)
         # White text
         color = (0, 255, 255) if line == "D455f STATUS" else (255, 255, 255)
         cv2.putText(panel, line, (10, y),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.52,
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.48,
                     color, 1, cv2.LINE_AA)
 
 
@@ -114,32 +124,38 @@ class ScanPipeline:
 
     def capture_frames(self) -> list[o3d.geometry.PointCloud]:
         """
-        Live camera capture loop — returns a list of raw per-frame PointClouds.
+        Live camera capture loop — automatically captures frames at a fixed interval.
 
         Controls:
-          SPACE  — capture current frame
           ENTER  — finish capture (requires ≥ 2 frames)
           ESC    — abort (raises KeyboardInterrupt)
+          SPACE  — force immediate capture (optional)
 
         Returns
         -------
         list[o3d.geometry.PointCloud]
             Raw point clouds, one per captured frame, in capture order.
         """
+        interval_s = self.cfg.camera.capture_interval_s
         cam = RealSenseCamera(self.cfg.camera).start()
         raw_frames: list[o3d.geometry.PointCloud] = []
 
         print("\n" + "=" * 60)
         print("  Stage 1: Capture")
-        print("  SPACE = capture frame | ENTER = finish | ESC = abort")
+        print(f"  Auto-capturing every {interval_s:.2f}s | ENTER = finish | ESC = abort")
         print("=" * 60)
 
         try:
             last_n_pts = 0  # point count of the most recently captured cloud
+            next_capture_time = time.perf_counter()  # capture first frame immediately
+
             while True:
                 color_bgr, depth_m, depth_color = cam.read_with_colorized()
                 if color_bgr is None or depth_m is None:
                     continue  # dropped frame — just retry
+
+                now = time.perf_counter()
+                time_until_next = max(0.0, next_capture_time - now)
 
                 # depth_color is the SDK-colorized BGR image (VISUALIZATION ONLY).
                 # depth_m is the raw float32 metres array (used for point cloud).
@@ -160,26 +176,36 @@ class ScanPipeline:
                     n_pts=last_n_pts,
                     vis_min_m=self.cfg.camera.depth_vis.visual_min_m,
                     vis_max_m=self.cfg.camera.depth_vis.visual_max_m,
+                    interval_s=interval_s,
+                    time_until_next_s=time_until_next,
                 )
 
                 preview = np.hstack([color_bgr, depth_panel])
                 cv2.imshow("Stage 1: D455f Capture (RGB | Depth)", preview)
                 key = cv2.waitKey(1) & 0xFF
 
-                # ---- key handling --------------------------------------
-                if key == 32:  # SPACE — capture frame
+                # ---- Timed auto-capture & key handling ------------------
+                should_capture = False
+                if now >= next_capture_time:
+                    should_capture = True
+                    next_capture_time = max(next_capture_time + interval_s, now + interval_s)
+                elif key == 32:  # SPACE — manual force capture
+                    should_capture = True
+                    next_capture_time = now + interval_s
+
+                if should_capture:
                     pcd = cam.to_point_cloud(color_bgr, depth_m)
                     raw_frames.append(pcd)
                     last_n_pts = len(pcd.points)
                     print(f"  Captured frame {len(raw_frames):2d}: "
                           f"{last_n_pts:>7} raw points")
 
-                elif key == 13:  # ENTER — finish
+                if key == 13:  # ENTER — finish
                     if len(raw_frames) < 2:
-                        print("  ⚠  Need at least 2 frames before finishing. "
+                        print("  [!] Need at least 2 frames before finishing. "
                               "Keep capturing.")
                     else:
-                        print(f"  Capture complete — {len(raw_frames)} frames.")
+                        print(f"  Capture complete -- {len(raw_frames)} frames.")
                         break
 
                 elif key == 27:  # ESC — abort
@@ -214,7 +240,7 @@ class ScanPipeline:
             Isolated, cleaned per-frame object clouds.
         """
         print("\n" + "=" * 60)
-        print("  Stage 2: Isolating object per frame …")
+        print("  Stage 2: Isolating object per frame ...")
         print("=" * 60)
 
         pre_cfg = self.cfg.preprocess
@@ -224,7 +250,7 @@ class ScanPipeline:
             n_before = len(frame.points)
             iso = isolate_object(frame, pre_cfg)
             n_after = len(iso.points)
-            print(f"  frame {i:02d}: {n_before:>7} pts → {n_after:>6} pts")
+            print(f"  frame {i:02d}: {n_before:>7} pts -> {n_after:>6} pts")
             isolated.append(iso)
 
         if self.cfg.show_stage_windows:
@@ -266,7 +292,7 @@ class ScanPipeline:
             All frames expressed in frame-0 coordinates.
         """
         print("\n" + "=" * 60)
-        print("  Stage 3: Registering frames (FPFH+RANSAC → ICP) …")
+        print("  Stage 3: Registering frames (FPFH+RANSAC -> ICP) ...")
         print("=" * 60)
 
         aligned, diagnostics = register_sequence(isolated_frames, self.cfg.registration)
@@ -274,7 +300,7 @@ class ScanPipeline:
         for i, (fitness, rmse) in enumerate(diagnostics):
             note = ""
             if i > 0 and fitness <= 0.3:
-                note = "  ⚠  weak alignment — consider recapturing this angle"
+                note = "  [!] weak alignment -- consider recapturing this angle"
             print(f"  frame {i:02d}: fitness={fitness:.4f}  "
                   f"rmse={rmse * 1000:.3f} mm{note}")
 
@@ -308,7 +334,7 @@ class ScanPipeline:
             Fused, denoised reconstruction.
         """
         print("\n" + "=" * 60)
-        print("  Stage 4: Fusing aligned frames …")
+        print("  Stage 4: Fusing aligned frames ...")
         print("=" * 60)
 
         fused = fuse_point_clouds(aligned_frames, self.cfg.preprocess)
@@ -349,7 +375,7 @@ class ScanPipeline:
             JSON-serialisable measurement result.
         """
         print("\n" + "=" * 60)
-        print("  Stage 5: Segmenting and measuring …")
+        print("  Stage 5: Segmenting and measuring ...")
         print("=" * 60)
 
         segmented = self.target.segment(fused_pcd)
@@ -366,11 +392,11 @@ class ScanPipeline:
         print(f"  Length : {obb_info.get('length_m', 0) * 1000:.1f} mm")
         print(f"  Width  : {obb_info.get('width_m',  0) * 1000:.1f} mm")
         print(f"  Height : {obb_info.get('height_m', 0) * 1000:.1f} mm")
-        print(f"  Volume : {obb_info.get('volume_m3', 0) * 1e6:.1f} cm³")
+        print(f"  Volume : {obb_info.get('volume_m3', 0) * 1e6:.1f} cm3")
         aabb_ext = result.get("axis_aligned_bbox_extent_m", [])
         if aabb_ext:
             ext_mm = [f"{v * 1000:.1f}" for v in aabb_ext]
-            print(f"  AABB   : {' × '.join(ext_mm)} mm (axis-aligned reference)")
+            print(f"  AABB   : {' x '.join(ext_mm)} mm (axis-aligned reference)")
 
         if self.cfg.show_stage_windows and obb is not None:
             seg_display = o3d.geometry.PointCloud(segmented)

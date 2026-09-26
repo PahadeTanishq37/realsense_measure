@@ -215,29 +215,29 @@ def main() -> None:
 
     # ---- preprocessing: isolate the object per frame ---------------------
     pre_cfg = PreprocessConfig()
-    print(f"\n[1/4] Isolating object in {len(raw_frames)} frames …")
+    print(f"\n[1/4] Isolating object in {len(raw_frames)} frames ...")
     isolated_frames: list[o3d.geometry.PointCloud] = []
     for i, frame in enumerate(raw_frames):
         n_before = len(frame.points)
         iso = isolate_object(frame, pre_cfg)
         n_after = len(iso.points)
-        print(f"  frame {i}: {n_before:>6} pts  →  {n_after:>5} pts after isolation")
+        print(f"  frame {i}: {n_before:>6} pts  ->  {n_after:>5} pts after isolation")
         isolated_frames.append(iso)
 
     # ---- registration: align all frames into one coordinate system -------
     reg_cfg = RegistrationConfig()
-    print(f"\n[2/4] Registering sequence (growing-reference) …")
+    print(f"\n[2/4] Registering sequence (growing-reference) ...")
     aligned_frames, diagnostics = register_sequence(isolated_frames, reg_cfg)
     for i, (fitness, rmse) in enumerate(diagnostics):
         print(f"  frame {i}: fitness={fitness:.4f}  rmse={rmse*1000:.3f} mm")
 
     # ---- fusion: merge all aligned frames --------------------------------
-    print(f"\n[3/4] Fusing {len(aligned_frames)} aligned frames …")
+    print(f"\n[3/4] Fusing {len(aligned_frames)} aligned frames ...")
     fused = fuse_point_clouds(aligned_frames, pre_cfg)
     print(f"  fused cloud: {len(fused.points)} points")
 
     # ---- measurement -----------------------------------------------------
-    print("\n[4/4] Segmenting and measuring …")
+    print("\n[4/4] Segmenting and measuring ...")
     target = BoxTarget(preprocess_cfg=pre_cfg)
     segmented = target.segment(fused)
     print(f"  segmented cloud: {len(segmented.points)} points")
@@ -245,39 +245,39 @@ def main() -> None:
     result = target.measure(segmented)
     obb_info = result["oriented_bbox"]
 
-    # Recovered dims are already sorted longest→shortest by BoxTarget.measure
+    # Recovered dims are already sorted longest->shortest by BoxTarget.measure
     rec_dims  = np.array([obb_info["length_m"], obb_info["width_m"], obb_info["height_m"]])
     true_dims = np.sort([TRUE_L, TRUE_W, TRUE_H])[::-1]   # match same ordering
 
     errors_m  = np.abs(rec_dims - true_dims)
     errors_mm = errors_m * 1000.0
 
-    print("\n  Dimension comparison (sorted L→W→H):")
+    print("\n  Dimension comparison (sorted L->W->H):")
     print(f"  {'Axis':<8} {'Ground truth':>14} {'Recovered':>12} {'Error':>10}")
     print(f"  {'-'*46}")
     labels = ["Length", "Width ", "Height"]
     for lbl, gt, rc, err in zip(labels, true_dims, rec_dims, errors_mm):
         print(f"  {lbl:<8} {gt*1000:>11.1f} mm  {rc*1000:>9.1f} mm  {err:>7.2f} mm")
 
-    print(f"\n  Volume: {obb_info['volume_m3']*1e6:.1f} cm³  "
-          f"(true: {TRUE_L*TRUE_W*TRUE_H*1e6:.1f} cm³)")
+    print(f"\n  Volume: {obb_info['volume_m3']*1e6:.1f} cm3  "
+          f"(true: {TRUE_L*TRUE_W*TRUE_H*1e6:.1f} cm3)")
 
     # ---- assertion -------------------------------------------------------
     # 15 mm tolerance reflects realistic accumulated error from simulated
-    # sensor noise (1.5 mm σ) + registration residuals, not an exact match.
+    # sensor noise (1.5 mm sigma) + registration residuals, not an exact match.
     TOLERANCE_M = 0.015
     passed = bool(np.all(errors_m < TOLERANCE_M))
 
     print()
     if passed:
-        print("RESULT: PASS  ✓  (all axes within 15 mm of ground truth)")
+        print("RESULT: PASS  [OK]  (all axes within 15 mm of ground truth)")
     else:
         failing = [
             f"{lbl.strip()} error={err:.2f} mm"
             for lbl, err in zip(labels, errors_mm)
             if err / 1000.0 >= TOLERANCE_M
         ]
-        print(f"RESULT: FAIL  ✗  — axis error(s) exceed 15 mm: {', '.join(failing)}")
+        print(f"RESULT: FAIL  [X]  -- axis error(s) exceed 15 mm: {', '.join(failing)}")
 
     print("=" * 60)
 

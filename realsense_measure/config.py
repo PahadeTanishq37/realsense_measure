@@ -70,6 +70,9 @@ class CameraConfig:
     height: int = 480
     fps: int = 30
 
+    # Auto-capture interval in seconds (timed continuous capture)
+    capture_interval_s: float = 0.1
+
     # Post-processing filters (applied in order: decimation → spatial →
     # temporal → hole-filling)
     use_decimation: bool = True
