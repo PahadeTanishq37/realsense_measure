@@ -6,13 +6,13 @@ Context
 Frames are captured from a single FIXED camera while the operator rotates or
 repositions the object by hand between shots.  There is no known relative
 transform between frames, and inter-frame rotations can be large and
-arbitrary — so plain ICP with an identity initial guess will fail.
+arbitrary -- so plain ICP with an identity initial guess will fail.
 
 Two-stage registration is used for every frame pair:
 
-  1. **Global registration** (FPFH + RANSAC) — produces a coarse but
+  1. **Global registration** (FPFH + RANSAC) -- produces a coarse but
      rotation-agnostic initial alignment with no initial guess required.
-  2. **Point-to-plane ICP** — refines the coarse alignment to sub-millimetre
+  2. **Point-to-plane ICP** -- refines the coarse alignment to sub-millimetre
      accuracy using the RANSAC result as its starting pose.
 
 Growing-reference design
@@ -21,13 +21,13 @@ The *most important* design choice in this file is that frames are NOT all
 registered independently back to frame 0.  Instead they are accumulated onto
 a **growing reference cloud**:
 
-  reference ← frame[0]
-  for i in 1 … N:
+  reference <- frame[0]
+  for i in 1 ... N:
       transform frame[i] onto reference
       append transformed frame[i] to reference
       voxel-downsample reference  (keep it manageable)
 
-Why this matters: frame 0 is a single partial view that covers at most ~180°
+Why this matters: frame 0 is a single partial view that covers at most ~180 deg
 of the object surface.  Registering every subsequent frame against that one
 partial view means later frames have very little overlap to match against,
 especially if they show a previously-unseen side.  By growing the reference
@@ -266,14 +266,20 @@ def register_against_candidates(
     consecutive frames have small motion between them, e.g. from
     auto-capture) OR the full accumulated reference (best when a frame
     doesn't overlap much with just the last frame but does overlap with
-    earlier accumulated geometry) — whichever actually works for that
+    earlier accumulated geometry) -- whichever actually works for that
     particular frame.
     """
+    if new_frame is None or len(new_frame.points) < 10:
+        return None
+
     best: tuple[np.ndarray, float, float] | None = None
     for candidate in candidates:
-        if candidate is None or len(candidate.points) == 0:
+        if candidate is None or len(candidate.points) < 10:
             continue
-        transform, fitness, rmse = register_frame_pair(new_frame, candidate, cfg)
+        try:
+            transform, fitness, rmse = register_frame_pair(new_frame, candidate, cfg)
+        except Exception:
+            continue
         if best is None or fitness > best[1]:
             best = (transform, fitness, rmse)
     return best
