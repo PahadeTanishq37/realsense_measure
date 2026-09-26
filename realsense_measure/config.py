@@ -71,7 +71,7 @@ class CameraConfig:
     fps: int = 30
 
     # Auto-capture interval in seconds (timed continuous capture)
-    capture_interval_s: float = 1.0
+    capture_interval_s: float = 3.0
 
     # Post-processing filters (applied in order: decimation → spatial →
     # temporal → hole-filling)
@@ -120,7 +120,6 @@ class PreprocessConfig:
 # ---------------------------------------------------------------------------
 # Stage: Registration
 # ---------------------------------------------------------------------------
-
 @dataclass
 class RegistrationConfig:
     """Multi-view point-cloud registration (FPFH + RANSAC → ICP) settings."""
