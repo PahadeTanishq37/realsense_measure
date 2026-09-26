@@ -25,6 +25,23 @@ import targets.box  # noqa: F401 — registers BoxTarget via @register_target
 from visualizer import color_frames_distinctly, obb_lineset, show
 
 
+def _depth_to_display(depth_m: np.ndarray, near_m: float, far_m: float) -> np.ndarray:
+    """
+    Maps a raw depth frame (in meters) to a BGR image using OpenCV's JET
+    colormap, so the displayed gradient reads as:
+        near -> blue -> green -> yellow -> orange -> red -> far
+    Pixels with no valid depth reading (value <= 0) are rendered pure black,
+    not colored, so they're clearly distinguishable from "very near."
+    """
+    valid = depth_m > 0
+    clipped = np.clip(depth_m, near_m, far_m)
+    # normalize the ACTUAL near..far range to 0..255, not 0..far
+    normalized = ((clipped - near_m) / max(far_m - near_m, 1e-6) * 255.0).astype(np.uint8)
+    colored = cv2.applyColorMap(normalized, cv2.COLORMAP_JET)
+    colored[~valid] = (0, 0, 0)  # black out pixels with no depth data
+    return colored
+
+
 class ScanPipeline:
     """
     End-to-end orchestration of a multi-view box measurement scan.
@@ -74,11 +91,11 @@ class ScanPipeline:
                     continue  # dropped frame — just retry
 
                 # ---- depth colourmap for side-by-side preview ----------
-                depth_abs = cv2.convertScaleAbs(
+                depth_color = _depth_to_display(
                     depth_m,
-                    alpha=255.0 / self.cfg.camera.depth_max_m,
+                    self.cfg.camera.depth_min_m,
+                    self.cfg.camera.depth_max_m,
                 )
-                depth_color = cv2.applyColorMap(depth_abs, cv2.COLORMAP_JET)
 
                 # Make both the same height before stacking (decimation might
                 # have changed the depth resolution before the read() resize).
