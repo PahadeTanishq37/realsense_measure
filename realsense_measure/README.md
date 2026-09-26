@@ -55,7 +55,7 @@ python main.py --interval 0.5
 
 | Key | Action |
 |---|---|
-| *(Timer)* | Frames are captured automatically at `capture_interval_s` (default 1.0s) |
+| *(Timer)* | Frames are captured automatically at `capture_interval_s` (default 3.0s) |
 | `SPACE` | Force immediate capture of current frame |
 | `ENTER` | Finish capture and start processing (requires ≥ 2 frames) |
 | `ESC` | Abort the scan |

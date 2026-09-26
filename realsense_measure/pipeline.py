@@ -33,7 +33,7 @@ def _draw_hud(
     n_pts: int,
     vis_min_m: float,
     vis_max_m: float,
-    interval_s: float = 1.0,
+    interval_s: float = 3.0,
     time_until_next_s: float = 0.0,
 ) -> None:
     """
@@ -344,7 +344,7 @@ class ScanPipeline:
             display = fused.__copy__() if hasattr(fused, "__copy__") else fused
             display_pcd = o3d.geometry.PointCloud(fused)
             display_pcd.paint_uniform_color([0.65, 0.65, 0.65])  # flat grey
-            show(display_pcd, window_name="Stage 4: fused reconstruction")
+            show([display_pcd], window_name="Stage 4: fused reconstruction")
 
         if self.cfg.save_intermediate:
             out = self.cfg.output_dir / "fused.ply"
