@@ -253,16 +253,47 @@ def register_frame_pair(
     )
 
 
+def register_against_candidates(
+    new_frame: o3d.geometry.PointCloud,
+    candidates: list[o3d.geometry.PointCloud | None],
+    cfg: RegistrationConfig,
+) -> tuple[np.ndarray, float, float] | None:
+    """
+    Tries registering `new_frame` against each candidate reference cloud
+    in `candidates` (in order), returning the (transform, fitness, rmse)
+    from whichever candidate produced the BEST fitness. This lets a frame
+    succeed by matching either the immediately preceding frame (best when
+    consecutive frames have small motion between them, e.g. from
+    auto-capture) OR the full accumulated reference (best when a frame
+    doesn't overlap much with just the last frame but does overlap with
+    earlier accumulated geometry) — whichever actually works for that
+    particular frame.
+    """
+    best: tuple[np.ndarray, float, float] | None = None
+    for candidate in candidates:
+        if candidate is None or len(candidate.points) == 0:
+            continue
+        transform, fitness, rmse = register_frame_pair(new_frame, candidate, cfg)
+        if best is None or fitness > best[1]:
+            best = (transform, fitness, rmse)
+    return best
+
+
 def register_sequence(
     frames: list[o3d.geometry.PointCloud],
     cfg: RegistrationConfig,
-) -> tuple[list[o3d.geometry.PointCloud], list[tuple[float, float]]]:
+) -> tuple[list[o3d.geometry.PointCloud], list[tuple[float, float, bool]]]:
     """
     Register a sequence of per-frame object clouds into one coordinate system.
 
-    Uses a **growing reference** strategy (see module docstring).  Frame 0
-    becomes the reference; each subsequent frame is aligned onto the current
-    reference and then merged into it before the next frame is processed.
+    Uses a multi-candidate growing reference strategy with acceptance gating:
+    - Frame 0 becomes the initial reference and last aligned frame.
+    - Each subsequent frame is matched against [last_aligned_frame, reference]
+      and picks the candidate alignment with the highest fitness.
+    - If fitness >= cfg.min_accept_fitness, the frame is marked as accepted,
+      updates last_aligned_frame, and is merged into reference.
+    - If fitness < cfg.min_accept_fitness, the frame is rejected from the
+      reference to prevent poisoning subsequent alignments.
 
     Parameters
     ----------
@@ -276,30 +307,35 @@ def register_sequence(
     aligned:
         List of point clouds, all expressed in frame-0 coordinates.
     diagnostics:
-        List of ``(fitness, rmse)`` tuples, one per frame.
-        Frame 0 always gets ``(1.0, 0.0)`` since it is the reference itself.
+        List of ``(fitness, rmse, accepted)`` tuples, one per frame.
+        Frame 0 always gets ``(1.0, 0.0, True)``.
     """
     if not frames:
         return [], []
 
     aligned: list[o3d.geometry.PointCloud] = [copy.deepcopy(frames[0])]
-    diagnostics: list[tuple[float, float]] = [(1.0, 0.0)]
-
-    # Seed the growing reference with frame 0.
     reference = copy.deepcopy(frames[0])
+    last_aligned_frame = copy.deepcopy(frames[0])
+    diagnostics: list[tuple[float, float, bool]] = [(1.0, 0.0, True)]
 
-    for i, frame in enumerate(frames[1:], start=1):
-        transform, fitness, rmse = register_frame_pair(frame, reference, cfg)
+    for i in range(1, len(frames)):
+        candidates = [last_aligned_frame, reference]
+        result = register_against_candidates(frames[i], candidates, cfg)
+        if result is None:
+            aligned.append(copy.deepcopy(frames[i]))
+            diagnostics.append((0.0, float("inf"), False))
+            continue
 
-        # Move the frame into the shared coordinate system.
-        aligned_frame = copy.deepcopy(frame)
-        aligned_frame.transform(transform)
+        transform, fitness, rmse = result
+        moved = copy.deepcopy(frames[i]).transform(transform)
+        aligned.append(moved)
 
-        aligned.append(aligned_frame)
-        diagnostics.append((fitness, rmse))
+        accepted = bool(fitness >= cfg.min_accept_fitness)
+        diagnostics.append((fitness, rmse, accepted))
 
-        # Grow the reference: merge + voxel-downsample to keep it manageable.
-        reference += aligned_frame
-        reference = reference.voxel_down_sample(cfg.voxel_size_m)
+        if accepted:
+            last_aligned_frame = moved
+            reference = reference + moved
+            reference = reference.voxel_down_sample(cfg.voxel_size_m)
 
     return aligned, diagnostics

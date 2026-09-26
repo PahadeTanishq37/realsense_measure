@@ -141,6 +141,10 @@ class RegistrationConfig:
     icp_max_dist_m: float = 0.01            # max correspondence distance
     icp_max_iterations: int = 100
 
+    # Acceptance threshold: frames with fitness below this are considered
+    # unreliable, excluded from fusion, and not merged into the growing reference.
+    min_accept_fitness: float = 0.35
+
 
 # ---------------------------------------------------------------------------
 # Stage: Target

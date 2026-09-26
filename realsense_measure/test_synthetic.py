@@ -226,14 +226,16 @@ def main() -> None:
 
     # ---- registration: align all frames into one coordinate system -------
     reg_cfg = RegistrationConfig()
-    print(f"\n[2/4] Registering sequence (growing-reference) ...")
+    print(f"\n[2/4] Registering sequence (candidate matching) ...")
     aligned_frames, diagnostics = register_sequence(isolated_frames, reg_cfg)
-    for i, (fitness, rmse) in enumerate(diagnostics):
-        print(f"  frame {i}: fitness={fitness:.4f}  rmse={rmse*1000:.3f} mm")
+    for i, (fitness, rmse, accepted) in enumerate(diagnostics):
+        status = "ACCEPTED" if accepted else "REJECTED"
+        print(f"  frame {i}: fitness={fitness:.4f}  rmse={rmse*1000:.3f} mm  {status}")
 
-    # ---- fusion: merge all aligned frames --------------------------------
-    print(f"\n[3/4] Fusing {len(aligned_frames)} aligned frames ...")
-    fused = fuse_point_clouds(aligned_frames, pre_cfg)
+    # ---- fusion: merge all accepted aligned frames -----------------------
+    accepted_frames = [f for f, (*_, acc) in zip(aligned_frames, diagnostics) if acc]
+    print(f"\n[3/4] Fusing {len(accepted_frames)} accepted aligned frames ...")
+    fused = fuse_point_clouds(accepted_frames, pre_cfg)
     print(f"  fused cloud: {len(fused.points)} points")
 
     # ---- measurement -----------------------------------------------------

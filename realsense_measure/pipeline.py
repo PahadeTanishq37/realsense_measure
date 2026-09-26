@@ -308,12 +308,12 @@ class ScanPipeline:
     def register(
         self,
         isolated_frames: list[o3d.geometry.PointCloud],
-    ) -> list[o3d.geometry.PointCloud]:
+    ) -> tuple[list[o3d.geometry.PointCloud], list[tuple[float, float, bool]]]:
         """
         Align all isolated frames into the shared reference coordinate system.
 
-        Uses the growing-reference strategy from :func:`~registration.register_sequence`.
-        Prints per-frame fitness and RMSE; flags weak alignments.
+        Uses multi-candidate registration with acceptance gating against
+        cfg.registration.min_accept_fitness to protect against reference corruption.
 
         Parameters
         ----------
@@ -322,8 +322,10 @@ class ScanPipeline:
 
         Returns
         -------
-        list[o3d.geometry.PointCloud]
-            All frames expressed in frame-0 coordinates.
+        aligned:
+            List of all aligned point clouds in frame-0 coordinates.
+        diagnostics:
+            List of (fitness, rmse, accepted) tuples per frame.
         """
         print("\n" + "=" * 60)
         print("  Stage 3: Registering frames (FPFH+RANSAC -> ICP) ...")
@@ -331,20 +333,31 @@ class ScanPipeline:
 
         aligned, diagnostics = register_sequence(isolated_frames, self.cfg.registration)
 
-        for i, (fitness, rmse) in enumerate(diagnostics):
-            note = ""
-            if i > 0 and fitness <= 0.3:
-                note = "  [!] weak alignment -- consider recapturing this angle"
+        rejected_indices: list[int] = []
+        for i, (fitness, rmse, accepted) in enumerate(diagnostics):
+            status = "ACCEPTED" if accepted else "REJECTED -- excluded from fusion, consider recapturing this angle"
+            if not accepted:
+                rejected_indices.append(i)
             print(f"  frame {i:02d}: fitness={fitness:.4f}  "
-                  f"rmse={rmse * 1000:.3f} mm{note}")
+                  f"rmse={rmse * 1000:.3f} mm  {status}")
+
+        n_accepted = sum(1 for *_, acc in diagnostics if acc)
+        n_total = len(diagnostics)
+        print(f"\n  Registration summary: {n_accepted} of {n_total} frames accepted into the reconstruction.")
+        if n_total > 0 and (n_accepted / n_total) < 0.70:
+            print("  Tip: low acceptance ratio (< 70%). Try moving the camera more slowly")
+            print("       or reducing --interval for higher frame overlap.")
 
         if self.cfg.show_stage_windows:
+            if rejected_indices:
+                print(f"\n  [!] Note: Visualizing all frames including rejected frame(s) {rejected_indices}.")
+                print("      They may appear misaligned or disconnected from the coherent reconstruction.")
             show(
                 color_frames_distinctly(aligned),
                 window_name="Stage 3: registered/aligned clouds",
             )
 
-        return aligned
+        return aligned, diagnostics
 
     # ------------------------------------------------------------------
     # Stage 4: fuse
@@ -353,14 +366,20 @@ class ScanPipeline:
     def fuse(
         self,
         aligned_frames: list[o3d.geometry.PointCloud],
+        diagnostics: list[tuple[float, float, bool]] | None = None,
     ) -> o3d.geometry.PointCloud:
         """
-        Merge all registered frames into one clean point cloud.
+        Merge registered frames into one clean point cloud.
+
+        Only frames with accepted=True in diagnostics are included in the final fusion.
 
         Parameters
         ----------
         aligned_frames:
             Registered per-frame clouds from :meth:`register`.
+        diagnostics:
+            Optional registration diagnostics tuples (fitness, rmse, accepted).
+            If provided, rejected frames are excluded from fusion.
 
         Returns
         -------
@@ -371,11 +390,22 @@ class ScanPipeline:
         print("  Stage 4: Fusing aligned frames ...")
         print("=" * 60)
 
-        fused = fuse_point_clouds(aligned_frames, self.cfg.preprocess)
+        if diagnostics is not None:
+            accepted_frames = [f for f, (*_, acc) in zip(aligned_frames, diagnostics) if acc]
+            if not accepted_frames:
+                print("  [!] Warning: No frames met acceptance criteria; falling back to frame 0.")
+                accepted_frames = aligned_frames[:1]
+        else:
+            accepted_frames = aligned_frames
+
+        n_skipped = len(aligned_frames) - len(accepted_frames)
+        skip_msg = f" (excluded {n_skipped} rejected frame{'s' if n_skipped != 1 else ''})" if n_skipped > 0 else ""
+        print(f"  Fusing {len(accepted_frames)} accepted frame(s){skip_msg} ...")
+
+        fused = fuse_point_clouds(accepted_frames, self.cfg.preprocess)
         print(f"  Fused cloud: {len(fused.points):>7} points")
 
         if self.cfg.show_stage_windows:
-            display = fused.__copy__() if hasattr(fused, "__copy__") else fused
             display_pcd = o3d.geometry.PointCloud(fused)
             display_pcd.paint_uniform_color([0.65, 0.65, 0.65])  # flat grey
             show(display_pcd, window_name="Stage 4: fused reconstruction")
@@ -473,11 +503,11 @@ class ScanPipeline:
         dict
             JSON-serialisable measurement result from :meth:`measure`.
         """
-        raw_frames = self.capture_frames()
-        isolated   = self.isolate_frames(raw_frames)
-        aligned    = self.register(isolated)
-        fused      = self.fuse(aligned)
-        result     = self.measure(fused)
+        raw_frames           = self.capture_frames()
+        isolated             = self.isolate_frames(raw_frames)
+        aligned, diagnostics = self.register(isolated)
+        fused                = self.fuse(aligned, diagnostics)
+        result               = self.measure(fused)
 
         print("\n" + "=" * 60)
         print(f"  Done. Outputs written to: {self.cfg.output_dir.resolve()}")
