@@ -25,21 +25,71 @@ import targets.box  # noqa: F401 — registers BoxTarget via @register_target
 from visualizer import color_frames_distinctly, obb_lineset, show
 
 
-def _depth_to_display(depth_m: np.ndarray, near_m: float, far_m: float) -> np.ndarray:
+def _draw_hud(
+    panel: np.ndarray,
+    depth_m: np.ndarray,
+    n_frames: int,
+    n_pts: int,
+    vis_min_m: float,
+    vis_max_m: float,
+) -> None:
     """
-    Maps a raw depth frame (in meters) to a BGR image using OpenCV's JET
-    colormap, so the displayed gradient reads as:
-        near -> blue -> green -> yellow -> orange -> red -> far
-    Pixels with no valid depth reading (value <= 0) are rendered pure black,
-    not colored, so they're clearly distinguishable from "very near."
+    Render the D455f status HUD onto the depth panel in-place.
+
+    Parameters
+    ----------
+    panel:
+        The BGR image that will appear on the RIGHT side of the preview
+        window (the SDK-colorized depth image).  Modified in-place.
+    depth_m:
+        The RAW float32 depth array in metres — used only to compute
+        statistics (valid pixel count, median, min, max).  Never displayed
+        as depth values.
+    n_frames:
+        Number of frames captured so far.
+    n_pts:
+        Number of points in the most recently captured point cloud
+        (0 if no frame captured yet).
+    vis_min_m, vis_max_m:
+        Configured visualization range (from DepthVisConfig).
     """
-    valid = depth_m > 0
-    clipped = np.clip(depth_m, near_m, far_m)
-    # normalize the ACTUAL near..far range to 0..255, not 0..far
-    normalized = ((clipped - near_m) / max(far_m - near_m, 1e-6) * 255.0).astype(np.uint8)
-    colored = cv2.applyColorMap(normalized, cv2.COLORMAP_JET)
-    colored[~valid] = (0, 0, 0)  # black out pixels with no depth data
-    return colored
+    valid = depth_m[depth_m > 0]
+    n_valid   = int(valid.size)
+    d_median  = float(np.median(valid)) if n_valid else 0.0
+    d_min     = float(valid.min())      if n_valid else 0.0
+    d_max     = float(valid.max())      if n_valid else 0.0
+
+    cloud_status = f"{n_pts:,} pts" if n_pts > 0 else "--"
+
+    lines = [
+        "D455f STATUS",
+        "",
+        f"Frames captured : {n_frames}",
+        f"Valid depth px  : {n_valid:,}",
+        f"Point cloud pts : {cloud_status}",
+        "",
+        f"Depth median    : {d_median:.3f} m",
+        f"Depth min       : {d_min:.3f} m",
+        f"Depth max       : {d_max:.3f} m",
+        "",
+        f"Vis range  min  : {vis_min_m:.2f} m",
+        f"Vis range  max  : {vis_max_m:.2f} m",
+        "",
+        "SPACE: capture  ENTER: finish (2+)  ESC: abort",
+    ]
+
+    y0, dy = 28, 22
+    for i, line in enumerate(lines):
+        y = y0 + i * dy
+        # Shadow (readability over any background color)
+        cv2.putText(panel, line, (10, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.52,
+                    (0, 0, 0), 3, cv2.LINE_AA)
+        # White text
+        color = (0, 255, 255) if line == "D455f STATUS" else (255, 255, 255)
+        cv2.putText(panel, line, (10, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.52,
+                    color, 1, cv2.LINE_AA)
 
 
 class ScanPipeline:
@@ -85,55 +135,44 @@ class ScanPipeline:
         print("=" * 60)
 
         try:
+            last_n_pts = 0  # point count of the most recently captured cloud
             while True:
-                color_bgr, depth_m = cam.read()
+                color_bgr, depth_m, depth_color = cam.read_with_colorized()
                 if color_bgr is None or depth_m is None:
                     continue  # dropped frame — just retry
 
-                # ---- depth colourmap for side-by-side preview ----------
-                depth_color = _depth_to_display(
-                    depth_m,
-                    self.cfg.camera.depth_min_m,
-                    self.cfg.camera.depth_max_m,
-                )
+                # depth_color is the SDK-colorized BGR image (VISUALIZATION ONLY).
+                # depth_m is the raw float32 metres array (used for point cloud).
 
-                # Make both the same height before stacking (decimation might
-                # have changed the depth resolution before the read() resize).
+                # Ensure both panels are the same size before hstack.
                 if depth_color.shape[:2] != color_bgr.shape[:2]:
                     h, w = color_bgr.shape[:2]
-                    depth_color = cv2.resize(depth_color, (w, h))
+                    depth_color = cv2.resize(depth_color, (w, h),
+                                             interpolation=cv2.INTER_NEAREST)
 
-                preview = np.hstack([color_bgr, depth_color])
+                # Draw the rich HUD onto the depth panel (in-place, copy first
+                # so we don't clobber the original colorized image).
+                depth_panel = depth_color.copy()
+                _draw_hud(
+                    depth_panel,
+                    depth_m,
+                    n_frames=len(raw_frames),
+                    n_pts=last_n_pts,
+                    vis_min_m=self.cfg.camera.depth_vis.visual_min_m,
+                    vis_max_m=self.cfg.camera.depth_vis.visual_max_m,
+                )
 
-                # ---- overlay HUD text ----------------------------------
-                n = len(raw_frames)
-                lines = [
-                    f"Frames captured: {n}",
-                    "SPACE: capture | ENTER: finish (need 2+) | ESC: abort",
-                ]
-                for i, line in enumerate(lines):
-                    cv2.putText(
-                        preview, line,
-                        (12, 28 + i * 26),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.65, (0, 0, 0), 3, cv2.LINE_AA,   # dark outline
-                    )
-                    cv2.putText(
-                        preview, line,
-                        (12, 28 + i * 26),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.65, (255, 255, 255), 1, cv2.LINE_AA,  # white text
-                    )
-
-                cv2.imshow("Stage 1: Capture (colour | depth)", preview)
+                preview = np.hstack([color_bgr, depth_panel])
+                cv2.imshow("Stage 1: D455f Capture (RGB | Depth)", preview)
                 key = cv2.waitKey(1) & 0xFF
 
                 # ---- key handling --------------------------------------
                 if key == 32:  # SPACE — capture frame
                     pcd = cam.to_point_cloud(color_bgr, depth_m)
                     raw_frames.append(pcd)
+                    last_n_pts = len(pcd.points)
                     print(f"  Captured frame {len(raw_frames):2d}: "
-                          f"{len(pcd.points):>7} raw points")
+                          f"{last_n_pts:>7} raw points")
 
                 elif key == 13:  # ENTER — finish
                     if len(raw_frames) < 2:

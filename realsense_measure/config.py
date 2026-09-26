@@ -25,6 +25,43 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 @dataclass
+class DepthVisConfig:
+    """
+    Depth-visualisation settings for the live capture preview.
+
+    These parameters control ONLY what is shown on screen — they have
+    absolutely no effect on the raw depth values used for point-cloud
+    creation or measurement.
+
+    RealSense colorizer color_scheme values
+    ----------------------------------------
+    0  Jet          (blue → green → yellow → red)
+    1  Classic      (white → black)
+    2  WhiteToBlack (white → black, reversed)
+    3  BlackToWhite (black → white)
+    4  Bio          (green bio-style gradient)
+    5  Cold         (blue/purple cold gradient)
+    6  Warm         (warm red/orange gradient)
+    7  Quantized    (8-level discrete palette)
+    8  Pattern      (cross-hatch pattern)
+    """
+
+    # Metric range mapped onto the full color gradient.
+    # Anything outside this range is clamped to the nearest end color.
+    visual_min_m: float = 0.15   # near end of gradient (matches depth_min_m)
+    visual_max_m: float = 3.00   # far end  — wider than depth_max_m so the
+                                  # full scene is visible in the live view
+
+    # RealSense colorizer color scheme index (see table above).
+    color_scheme: int = 0         # 0 = Jet (blue-near → red-far)
+
+    # Enable the SDK's built-in histogram equalization.
+    # Improves contrast in scenes where most depth values cluster in a
+    # narrow band (e.g. a flat wall filling most of the frame).
+    histogram_equalization: bool = True
+
+
+@dataclass
 class CameraConfig:
     """RealSense D455(f) stream and post-processing filter settings."""
 
@@ -46,6 +83,9 @@ class CameraConfig:
     # 1.2 m clips far background before it pollutes the point cloud.
     depth_min_m: float = 0.15
     depth_max_m: float = 1.20
+
+    # Depth visualisation settings (preview window only — no effect on data).
+    depth_vis: DepthVisConfig = field(default_factory=DepthVisConfig)
 
 
 # ---------------------------------------------------------------------------

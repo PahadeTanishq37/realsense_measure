@@ -25,18 +25,8 @@ except ImportError as exc:
         "On the machine with the D455f plugged in, run:  pip install pyrealsense2"
     ) from exc
 
-from config import CameraConfig
+from config import CameraConfig, DepthVisConfig
 
-# Open3D's default display convention has Y pointing up and the camera
-# looking towards +Z.  RealSense (and most depth cameras) use Y-down / Z-
-# forward — the flip transform below corrects for this difference so the
-# cloud appears right-side-up when visualised.
-_FLIP = np.array([
-    [1,  0,  0, 0],
-    [0, -1,  0, 0],
-    [0,  0, -1, 0],
-    [0,  0,  0, 1],
-], dtype=np.float64)
 
 
 class RealSenseCamera:
@@ -91,6 +81,10 @@ class RealSenseCamera:
         self._to_depth       = rs.disparity_transform(False)  # disparity → depth
         self._hole_filling   = rs.hole_filling_filter()
 
+        # ---- SDK colorizer (visualization ONLY — never touches raw depth) --
+        # Configured properly in start() once we know the DepthVisConfig.
+        self._colorizer = rs.colorizer()
+
         # ---- state initialised in start() -------------------------------
         self.depth_scale: float | None = None
         self.intrinsics_o3d: o3d.camera.PinholeCameraIntrinsic | None = None
@@ -137,6 +131,18 @@ class RealSenseCamera:
             cx=intr.ppx,
             cy=intr.ppy,
         )
+
+        # ---- configure SDK colorizer -------------------------------------
+        vis = self.cfg.depth_vis
+        self._colorizer.set_option(rs.option.color_scheme,
+                                   float(vis.color_scheme))
+        self._colorizer.set_option(rs.option.min_distance,
+                                   vis.visual_min_m)
+        self._colorizer.set_option(rs.option.max_distance,
+                                   vis.visual_max_m)
+        self._colorizer.set_option(rs.option.histogram_equalization_enabled,
+                                   1.0 if vis.histogram_equalization else 0.0)
+
         return self
 
     def stop(self) -> None:
@@ -251,6 +257,104 @@ class RealSenseCamera:
 
         return color_bgr, depth_m
 
+    def colorize_depth(
+        self,
+        depth_frame: "rs.frame",
+    ) -> np.ndarray:
+        """
+        Colorize a raw (filtered) depth frame using the RealSense SDK colorizer.
+
+        This is the ONLY method that should produce a colored depth image.
+        The result is intended exclusively for human visualization — it must
+        never be used as actual depth data.
+
+        The SDK colorizer maps the configured visual_min_m → visual_max_m
+        range onto the full color gradient.  Pixels with no valid depth
+        (value 0) are rendered black by the SDK, clearly distinguishable
+        from valid near-depth pixels.
+
+        Parameters
+        ----------
+        depth_frame:
+            A raw or filtered rs.depth_frame (BEFORE converting to numpy).
+            Must still be an SDK frame object, not a numpy array.
+
+        Returns
+        -------
+        np.ndarray
+            HxWx3 uint8 BGR array suitable for cv2.imshow().
+        """
+        # rs.colorizer produces an RGB frame; convert to BGR for OpenCV.
+        colorized_rgb = np.asanyarray(
+            self._colorizer.colorize(depth_frame).get_data()
+        )
+        return colorized_rgb[:, :, ::-1]  # RGB → BGR
+
+    def read_with_colorized(
+        self,
+    ) -> tuple[
+        "np.ndarray | None",
+        "np.ndarray | None",
+        "np.ndarray | None",
+    ]:
+        """
+        Capture one aligned frame and return raw data PLUS a visualization image.
+
+        Strictly separates the two data paths:
+
+        RAW DEPTH (depth_m):
+            float32 numpy array in metres.
+            Used for XYZ calculation, point cloud, measurement.
+            Never modified by colorization.
+
+        COLORIZED DEPTH (depth_color_bgr):
+            uint8 BGR numpy array, produced by the RealSense SDK colorizer.
+            Used ONLY for the live preview window.
+            Never fed into point-cloud or measurement code.
+
+        Returns
+        -------
+        color_bgr:
+            HxWx3 uint8 colour image, or None on a dropped frame.
+        depth_m:
+            HxW float32 depth in metres, or None on a dropped frame.
+        depth_color_bgr:
+            HxWx3 uint8 SDK-colorized depth image, or None on a dropped frame.
+        """
+        frames = self.pipeline.wait_for_frames()
+        aligned = self.align.process(frames)
+
+        depth_frame = aligned.get_depth_frame()
+        color_frame = aligned.get_color_frame()
+
+        if not depth_frame or not color_frame:
+            return None, None, None
+
+        # Apply post-processing filters to the raw depth frame.
+        depth_frame = self._filter_depth(depth_frame)
+
+        # --- VISUALIZATION PATH (SDK colorizer, BEFORE converting to numpy) --
+        # Must be done on the rs.frame object, not the numpy array.
+        depth_color_bgr = self.colorize_depth(depth_frame)
+
+        # --- RAW DEPTH PATH (numpy, for XYZ / point cloud) ------------------
+        depth_m = (
+            np.asanyarray(depth_frame.get_data()).astype(np.float32)
+            * self.depth_scale
+        )
+        color_bgr = np.asanyarray(color_frame.get_data())
+
+        # Decimation can shrink the depth image; resize both arrays if needed.
+        if depth_m.shape[:2] != color_bgr.shape[:2]:
+            import cv2  # local import — only needed when shapes diverge
+            h, w = color_bgr.shape[:2]
+            depth_m        = cv2.resize(depth_m,        (w, h),
+                                        interpolation=cv2.INTER_NEAREST)
+            depth_color_bgr = cv2.resize(depth_color_bgr, (w, h),
+                                         interpolation=cv2.INTER_NEAREST)
+
+        return color_bgr, depth_m, depth_color_bgr
+
     def to_point_cloud(
         self,
         color_bgr: np.ndarray,
@@ -297,9 +401,8 @@ class RealSenseCamera:
             self.intrinsics_o3d,
         )
 
-        # Flip from RealSense convention (Y-down, Z-forward) to Open3D
-        # convention (Y-up, Z-toward-viewer) so the cloud displays
-        # right-side-up without any manual rotation.
-        pcd.transform(_FLIP)
-
+        # Coordinate system: RealSense native convention is kept.
+        #   +X = right,  +Y = down,  +Z = forward  (units: metres)
+        # No flip is applied here so the point cloud remains in the camera
+        # frame that preprocessing, registration, and reconstruction expect.
         return pcd
