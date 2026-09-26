@@ -145,6 +145,10 @@ class RegistrationConfig:
     # unreliable, excluded from fusion, and not merged into the growing reference.
     min_accept_fitness: float = 0.35
 
+    # Fast-path ICP threshold: if identity-seeded ICP achieves this fitness,
+    # skip expensive FPFH+RANSAC global registration.
+    icp_only_fitness_threshold: float = 0.60
+
 
 # ---------------------------------------------------------------------------
 # Stage: Target
@@ -195,6 +199,9 @@ class PipelineConfig:
     # Developer / debug toggles
     show_stage_windows: bool = True   # pop up an Open3D window after each stage
     save_intermediate: bool = True    # write .ply / .json to output_dir after each stage
+
+    # Diagnostic full-orbit check
+    attempt_loop_closure: bool = False   # check last vs first frame alignment after registration
 
     def __post_init__(self) -> None:
         # Ensure output_dir is always a Path, even if a plain string was passed.

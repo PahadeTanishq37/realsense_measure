@@ -64,7 +64,7 @@ def color_frames_distinctly(
 
 
 def show(
-    geometries: Sequence[o3d.geometry.Geometry],
+    geometries: Sequence[o3d.geometry.Geometry] | o3d.geometry.Geometry,
     window_name: str = "stage",
     point_size: float = 2.0,
 ) -> None:
@@ -78,10 +78,10 @@ def show(
     Parameters
     ----------
     geometries:
-        Any Open3D geometry objects to display (PointCloud, LineSet,
-        TriangleMesh, OrientedBoundingBox, etc.).
+        Any Open3D geometry object or list of geometry objects to display
+        (PointCloud, LineSet, TriangleMesh, OrientedBoundingBox, etc.).
     window_name:
-        Title bar text — useful for identifying which pipeline stage you are
+        Title bar text -- useful for identifying which pipeline stage you are
         looking at.
     point_size:
         Rendered radius of each point in pixels.
@@ -89,7 +89,14 @@ def show(
     vis = o3d.visualization.Visualizer()
     vis.create_window(window_name=window_name, width=1280, height=720)
 
-    for geom in geometries:
+    if isinstance(geometries, (list, tuple)):
+        geom_list = list(geometries)
+    elif hasattr(geometries, "__iter__") and not isinstance(geometries, o3d.geometry.Geometry):
+        geom_list = list(geometries)
+    else:
+        geom_list = [geometries]
+
+    for geom in geom_list:
         vis.add_geometry(geom)
 
     render_opt = vis.get_render_option()

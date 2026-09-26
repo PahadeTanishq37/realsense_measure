@@ -213,7 +213,16 @@ def register_frame_pair(
     cfg: RegistrationConfig,
 ) -> tuple[np.ndarray, float, float]:
     """
-    Align ``source`` onto ``target`` using global registration then ICP.
+    Align ``source`` onto ``target`` with adaptive fast-path ICP.
+
+    Speed vs Global Search Trade-off:
+    ---------------------------------
+    1. First attempts a cheap Point-to-Plane ICP starting from identity (np.eye(4)).
+       In continuous / auto-capture workflows with small inter-frame camera motion,
+       this converges almost instantaneously (milliseconds vs seconds).
+    2. If ICP fitness >= cfg.icp_only_fitness_threshold, it is accepted immediately.
+    3. If ICP fitness is insufficient, it falls back to full FPFH feature
+       extraction and RANSAC global registration followed by ICP refinement.
 
     Parameters
     ----------
@@ -227,12 +236,22 @@ def register_frame_pair(
     Returns
     -------
     transform:
-        4×4 numpy float64 array that maps ``source`` into ``target`` space.
+        4x4 numpy float64 array that maps ``source`` into ``target`` space.
     fitness:
         ICP fitness score (fraction of inlier correspondences).
     rmse:
         ICP inlier RMSE in metres.
     """
+    # 1. Fast path: try ICP directly from identity
+    fast_icp = _icp_refine(source, target, np.eye(4), cfg)
+    if float(fast_icp.fitness) >= cfg.icp_only_fitness_threshold:
+        return (
+            fast_icp.transformation,
+            float(fast_icp.fitness),
+            float(fast_icp.inlier_rmse),
+        )
+
+    # 2. Slow / thorough path: full FPFH + RANSAC global registration -> ICP
     voxel_size = cfg.voxel_size_m
 
     source_down, source_fpfh = _prepare(source, voxel_size)
@@ -245,6 +264,14 @@ def register_frame_pair(
     )
 
     icp_result = _icp_refine(source, target, global_result.transformation, cfg)
+
+    # If fast ICP had a higher fitness than the global result, prefer it
+    if float(fast_icp.fitness) > float(icp_result.fitness):
+        return (
+            fast_icp.transformation,
+            float(fast_icp.fitness),
+            float(fast_icp.inlier_rmse),
+        )
 
     return (
         icp_result.transformation,

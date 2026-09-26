@@ -20,7 +20,7 @@ from camera.realsense_capture import RealSenseCamera
 from config import PipelineConfig
 from preprocessing import isolate_object
 from reconstruction import fuse_point_clouds
-from registration import register_sequence
+from registration import register_frame_pair, register_sequence
 from targets.base import get_target
 import targets.box  # noqa: F401 — registers BoxTarget via @register_target
 from visualizer import color_frames_distinctly, obb_lineset, show
@@ -347,6 +347,30 @@ class ScanPipeline:
         if n_total > 0 and (n_accepted / n_total) < 0.70:
             print("  Tip: low acceptance ratio (< 70%). Try moving the camera more slowly")
             print("       or reducing --interval for higher frame overlap.")
+
+        # Optional diagnostic loop-closure check (gated behind cfg.attempt_loop_closure)
+        if self.cfg.attempt_loop_closure:
+            accepted_indices = [idx for idx, (*_, acc) in enumerate(diagnostics) if acc]
+            if len(accepted_indices) >= 8:
+                last_idx = accepted_indices[-1]
+                try:
+                    # Register the last accepted raw frame directly against the initial frame (frame 0)
+                    _, loop_fitness, loop_rmse = register_frame_pair(
+                        isolated_frames[last_idx], isolated_frames[0], self.cfg.registration
+                    )
+                    if loop_fitness >= self.cfg.registration.min_accept_fitness:
+                        print(f"\n  Loop closure check: fitness={loop_fitness:.4f} (rmse={loop_rmse * 1000:.2f} mm) -- looks like a consistent full orbit.")
+                    else:
+                        print(f"\n  [!] Loop closure check: low overlap (fitness={loop_fitness:.4f}) with initial frame.")
+                        print("      Drift may have accumulated over the full orbit.")
+                        print("      Tip: orbit more slowly/steadily or reduce capture interval.")
+                        # Note: implementing full pose-graph optimization across all frame pairs
+                        # (e.g. o3d.pipelines.registration.global_optimization) would be the next step
+                        # if drift is persistent, but is out of scope for this pass.
+                except Exception as exc:
+                    print(f"\n  [!] Loop closure check skipped: {exc}")
+            else:
+                print("\n  [!] Loop closure check skipped: requires at least 8 accepted frames.")
 
         if self.cfg.show_stage_windows:
             if rejected_indices:

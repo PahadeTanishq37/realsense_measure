@@ -85,6 +85,11 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="disable automatic capture and require pressing SPACE for each frame",
     )
+    parser.add_argument(
+        "--loop-closure",
+        action="store_true",
+        help="run diagnostic loop-closure check between last and first frame",
+    )
 
     return parser
 
@@ -108,6 +113,9 @@ def main() -> None:
 
     if args.manual_capture:
         cfg.camera.auto_capture = False
+
+    if args.loop_closure:
+        cfg.attempt_loop_closure = True
 
     # ---- run -----------------------------------------------------------
     try:
