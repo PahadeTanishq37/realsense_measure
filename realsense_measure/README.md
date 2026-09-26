@@ -46,13 +46,16 @@ python main.py --no-viz
 
 # Use a finer voxel grid for higher-detail scans (slower)
 python main.py --voxel 0.003
+
+# Change automatic frame capture interval (e.g. 0.5s or 2.0s)
+python main.py --interval 0.5
 ```
 
 ### Capture controls
 
 | Key | Action |
 |---|---|
-| *(Timer)* | Frames are captured automatically at `capture_interval_s` (default 0.1s) |
+| *(Timer)* | Frames are captured automatically at `capture_interval_s` (default 1.0s) |
 | `SPACE` | Force immediate capture of current frame |
 | `ENTER` | Finish capture and start processing (requires ≥ 2 frames) |
 | `ESC` | Abort the scan |

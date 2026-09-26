@@ -66,6 +66,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="override voxel downsample size in metres "
              "(applies to both preprocessing and registration)",
     )
+    parser.add_argument(
+        "--interval",
+        type=float,
+        default=None,
+        metavar="SEC",
+        help="override automatic frame capture interval in seconds",
+    )
 
     return parser
 
@@ -79,6 +86,9 @@ def main() -> None:
 
     cfg.target.name        = args.target
     cfg.show_stage_windows = not args.no_viz
+
+    if args.interval is not None:
+        cfg.camera.capture_interval_s = args.interval
 
     if args.voxel is not None:
         cfg.preprocess.voxel_size_m   = args.voxel

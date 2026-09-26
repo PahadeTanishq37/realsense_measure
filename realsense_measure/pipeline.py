@@ -33,7 +33,7 @@ def _draw_hud(
     n_pts: int,
     vis_min_m: float,
     vis_max_m: float,
-    interval_s: float = 0.1,
+    interval_s: float = 1.0,
     time_until_next_s: float = 0.0,
 ) -> None:
     """
