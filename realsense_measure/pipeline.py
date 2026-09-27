@@ -20,7 +20,11 @@ from camera.realsense_capture import RealSenseCamera
 from config import PipelineConfig
 from preprocessing import isolate_object
 from reconstruction import fuse_point_clouds
-from registration import register_frame_pair, register_sequence
+from registration import (
+    register_frame_pair,
+    register_sequence,
+    register_sequence_multiway,
+)
 from targets.base import get_target
 import targets.box  # noqa: F401 — registers BoxTarget via @register_target
 from visualizer import color_frames_distinctly, obb_lineset, show
@@ -328,10 +332,16 @@ class ScanPipeline:
             List of (fitness, rmse, accepted) tuples per frame.
         """
         print("\n" + "=" * 60)
-        print("  Stage 3: Registering frames (FPFH+RANSAC -> ICP) ...")
+        if self.cfg.registration.use_multiway:
+            print("  Stage 3: Registering frames (Pose Graph Multiway Registration) ...")
+        else:
+            print("  Stage 3: Registering frames (Sequential FPFH+RANSAC -> ICP) ...")
         print("=" * 60)
 
-        aligned, diagnostics = register_sequence(isolated_frames, self.cfg.registration)
+        if self.cfg.registration.use_multiway:
+            aligned, diagnostics = register_sequence_multiway(isolated_frames, self.cfg.registration)
+        else:
+            aligned, diagnostics = register_sequence(isolated_frames, self.cfg.registration)
 
         rejected_indices: list[int] = []
         for i, (fitness, rmse, accepted) in enumerate(diagnostics):

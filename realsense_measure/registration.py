@@ -45,10 +45,18 @@ import open3d as o3d
 from open3d.pipelines.registration import (
     CorrespondenceCheckerBasedOnDistance,
     CorrespondenceCheckerBasedOnEdgeLength,
+    GlobalOptimizationConvergenceCriteria,
+    GlobalOptimizationLevenbergMarquardt,
+    GlobalOptimizationOption,
     ICPConvergenceCriteria,
+    PoseGraph,
+    PoseGraphEdge,
+    PoseGraphNode,
     RANSACConvergenceCriteria,
     TransformationEstimationPointToPlane,
     TransformationEstimationPointToPoint,
+    get_information_matrix_from_point_clouds,
+    global_optimization,
     registration_icp,
     registration_ransac_based_on_feature_matching,
 )
@@ -379,3 +387,168 @@ def register_sequence(
             reference = reference.voxel_down_sample(cfg.voxel_size_m)
 
     return aligned, diagnostics
+
+
+def get_information_matrix(
+    source: o3d.geometry.PointCloud,
+    target: o3d.geometry.PointCloud,
+    transform: np.ndarray,
+    cfg: RegistrationConfig,
+) -> np.ndarray:
+    """
+    Compute 6x6 information matrix for a registered frame pair.
+
+    Produces the uncertainty/confidence weighting each edge needs for
+    pose graph optimization.
+    """
+    return get_information_matrix_from_point_clouds(
+        source,
+        target,
+        cfg.icp_max_dist_m,
+        transform,
+    )
+
+
+def build_pose_graph(
+    frames: list[o3d.geometry.PointCloud],
+    cfg: RegistrationConfig,
+) -> PoseGraph:
+    """
+    Construct a pose graph containing sequential odometry edges and loop closures.
+
+    Parameters
+    ----------
+    frames:
+        List of preprocessed point clouds.
+    cfg:
+        Registration configuration containing ICP, loop closure window, and acceptance parameters.
+
+    Returns
+    -------
+    PoseGraph initialized with nodes and pairwise edges.
+    """
+    pose_graph = PoseGraph()
+    if not frames:
+        return pose_graph
+
+    # Frame 0 is the anchor node at world origin
+    pose_graph.nodes.append(PoseGraphNode(np.eye(4)))
+    odometry = np.eye(4)  # Running accumulated transform used to seed initial poses
+
+    for i in range(1, len(frames)):
+        # 1. Mandatory odometry edge: register frame i against frame i-1
+        transform, fitness, rmse = register_frame_pair(frames[i], frames[i - 1], cfg)
+        odometry = transform @ odometry
+        pose_graph.nodes.append(PoseGraphNode(np.linalg.inv(odometry)))
+        info = get_information_matrix(frames[i], frames[i - 1], transform, cfg)
+        pose_graph.edges.append(
+            PoseGraphEdge(i - 1, i, transform, info, uncertain=False)
+        )
+
+        # 2. Loop closures: test frames further back than i-1, up to the search window
+        start_j = max(0, i - cfg.loop_closure_search_window - 1)
+        for j in range(start_j, i - 1):
+            transform_lc, fitness_lc, rmse_lc = register_frame_pair(frames[i], frames[j], cfg)
+            if fitness_lc >= cfg.min_accept_fitness:
+                info_lc = get_information_matrix(frames[i], frames[j], transform_lc, cfg)
+                pose_graph.edges.append(
+                    PoseGraphEdge(j, i, transform_lc, info_lc, uncertain=True)
+                )
+
+    return pose_graph
+
+
+def optimize_pose_graph(
+    pose_graph: PoseGraph,
+    cfg: RegistrationConfig,
+) -> PoseGraph:
+    """
+    Run global pose-graph optimization with Levenberg-Marquardt and edge pruning.
+
+    Parameters
+    ----------
+    pose_graph:
+        Pose graph with initial node poses and edges.
+    cfg:
+        Registration configuration with edge pruning threshold and max correspondence distance.
+
+    Returns
+    -------
+    Optimized PoseGraph.
+    """
+    option = GlobalOptimizationOption(
+        max_correspondence_distance=cfg.icp_max_dist_m,
+        edge_prune_threshold=cfg.pose_graph_edge_prune_threshold,
+        reference_node=0,
+    )
+    global_optimization(
+        pose_graph,
+        GlobalOptimizationLevenbergMarquardt(),
+        GlobalOptimizationConvergenceCriteria(),
+        option,
+    )
+    return pose_graph
+
+
+def register_sequence_multiway(
+    frames: list[o3d.geometry.PointCloud],
+    cfg: RegistrationConfig,
+) -> tuple[list[o3d.geometry.PointCloud], list[tuple[float, float, bool]]]:
+    """
+    Register a sequence of frames using global pose-graph multiway registration.
+
+    Builds an odometry backbone and loop-closure edges across a sliding temporal
+    window, then optimizes all node poses jointly to prevent drift / unrolling.
+
+    Parameters
+    ----------
+    frames:
+        Ordered list of preprocessed, per-frame object clouds.
+    cfg:
+        Registration configuration.
+
+    Returns
+    -------
+    aligned:
+        List of point clouds transformed into the globally optimized coordinate frame.
+    diagnostics:
+        List of (fitness, rmse, accepted) tuples per frame.
+    """
+    if not frames:
+        return [], []
+    if len(frames) == 1:
+        return [copy.deepcopy(frames[0])], [(1.0, 0.0, True)]
+
+    pose_graph = build_pose_graph(frames, cfg)
+    num_edges_before = len(pose_graph.edges)
+    num_odom = len(frames) - 1
+    num_lc = num_edges_before - num_odom
+
+    optimize_pose_graph(pose_graph, cfg)
+    num_edges_after = len(pose_graph.edges)
+
+    print(
+        f"  Pose graph: {num_edges_before} total edges ({num_odom} odometry + "
+        f"{num_lc} loop closures), {num_edges_after} survived pruning."
+    )
+
+    aligned = [
+        copy.deepcopy(frames[i]).transform(pose_graph.nodes[i].pose)
+        for i in range(len(frames))
+    ]
+
+    # Diagnostics: identify which nodes have surviving edges touching them
+    connected_nodes: set[int] = {0}
+    for edge in pose_graph.edges:
+        connected_nodes.add(edge.source_node_id)
+        connected_nodes.add(edge.target_node_id)
+
+    diagnostics: list[tuple[float, float, bool]] = []
+    for i in range(len(frames)):
+        if i in connected_nodes:
+            diagnostics.append((1.0, 0.0, True))
+        else:
+            diagnostics.append((0.0, float("inf"), False))
+
+    return aligned, diagnostics
+

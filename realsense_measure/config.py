@@ -86,7 +86,7 @@ class CameraConfig:
 
     # Auto-capture settings
     auto_capture: bool = True
-    capture_interval_s: float = 3.0   # how often a frame is automatically captured (s)
+    capture_interval_s: float = 10.0   # how often a frame is automatically captured (s)
     skip_near_duplicate_frames: bool = True
     duplicate_depth_diff_threshold_m: float = 0.01   # min mean abs depth diff (m) to avoid duplicate capture
 
@@ -153,6 +153,12 @@ class RegistrationConfig:
     # Fast-path ICP threshold: if identity-seeded ICP achieves this fitness,
     # skip expensive FPFH+RANSAC global registration.
     icp_only_fitness_threshold: float = 0.60
+
+    # Multiway pose-graph registration settings
+    use_multiway: bool = True
+    loop_closure_search_window: int = 4   # how many frames back, beyond the immediate previous frame, to also test for a good registration — catches cases where frame i overlaps with frame i-3 or i-4 even though it wasn't captured immediately after it
+    pose_graph_edge_prune_threshold: float = 0.25  # Open3D's own default, controls how aggressively weak/inconsistent edges get discarded during global optimization
+
 
 
 # ---------------------------------------------------------------------------
