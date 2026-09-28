@@ -18,6 +18,7 @@ from preprocessing import downsample_and_denoise, extract_largest_cluster
 def fuse_point_clouds(
     aligned_frames: list[o3d.geometry.PointCloud],
     cfg: PreprocessConfig,
+    skip_final_clustering: bool = False,
 ) -> o3d.geometry.PointCloud:
     """
     Merge a list of registered, per-frame object clouds into one clean cloud.
@@ -27,14 +28,12 @@ def fuse_point_clouds(
     1. Concatenate all frames into a single cloud.
     2. Voxel-downsample + statistical-outlier-removal via
        :func:`~preprocessing.downsample_and_denoise`.
-    3. Retain only the largest DBSCAN cluster via
+    3. (BOX only) Retain only the largest DBSCAN cluster via
        :func:`~preprocessing.extract_largest_cluster`.
 
-       Even with thorough per-frame isolation, a small misregistered chunk of
-       leftover background (e.g. a sliver of table edge that survived plane
-       removal in one frame) can end up as a separate disconnected blob in the
-       fused cloud.  This final clustering pass identifies and drops it,
-       ensuring only the dominant — and correct — object geometry is returned.
+       This step is SKIPPED for human reconstructions (``skip_final_clustering=True``)
+       because a human body consists of multiple connected regions (face, ears,
+       shoulders) that would be wrongly discarded as separate small blobs.
 
     Parameters
     ----------
@@ -44,6 +43,9 @@ def fuse_point_clouds(
     cfg:
         Preprocessing configuration (voxel size, outlier thresholds, DBSCAN
         parameters) — the same config used during per-frame preprocessing.
+    skip_final_clustering:
+        When True, skip the DBSCAN largest-cluster pass.  Use for human scans
+        where the body has complex topology.
 
     Returns
     -------
@@ -65,7 +67,9 @@ def fuse_point_clouds(
 
     # Final cluster pass: drop any small stray blobs from imperfect per-frame
     # isolation that only became visible once all views were merged together.
-    fused = extract_largest_cluster(fused, cfg)
+    # Skip this for human scans — ears, eyebrows, etc. would be discarded.
+    if not skip_final_clustering:
+        fused = extract_largest_cluster(fused, cfg)
 
     return fused
 
@@ -76,6 +80,7 @@ def fuse_tsdf_volume(
     cfg: PreprocessConfig,
     voxel_length: float = 0.004,
     sdf_trunc: float = 0.02,
+    skip_final_clustering: bool = False,
 ) -> o3d.geometry.PointCloud:
     """
     Volumetric integration of accepted RGB-D frames using Open3D TSDFVolume.
@@ -95,6 +100,9 @@ def fuse_tsdf_volume(
         Voxel resolution in metres (e.g. 0.004 = 4 mm).
     sdf_trunc:
         Truncation distance for signed distance function in metres.
+    skip_final_clustering:
+        When True, skip DBSCAN largest-cluster stripping after extraction.
+        Use for human scans where body topology is complex.
 
     Returns
     -------
@@ -149,11 +157,13 @@ def fuse_tsdf_volume(
         fused = volume.extract_point_cloud()
         if len(fused.points) > 100:
             fused = downsample_and_denoise(fused, cfg)
-            fused = extract_largest_cluster(fused, cfg)
+            # Skip cluster stripping for human scans — would discard ears, nose etc.
+            if not skip_final_clustering:
+                fused = extract_largest_cluster(fused, cfg)
             return fused
 
     # Graceful fallback: point-cloud concatenation
     print("  [TSDF fallback] Volumetric extraction yielded sparse points; using point-cloud fusion.")
     pcds = [copy.deepcopy(f.pcd).transform(p) for f, p in zip(frames, poses) if hasattr(f, "pcd")]
-    return fuse_point_clouds(pcds, cfg)
+    return fuse_point_clouds(pcds, cfg, skip_final_clustering=skip_final_clustering)
 

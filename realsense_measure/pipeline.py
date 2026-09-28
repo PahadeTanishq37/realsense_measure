@@ -489,12 +489,20 @@ class ScanPipeline:
                 print("\n  Displaying pairwise registration inspection windows...")
                 for idx in range(min(2, len(isolated_frames) - 1)):
                     if isinstance(isolated_frames[idx], RGBDFrame) and isinstance(isolated_frames[idx + 1], RGBDFrame):
-                        T_rel = np.linalg.inv(poses[idx]) @ poses[idx + 1]
+                        # T maps source (idx) INTO target (idx+1):
+                        #   pose_idx   = world_T_cam_idx
+                        #   pose_idx+1 = world_T_cam_(idx+1)
+                        #   T_src_to_tgt = inv(world_T_cam_(idx+1)) @ world_T_cam_idx
+                        # BUT visualize_registration_pair moves the SOURCE cloud,
+                        # so we need the transform that maps source PCD into target PCD space.
+                        # Both PCDs are already in camera coords, so the relative pose is:
+                        #   T = inv(pose_{idx+1}) @ pose_idx
+                        T_src_to_tgt = np.linalg.inv(poses[idx + 1]) @ poses[idx]
                         visualize_registration_pair(
                             isolated_frames[idx].pcd,
                             isolated_frames[idx + 1].pcd,
-                            T_rel,
-                            pair_name=f"Pair {idx:02d} -> {idx+1:02d}",
+                            T_src_to_tgt,
+                            title=f"Pair {idx:02d} -> {idx+1:02d}",
                         )
 
             # Camera trajectory visualization
@@ -604,7 +612,11 @@ class ScanPipeline:
         print("=" * 60)
 
         if diagnostics is not None:
-            accepted_indices = [i for i, (*_, acc) in enumerate(diagnostics) if acc]
+            # diagnostics entries can be None for frames rejected before pose-graph assignment
+            accepted_indices = [
+                i for i, d in enumerate(diagnostics)
+                if d is not None and d[2]
+            ]
             accepted_frames = [aligned_frames[i] for i in accepted_indices]
             if not accepted_frames:
                 print("  [!] Warning: No frames met acceptance criteria; falling back to frame 0.")
@@ -729,26 +741,55 @@ class ScanPipeline:
 
     def run(self) -> dict:
         """
-        Execute all pipeline stages in sequence and return the measurement.
+        Execute all pipeline stages in sequence.
 
-        Stages
-        ------
-        1. capture_frames  — interactive live-camera loop
-        2. isolate_frames  — per-frame background removal
-        3. register        — global + ICP multi-view alignment
-        4. fuse            — merge into one reconstruction
-        5. measure         — segment + dimensional measurement
+        BOX mode:   capture → isolate → register → fuse → measure (dimensions)
+        HUMAN mode: capture → isolate → register → fuse → summary  (no box measurement)
 
         Returns
         -------
         dict
-            JSON-serialisable measurement result from :meth:`measure`.
+            JSON-serialisable result.  For HUMAN mode this contains reconstruction
+            statistics rather than dimensional measurements.
         """
+        is_human_mode = (self.cfg.registration.registration_mode == "rgbd_human")
+
         raw_frames                  = self.capture_frames()
         isolated                    = self.isolate_frames(raw_frames)
         aligned, diagnostics, poses = self.register(isolated)
         fused                       = self.fuse(aligned, diagnostics, raw_frames=isolated, poses=poses)
-        result                      = self.measure(fused)
+
+        if is_human_mode:
+            # Human reconstruction: print a clean summary instead of box dimensions.
+            n_accepted = sum(1 for d in (diagnostics or []) if d is not None and d[2])
+            n_total    = len(diagnostics) if diagnostics else 0
+            print("\n" + "=" * 60)
+            print("  HUMAN RECONSTRUCTION COMPLETE")
+            print("  ============================")
+            print(f"  Fusion mode    : {self.cfg.fusion_method.upper()}")
+            print(f"  Frames total   : {n_total}")
+            print(f"  Frames accepted: {n_accepted}")
+            print(f"  Frames rejected: {n_total - n_accepted}")
+            print(f"  Final points   : {len(fused.points):,}")
+            print("=" * 60)
+
+            out = self.cfg.output_dir / "human_reconstruction.ply"
+            import open3d as o3d
+            o3d.io.write_point_cloud(str(out), fused)
+            print(f"  Saved: {out}")
+
+            result = {
+                "target": self.cfg.target.name,
+                "mode": "human_reconstruction",
+                "fusion_method": self.cfg.fusion_method,
+                "frames_total": n_total,
+                "frames_accepted": n_accepted,
+                "frames_rejected": n_total - n_accepted,
+                "final_points": len(fused.points),
+                "output": str(out),
+            }
+        else:
+            result = self.measure(fused)
 
         print("\n" + "=" * 60)
         print(f"  Done. Outputs written to: {self.cfg.output_dir.resolve()}")
