@@ -68,3 +68,92 @@ def fuse_point_clouds(
     fused = extract_largest_cluster(fused, cfg)
 
     return fused
+
+
+def fuse_tsdf_volume(
+    frames: list,
+    poses: list[np.ndarray],
+    cfg: PreprocessConfig,
+    voxel_length: float = 0.004,
+    sdf_trunc: float = 0.02,
+) -> o3d.geometry.PointCloud:
+    """
+    Volumetric integration of accepted RGB-D frames using Open3D TSDFVolume.
+
+    Provides a clean, watertight surface reconstruction for human scans by
+    integrating depth observations along optical rays into a voxel grid.
+
+    Parameters
+    ----------
+    frames:
+        List of accepted RGBDFrame objects.
+    poses:
+        List of 4x4 camera-to-world (frame-to-frame0) transformations.
+    cfg:
+        Preprocessing configuration for post-cleaning.
+    voxel_length:
+        Voxel resolution in metres (e.g. 0.004 = 4 mm).
+    sdf_trunc:
+        Truncation distance for signed distance function in metres.
+
+    Returns
+    -------
+    o3d.geometry.PointCloud
+        Integrated, cleaned point cloud with RGB color.
+    """
+    import numpy as np
+
+    if not frames:
+        return o3d.geometry.PointCloud()
+
+    # Determine volume origin and extents from initial frames
+    all_pts = []
+    for f in frames[:min(5, len(frames))]:
+        if hasattr(f, "pcd") and len(f.pcd.points) > 0:
+            all_pts.append(np.asarray(f.pcd.points))
+
+    if all_pts:
+        pts_concat = np.vstack(all_pts)
+        min_b = np.min(pts_concat, axis=0) - 0.20
+        max_b = np.max(pts_concat, axis=0) + 0.20
+        length = float(max(np.max(max_b - min_b), 1.2))
+        origin = min_b
+    else:
+        origin = np.array([-0.6, -0.6, 0.2])
+        length = 1.6
+
+    resolution = int(np.clip(length / voxel_length, 128, 512))
+
+    volume = o3d.pipelines.integration.UniformTSDFVolume(
+        length=length,
+        resolution=resolution,
+        sdf_trunc=sdf_trunc,
+        color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8,
+        origin=origin,
+    )
+
+    integrated_count = 0
+    for frame, pose in zip(frames, poses):
+        if not hasattr(frame, "to_rgbd_image"):
+            continue
+        try:
+            # Extrinsic transforms world to camera: inv(pose)
+            extrinsic = np.linalg.inv(pose)
+            rgbd = frame.to_rgbd_image(depth_trunc=1.5, convert_rgb_to_intensity=False)
+            volume.integrate(rgbd, frame.intrinsics, extrinsic)
+            integrated_count += 1
+        except Exception as exc:
+            print(f"  [TSDF integration warning] frame skipped: {exc}")
+
+    if integrated_count > 0:
+        fused = volume.extract_point_cloud()
+        if len(fused.points) > 100:
+            fused = downsample_and_denoise(fused, cfg)
+            fused = extract_largest_cluster(fused, cfg)
+            return fused
+
+    # Graceful fallback: point-cloud concatenation
+    print("  [TSDF fallback] Volumetric extraction yielded sparse points; using point-cloud fusion.")
+    pcds = [copy.deepcopy(f.pcd).transform(p) for f, p in zip(frames, poses) if hasattr(f, "pcd")]
+    return fuse_point_clouds(pcds, cfg)
+

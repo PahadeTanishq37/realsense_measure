@@ -132,6 +132,15 @@ class RealSenseCamera:
             cy=intr.ppy,
         )
 
+        print("\n  RealSense D455 Camera Calibration:")
+        print(f"    RGB resolution:   {intr.width}x{intr.height}")
+        print(f"    Depth resolution: {intr.width}x{intr.height}")
+        print(f"    Aligned:          True (depth aligned onto color optical frame)")
+        print(f"    fx:               {intr.fx:.2f}")
+        print(f"    fy:               {intr.fy:.2f}")
+        print(f"    cx:               {intr.ppx:.2f}")
+        print(f"    cy:               {intr.ppy:.2f}\n")
+
         # ---- configure SDK colorizer -------------------------------------
         vis = self.cfg.depth_vis
         self._colorizer.set_option(rs.option.color_scheme,
@@ -406,3 +415,64 @@ class RealSenseCamera:
         # No flip is applied here so the point cloud remains in the camera
         # frame that preprocessing, registration, and reconstruction expect.
         return pcd
+
+    def capture_rgbd_frame(
+        self,
+        frame_id: int = 0,
+    ) -> tuple["RGBDFrame | None", "np.ndarray | None"]:
+        """
+        Capture one synchronized RGB-D frame along with SDK preview image.
+
+        Returns
+        -------
+        frame:
+            RGBDFrame containing synchronized color, depth, point cloud with normals,
+            timestamp, and camera intrinsics, or None if dropped.
+        preview_colorized_bgr:
+            SDK-colorized depth image for GUI preview.
+        """
+        import time
+        from camera.frame import RGBDFrame
+
+        frames = self.pipeline.wait_for_frames()
+        aligned = self.align.process(frames)
+
+        depth_frame = aligned.get_depth_frame()
+        color_frame = aligned.get_color_frame()
+
+        if not depth_frame or not color_frame:
+            return None, None
+
+        # Apply post-processing filters
+        depth_frame = self._filter_depth(depth_frame)
+        preview_colorized_bgr = self.colorize_depth(depth_frame)
+
+        depth_m = (
+            np.asanyarray(depth_frame.get_data()).astype(np.float32)
+            * self.depth_scale
+        )
+        color_bgr = np.asanyarray(color_frame.get_data())
+
+        if depth_m.shape[:2] != color_bgr.shape[:2]:
+            import cv2
+            h, w = color_bgr.shape[:2]
+            depth_m = cv2.resize(depth_m, (w, h), interpolation=cv2.INTER_NEAREST)
+            preview_colorized_bgr = cv2.resize(preview_colorized_bgr, (w, h), interpolation=cv2.INTER_NEAREST)
+
+        ts = frames.get_timestamp() * 0.001 if hasattr(frames, "get_timestamp") else time.time()
+        pcd = self.to_point_cloud(color_bgr, depth_m)
+        if not pcd.has_normals() and len(pcd.points) > 10:
+            pcd.estimate_normals(
+                o3d.geometry.KDTreeSearchParamHybrid(radius=0.02, max_nn=30)
+            )
+
+        frame = RGBDFrame(
+            frame_id=frame_id,
+            color_bgr=color_bgr,
+            depth_m=depth_m,
+            pcd=pcd,
+            timestamp=ts,
+            intrinsics=self.intrinsics_o3d,
+        )
+        return frame, preview_colorized_bgr
+

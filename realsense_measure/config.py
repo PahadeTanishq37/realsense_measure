@@ -87,7 +87,8 @@ class CameraConfig:
 
     # Auto-capture settings
     auto_capture: bool = True
-    capture_interval_s: float = 2.0   # how often a frame is automatically captured (s)
+    capture_interval_s: float = 2.0   # how often a frame is automatically captured for box scans (s)
+    human_capture_interval_s: float = 0.4  # dense capture interval for human head/body scans (s)
     skip_near_duplicate_frames: bool = True
     duplicate_depth_diff_threshold_m: float = 0.01   # min mean abs depth diff (m) to avoid duplicate capture
 
@@ -155,10 +156,37 @@ class RegistrationConfig:
     # skip expensive FPFH+RANSAC global registration.
     icp_only_fitness_threshold: float = 0.60
 
+    # Registration strategy mode:
+    # "pointcloud" : legacy geometric FPFH+RANSAC -> ICP (optimal for box)
+    # "rgbd_human" : calibrated RGB-D odometry -> colored ICP -> quality gate -> pose graph (optimal for human face/head/body)
+    registration_mode: str = "pointcloud"
+
     # Multiway pose-graph registration settings
     use_multiway: bool = False  # sequential is the safer default; set True to use the (corrected, gated) pose graph
     loop_closure_search_window: int = 4   # how many frames back, beyond the immediate previous frame, to also test for a good registration — catches cases where frame i overlaps with frame i-3 or i-4 even though it wasn't captured immediately after it
     pose_graph_edge_prune_threshold: float = 0.25  # Open3D's own default, controls how aggressively weak/inconsistent edges get discarded during global optimization
+
+    # RGB-D Odometry settings (for "rgbd_human" mode)
+    rgbd_odometry_method: str = "hybrid"   # "hybrid" (depth + color) or "color"
+
+    # Colored ICP refinement settings (for "rgbd_human" mode)
+    use_colored_icp: bool = True
+    colored_icp_max_dist_m: float = 0.02    # 20 mm correspondence search radius
+    colored_icp_lambda_geom: float = 0.968  # Open3D recommended balance (0.968 geometric, 0.032 photometric)
+    colored_icp_max_iterations: int = 50
+
+    # Motion sanity / physical plausibility quality gates
+    max_rotation_deg_per_frame: float = 25.0   # reject inter-frame rotation jumps > 25 deg
+    max_translation_m_per_frame: float = 0.15  # reject inter-frame translation jumps > 150 mm
+    min_odometry_fitness: float = 0.35         # minimum inlier correspondence ratio for odometry
+    min_colored_icp_fitness: float = 0.45      # minimum inlier ratio for colored ICP
+    max_colored_icp_rmse_m: float = 0.008      # maximum allowable inlier RMSE (8 mm)
+    search_accepted_window: int = 4            # search up to 4 previously accepted frames when consecutive fails
+
+    # Visualisation toggles
+    show_registration_pairs: bool = False      # display before/after pairwise alignment window
+    show_camera_trajectory: bool = False       # display 3D camera trajectory with jump diagnostics
+
 
 
 
@@ -219,6 +247,11 @@ class PipelineConfig:
     # Developer / debug toggles
     show_stage_windows: bool = True   # pop up an Open3D window after each stage
     save_intermediate: bool = True    # write .ply / .json to output_dir after each stage
+
+    # Reconstruction fusion method: "pointcloud" (concatenation) or "tsdf" (volumetric TSDF integration)
+    fusion_method: str = "pointcloud"
+    tsdf_voxel_length_m: float = 0.004   # 4 mm voxel size for TSDF volume
+    tsdf_trunc_m: float = 0.02           # 20 mm SDF truncation margin
 
     # Diagnostic full-orbit check
     attempt_loop_closure: bool = False   # check last vs first frame alignment after registration

@@ -44,15 +44,37 @@ from pipeline import ScanPipeline
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="main.py",
-        description="Measure a 3-D object with a RealSense D455(f) depth camera.",
+        description="Measure a 3-D object or human face/head with a RealSense D455(f) depth camera.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
     parser.add_argument(
         "--target",
         default="box",
-        choices=["box"],  # more choices land here once head.py / body.py exist
-        help="what to measure",
+        choices=["box", "head", "body"],
+        help="what to scan/measure",
+    )
+    parser.add_argument(
+        "--mode",
+        default=None,
+        choices=["pointcloud", "rgbd_human"],
+        help="registration mode: pointcloud (geometric) or rgbd_human (RGB-D odometry + colored ICP)",
+    )
+    parser.add_argument(
+        "--fusion",
+        default="pointcloud",
+        choices=["pointcloud", "tsdf"],
+        help="reconstruction fusion method: pointcloud (concatenation) or tsdf (volumetric integration)",
+    )
+    parser.add_argument(
+        "--show-pairs",
+        action="store_true",
+        help="visualize pairwise registration before/after comparison",
+    )
+    parser.add_argument(
+        "--show-trajectory",
+        action="store_true",
+        help="visualize estimated camera trajectory with motion jump detection",
     )
     parser.add_argument(
         "--out",
@@ -78,7 +100,7 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         metavar="SEC",
-        help="override automatic capture interval in seconds (default: 2.0)",
+        help="override automatic capture interval in seconds (default: 2.0s for box, 0.4s for human)",
     )
     parser.add_argument(
         "--manual-capture",
@@ -109,12 +131,24 @@ def main() -> None:
     cfg.target.name        = args.target
     cfg.show_stage_windows = not args.no_viz
 
+    if args.mode is not None:
+        cfg.registration.registration_mode = args.mode
+    elif args.target in ("head", "body"):
+        cfg.registration.registration_mode = "rgbd_human"
+
+    cfg.fusion_method = args.fusion
+    if args.show_pairs:
+        cfg.registration.show_registration_pairs = True
+    if args.show_trajectory:
+        cfg.registration.show_camera_trajectory = True
+
     if args.voxel is not None:
         cfg.preprocess.voxel_size_m   = args.voxel
         cfg.registration.voxel_size_m = args.voxel
 
     if args.interval is not None:
         cfg.camera.capture_interval_s = args.interval
+        cfg.camera.human_capture_interval_s = args.interval
 
     if args.manual_capture:
         cfg.camera.auto_capture = False

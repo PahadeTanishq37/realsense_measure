@@ -42,6 +42,12 @@ import copy
 
 import numpy as np
 import open3d as o3d
+from open3d.pipelines.odometry import (
+    OdometryOption,
+    RGBDOdometryJacobianFromColorTerm,
+    RGBDOdometryJacobianFromHybridTerm,
+    compute_rgbd_odometry,
+)
 from open3d.pipelines.registration import (
     CorrespondenceCheckerBasedOnDistance,
     CorrespondenceCheckerBasedOnEdgeLength,
@@ -53,14 +59,16 @@ from open3d.pipelines.registration import (
     PoseGraphEdge,
     PoseGraphNode,
     RANSACConvergenceCriteria,
+    TransformationEstimationForColoredICP,
     TransformationEstimationPointToPlane,
     TransformationEstimationPointToPoint,
     get_information_matrix_from_point_clouds,
     global_optimization,
+    registration_colored_icp,
     registration_icp,
     registration_ransac_based_on_feature_matching,
 )
-
+from camera.frame import RGBDFrame
 from config import RegistrationConfig
 
 
@@ -541,4 +549,375 @@ def register_sequence_multiway(
         else:
             aligned.append(copy.deepcopy(f))
     return aligned, diagnostics
+
+
+# ---------------------------------------------------------------------------
+# Human 180° Multi-View Registration (RGB-D Odometry + Colored ICP)
+# ---------------------------------------------------------------------------
+
+def compute_rotation_deg(R: np.ndarray) -> float:
+    """Compute the geodesic rotation angle in degrees from a 3x3 rotation matrix."""
+    trace = float(np.trace(R[:3, :3]))
+    cos_theta = np.clip((trace - 1.0) / 2.0, -1.0, 1.0)
+    return float(np.rad2deg(np.arccos(cos_theta)))
+
+
+def compute_translation_mm(T: np.ndarray) -> float:
+    """Compute the translation norm in millimetres from a 4x4 matrix."""
+    return float(np.linalg.norm(T[:3, 3]) * 1000.0)
+
+
+def register_rgbd_pair(
+    source_frame: RGBDFrame,
+    target_frame: RGBDFrame,
+    cfg: RegistrationConfig,
+) -> tuple[np.ndarray, float, float, bool, str, float, float, str]:
+    """
+    Register source_frame onto target_frame with RGB-D Odometry -> Colored ICP -> Quality Gate -> FPFH/RANSAC Fallback.
+
+    CONVENTION
+    ----------
+    Returns T that maps source_frame INTO target_frame coordinate system:
+        p_target = T @ p_source
+
+    Returns
+    -------
+    (T, fitness, rmse, accepted, method_name, rot_deg, trans_mm, reason)
+    """
+    # Guard against empty / degenerate point clouds
+    if (
+        not hasattr(source_frame, "pcd") or len(source_frame.pcd.points) < 20
+        or not hasattr(target_frame, "pcd") or len(target_frame.pcd.points) < 20
+    ):
+        return (
+            np.eye(4),
+            0.0,
+            float("inf"),
+            False,
+            "FAILED",
+            0.0,
+            0.0,
+            "Insufficient points in source or target frame (< 20 points)",
+        )
+
+    # 1. RGB-D Odometry initial pose estimation
+    init_trans = np.eye(4)
+    odo_status = "NOT RUN"
+    try:
+        rgbd_source = source_frame.to_rgbd_image(depth_trunc=1.5, convert_rgb_to_intensity=True)
+        rgbd_target = target_frame.to_rgbd_image(depth_trunc=1.5, convert_rgb_to_intensity=True)
+
+        if cfg.rgbd_odometry_method == "hybrid":
+            jacobian = RGBDOdometryJacobianFromHybridTerm()
+        else:
+            jacobian = RGBDOdometryJacobianFromColorTerm()
+
+        option = OdometryOption()
+        option.depth_diff_max = cfg.colored_icp_max_dist_m * 1.5
+        option.depth_min = 0.20
+        option.depth_max = 1.50
+
+        odo_success, odo_trans, odo_info = compute_rgbd_odometry(
+            rgbd_source,
+            rgbd_target,
+            source_frame.intrinsics,
+            np.eye(4),
+            jacobian,
+            option,
+        )
+
+        if odo_success:
+            odo_rot = compute_rotation_deg(odo_trans)
+            odo_trans_mm = compute_translation_mm(odo_trans)
+            if odo_rot <= cfg.max_rotation_deg_per_frame and odo_trans_mm <= (cfg.max_translation_m_per_frame * 1000.0):
+                init_trans = odo_trans
+                odo_status = "PASS"
+            else:
+                odo_status = f"MOTION_EXCESSIVE (rot={odo_rot:.1f}deg, trans={odo_trans_mm:.0f}mm)"
+        else:
+            odo_status = "FAIL"
+    except Exception as exc:
+        odo_status = f"ERROR ({exc})"
+
+    # 2. Colored ICP Refinement
+    src_pcd = copy.deepcopy(source_frame.pcd)
+    tgt_pcd = copy.deepcopy(target_frame.pcd)
+
+    if not src_pcd.has_normals():
+        src_pcd.estimate_normals(
+            o3d.geometry.KDTreeSearchParamHybrid(radius=cfg.colored_icp_max_dist_m * 2.0, max_nn=30)
+        )
+    if not tgt_pcd.has_normals():
+        tgt_pcd.estimate_normals(
+            o3d.geometry.KDTreeSearchParamHybrid(radius=cfg.colored_icp_max_dist_m * 2.0, max_nn=30)
+        )
+
+    colored_status = "NOT RUN"
+    try:
+        colored_res = registration_colored_icp(
+            src_pcd,
+            tgt_pcd,
+            cfg.colored_icp_max_dist_m,
+            init_trans,
+            TransformationEstimationForColoredICP(lambda_geometric=cfg.colored_icp_lambda_geom),
+            ICPConvergenceCriteria(max_iteration=cfg.colored_icp_max_iterations),
+        )
+        T_colored = colored_res.transformation
+        fit_colored = float(colored_res.fitness)
+        rmse_colored = float(colored_res.inlier_rmse)
+        rot_colored = compute_rotation_deg(T_colored)
+        trans_colored = compute_translation_mm(T_colored)
+
+        # Quality gating
+        issues = []
+        if fit_colored < cfg.min_colored_icp_fitness:
+            issues.append(f"fitness {fit_colored:.3f} < {cfg.min_colored_icp_fitness:.2f}")
+        if rmse_colored > cfg.max_colored_icp_rmse_m:
+            issues.append(f"rmse {rmse_colored * 1000.0:.2f}mm > {cfg.max_colored_icp_rmse_m * 1000.0:.1f}mm")
+        if rot_colored > cfg.max_rotation_deg_per_frame:
+            issues.append(f"rotation {rot_colored:.1f}deg > {cfg.max_rotation_deg_per_frame:.0f}deg")
+        if trans_colored > (cfg.max_translation_m_per_frame * 1000.0):
+            issues.append(f"translation {trans_colored:.1f}mm > {cfg.max_translation_m_per_frame * 1000.0:.0f}mm")
+
+        if not issues:
+            return (
+                T_colored,
+                fit_colored,
+                rmse_colored,
+                True,
+                "RGBD_ODOMETRY_COLORED_ICP",
+                rot_colored,
+                trans_colored,
+                f"Odometry: {odo_status} -> Colored ICP PASS",
+            )
+        colored_status = "FAIL: " + ", ".join(issues)
+    except Exception as exc:
+        colored_status = f"ERROR ({exc})"
+        T_colored = init_trans
+        fit_colored = 0.0
+        rmse_colored = float("inf")
+        rot_colored = 0.0
+        trans_colored = 0.0
+
+    # 3. Geometric Fallback (FPFH + RANSAC -> Point-to-Plane ICP)
+    try:
+        fb_T, fb_fit, fb_rmse = register_frame_pair(src_pcd, tgt_pcd, cfg)
+        fb_rot = compute_rotation_deg(fb_T)
+        fb_trans = compute_translation_mm(fb_T)
+
+        if (
+            fb_fit >= cfg.min_accept_fitness
+            and fb_rmse <= cfg.max_colored_icp_rmse_m * 1.5
+            and fb_rot <= cfg.max_rotation_deg_per_frame
+            and fb_trans <= (cfg.max_translation_m_per_frame * 1000.0)
+        ):
+            return (
+                fb_T,
+                fb_fit,
+                fb_rmse,
+                True,
+                "FPFH_RANSAC_FALLBACK",
+                fb_rot,
+                fb_trans,
+                f"Colored ICP failed ({colored_status}); recovered via FPFH+RANSAC",
+            )
+    except Exception as exc:
+        pass
+
+    fail_reason = f"Colored ICP failed ({colored_status}); Fallback also failed"
+    return (
+        T_colored,
+        fit_colored,
+        rmse_colored,
+        False,
+        "FAILED",
+        rot_colored,
+        trans_colored,
+        fail_reason,
+    )
+
+
+def build_pose_graph_rgbd(
+    frames: list[RGBDFrame],
+    cfg: RegistrationConfig,
+):
+    """
+    Build a multiway pose graph for human RGB-D frames with bounded search and quality gating.
+
+    Returns
+    -------
+    (pose_graph, node_of, diagnostics, n_odom, n_loop, pair_logs, poses)
+    """
+    n = len(frames)
+    pose_graph = PoseGraph()
+    pose_graph.nodes.append(PoseGraphNode(np.eye(4)))
+    node_of: dict[int, int] = {0: 0}
+    poses: dict[int, np.ndarray] = {0: np.eye(4)}
+    accepted_idx: list[int] = [0]
+    diagnostics: list[tuple[float, float, bool] | None] = [(1.0, 0.0, True)] + [None] * (n - 1)
+    pair_logs: list[dict] = []
+    n_odom = 0
+    n_loop = 0
+
+    for i in range(1, n):
+        # Bounded search across previously accepted frames
+        window = accepted_idx[-(cfg.search_accepted_window + 1):]
+        candidates = []
+
+        for j in reversed(window):
+            res = register_rgbd_pair(frames[i], frames[j], cfg)
+            T, fit, rmse, accepted, method, rot, trans, reason = res
+
+            pair_logs.append({
+                "source": i,
+                "target": j,
+                "success": accepted,
+                "method": method,
+                "fitness": fit,
+                "rmse_mm": rmse * 1000.0 if np.isfinite(rmse) else 999.0,
+                "rotation_deg": rot,
+                "translation_mm": trans,
+                "reason": reason,
+            })
+
+            # Print pair log immediately
+            status_str = "ACCEPTED" if accepted else f"REJECTED ({reason})"
+            print(f"    frame {i:02d} -> {j:02d}: method={method} fitness={fit:.4f} "
+                  f"rmse={rmse * 1000.0:.2f}mm rot={rot:.1f}deg trans={trans:.1f}mm -> {status_str}")
+
+            if accepted:
+                candidates.append((j, T, fit, rmse, rot, trans, method))
+
+        if not candidates:
+            # All candidates in the window failed
+            best_prev = pair_logs[-1] if pair_logs else {}
+            diagnostics[i] = (best_prev.get("fitness", 0.0), best_prev.get("rmse_mm", float("inf")) / 1000.0, False)
+            print(f"  [!] Frame {i:02d} could not be registered to any recent accepted frame -- REJECTED.")
+            continue
+
+        # Choose best candidate (highest inlier fitness)
+        j_best, T_best, fit_best, rmse_best, rot_best, trans_best, method_best = max(
+            candidates, key=lambda c: c[2]
+        )
+
+        pose_i = poses[j_best] @ T_best
+        node_id = len(pose_graph.nodes)
+        pose_graph.nodes.append(PoseGraphNode(pose_i))
+        node_of[i] = node_id
+        poses[i] = pose_i
+
+        # Add edges: best candidate is certain (odometry); other candidates in window are uncertain (loop closures)
+        for j, T, fit, rmse, rot, trans, method in candidates:
+            info = get_information_matrix(frames[i].pcd, frames[j].pcd, T, cfg)
+            certain = (j == j_best)
+            pose_graph.edges.append(
+                PoseGraphEdge(node_id, node_of[j], T, info, uncertain=not certain)
+            )
+            if certain:
+                n_odom += 1
+            else:
+                n_loop += 1
+
+        accepted_idx.append(i)
+        diagnostics[i] = (fit_best, rmse_best, True)
+
+    return pose_graph, node_of, diagnostics, n_odom, n_loop, pair_logs, poses
+
+
+def register_sequence_rgbd_human(
+    frames: list[RGBDFrame],
+    cfg: RegistrationConfig,
+) -> tuple[list[o3d.geometry.PointCloud], list[tuple[float, float, bool]], list[np.ndarray], dict]:
+    """
+    Multi-view human head/body registration using RGB-D odometry, colored ICP, and global pose graph.
+
+    Returns
+    -------
+    aligned:
+        Point clouds transformed into the common world coordinate system.
+    diagnostics:
+        Per-frame (fitness, rmse, accepted) tuples.
+    poses:
+        List of 4x4 camera-to-world poses for all frames.
+    summary_stats:
+        Dictionary of human registration metrics for the required report.
+    """
+    if not frames:
+        return [], [], [], {}
+
+    if len(frames) == 1:
+        return [copy.deepcopy(frames[0].pcd)], [(1.0, 0.0, True)], [np.eye(4)], {
+            "captured": 1,
+            "accepted": 1,
+            "rejected": 0,
+            "avg_rmse_mm": 0.0,
+            "median_rmse_mm": 0.0,
+            "max_trans_jump_mm": 0.0,
+            "max_rot_jump_deg": 0.0,
+            "first_rejected_frame": None,
+        }
+
+    print("\n  Running Human RGB-D Pairwise Registration with Colored ICP & Bounded Search...")
+    pose_graph, node_of, diagnostics, n_odom, n_loop, pair_logs, unopt_poses = build_pose_graph_rgbd(frames, cfg)
+
+    n_before = len(pose_graph.edges)
+    if len(pose_graph.nodes) > 1:
+        optimize_pose_graph(pose_graph, cfg)
+
+    print(
+        f"  Pose graph: {len(pose_graph.nodes)} of {len(frames)} frames in graph, "
+        f"{n_before} edges ({n_odom} primary + {n_loop} loop-closure), "
+        f"{len(pose_graph.edges)} survived pruning."
+    )
+
+    # Extract final camera poses
+    poses: list[np.ndarray] = []
+    aligned: list[o3d.geometry.PointCloud] = []
+
+    for i in range(len(frames)):
+        if i in node_of:
+            p = pose_graph.nodes[node_of[i]].pose
+            poses.append(p)
+            aligned.append(copy.deepcopy(frames[i].pcd).transform(p))
+        else:
+            p = unopt_poses.get(i, np.eye(4))
+            poses.append(p)
+            aligned.append(copy.deepcopy(frames[i].pcd))
+
+    # Calculate metrics
+    accepted_pairs = [log for log in pair_logs if log["success"]]
+    rmse_values = [log["rmse_mm"] for log in accepted_pairs if log["rmse_mm"] < 990.0]
+    avg_rmse = float(np.mean(rmse_values)) if rmse_values else 0.0
+    median_rmse = float(np.median(rmse_values)) if rmse_values else 0.0
+
+    rot_jumps = [log["rotation_deg"] for log in accepted_pairs]
+    trans_jumps = [log["translation_mm"] for log in accepted_pairs]
+    max_rot_jump = float(np.max(rot_jumps)) if rot_jumps else 0.0
+    max_trans_jump = float(np.max(trans_jumps)) if trans_jumps else 0.0
+
+    first_rejected = None
+    for i, diag in enumerate(diagnostics):
+        if diag is not None and not diag[2]:
+            first_rejected = i
+            break
+
+    n_accepted = sum(1 for d in diagnostics if d is not None and d[2])
+    n_rejected = len(frames) - n_accepted
+
+    summary_stats = {
+        "captured": len(frames),
+        "accepted": n_accepted,
+        "rejected": n_rejected,
+        "avg_rmse_mm": avg_rmse,
+        "median_rmse_mm": median_rmse,
+        "max_trans_jump_mm": max_trans_jump,
+        "max_rot_jump_deg": max_rot_jump,
+        "first_rejected_frame": first_rejected,
+        "n_nodes": len(pose_graph.nodes),
+        "n_edges": len(pose_graph.edges),
+        "n_loop": n_loop,
+    }
+
+    return aligned, diagnostics, poses, summary_stats
+
 

@@ -16,18 +16,27 @@ import cv2
 import numpy as np
 import open3d as o3d
 
+from camera.frame import RGBDFrame
 from camera.realsense_capture import RealSenseCamera
 from config import PipelineConfig
 from preprocessing import isolate_object, reject_positional_outliers
-from reconstruction import fuse_point_clouds
+from reconstruction import fuse_point_clouds, fuse_tsdf_volume
 from registration import (
     register_frame_pair,
     register_sequence,
     register_sequence_multiway,
+    register_sequence_rgbd_human,
 )
 from targets.base import get_target
-import targets.box  # noqa: F401 — registers BoxTarget via @register_target
-from visualizer import color_frames_distinctly, obb_lineset, show
+import targets.box   # noqa: F401 — registers BoxTarget via @register_target
+import targets.head  # noqa: F401 — registers HeadTarget via @register_target
+from visualizer import (
+    color_frames_distinctly,
+    draw_camera_trajectory,
+    obb_lineset,
+    show,
+    visualize_registration_pair,
+)
 
 
 def _draw_hud(
@@ -38,6 +47,8 @@ def _draw_hud(
     vis_min_m: float,
     vis_max_m: float,
     auto_capture: bool = True,
+    mode_title: str = "D455f STATUS",
+    is_human: bool = False,
 ) -> None:
     """
     Render the D455f status HUD onto the depth panel in-place.
@@ -60,6 +71,10 @@ def _draw_hud(
         Configured visualization range (from DepthVisConfig).
     auto_capture:
         Whether continuous automatic capture mode is active.
+    mode_title:
+        Title header displayed at the top of the HUD.
+    is_human:
+        Whether human 180° scan mode is active.
     """
     valid = depth_m[depth_m > 0]
     n_valid   = int(valid.size)
@@ -69,13 +84,15 @@ def _draw_hud(
 
     cloud_status = f"{n_pts:,} pts" if n_pts > 0 else "--"
 
-    if auto_capture:
+    if is_human:
+        legend = "HUMAN 180 SWEEP: move slowly, keep subject still -- ENTER: finish"
+    elif auto_capture:
         legend = "AUTO-CAPTURING -- move camera around object -- press ENTER when done"
     else:
         legend = "SPACE: capture  ENTER: finish (2+)  ESC: abort"
 
     lines = [
-        "D455f STATUS",
+        mode_title,
         "",
         f"Frames captured : {n_frames}",
         f"Valid depth px  : {n_valid:,}",
@@ -98,8 +115,8 @@ def _draw_hud(
         cv2.putText(panel, line, (10, y),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.52,
                     (0, 0, 0), 3, cv2.LINE_AA)
-        # White text
-        color = (0, 255, 255) if line == "D455f STATUS" else (255, 255, 255)
+        # White / yellow text
+        color = (0, 255, 255) if line == mode_title else (255, 255, 255)
         cv2.putText(panel, line, (10, y),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.52,
                     color, 1, cv2.LINE_AA)
@@ -115,7 +132,7 @@ def _depth_mean_diff(d1: np.ndarray, d2: np.ndarray) -> float:
 
 class ScanPipeline:
     """
-    End-to-end orchestration of a multi-view box measurement scan.
+    End-to-end orchestration of a multi-view scan (BOX or HUMAN HEAD/BODY).
 
     Usage::
 
@@ -126,6 +143,10 @@ class ScanPipeline:
 
     def __init__(self, cfg: PipelineConfig) -> None:
         self.cfg = cfg
+        # If targeting human head or body, default to rgbd_human registration mode unless overridden
+        if cfg.target.name in ("head", "body") and cfg.registration.registration_mode == "pointcloud":
+            cfg.registration.registration_mode = "rgbd_human"
+
         cfg.output_dir.mkdir(parents=True, exist_ok=True)
         self.target = get_target(cfg.target.name)
 
@@ -133,32 +154,48 @@ class ScanPipeline:
     # Stage 1: capture
     # ------------------------------------------------------------------
 
-    def capture_frames(self) -> list[o3d.geometry.PointCloud]:
+    def capture_frames(self) -> list[o3d.geometry.PointCloud | RGBDFrame]:
         """
-        Live camera capture loop — returns a list of raw per-frame PointClouds.
-
-        Controls:
-          AUTO-CAPTURE: continuously captures frames at cfg.camera.capture_interval_s
-          SPACE  — capture current frame (when manual capture is enabled)
-          ENTER  — finish capture (requires ≥ 2 frames)
-          ESC    — abort (raises KeyboardInterrupt)
+        Live camera capture loop.
 
         Returns
         -------
-        list[o3d.geometry.PointCloud]
-            Raw point clouds, one per captured frame, in capture order.
+        list[PointCloud | RGBDFrame]
+            In pointcloud mode: raw PointClouds.
+            In rgbd_human mode: synchronized RGBDFrame instances containing color,
+            depth, point clouds with normals, timestamps, and intrinsics.
         """
         cam = RealSenseCamera(self.cfg.camera).start()
-        raw_frames: list[o3d.geometry.PointCloud] = []
+        is_human_mode = (self.cfg.registration.registration_mode == "rgbd_human")
+
+        # In human mode, use the configured human_capture_interval_s (default 0.4s) unless overridden
+        capture_interval = self.cfg.camera.capture_interval_s
+        if is_human_mode and self.cfg.camera.human_capture_interval_s is not None:
+            capture_interval = self.cfg.camera.human_capture_interval_s
+
+        raw_frames: list[o3d.geometry.PointCloud | RGBDFrame] = []
 
         print("\n" + "=" * 60)
         print("  Stage 1: Capture")
-        if self.cfg.camera.auto_capture:
-            print(f"  AUTO-CAPTURE: move camera around object (interval: "
-                  f"{self.cfg.camera.capture_interval_s:.2f}s)")
+        if is_human_mode:
+            print("  MODE: HUMAN 180° SCAN (RGB-D Odometry + Colored ICP)")
+            print("  OPERATOR GUIDANCE:")
+            print("    * Keep the subject still (subject rigidity is assumed).")
+            print("    * Move camera slowly in a smooth ~180° arc around the front.")
+            print("    * Maintain substantial overlap between consecutive views.")
+            print("    * Keep the subject's face/head approximately centered.")
+            print("    * Avoid sudden camera rotations or translations.")
+            print("    * Complete the 180° sweep smoothly.")
+            print(f"  AUTO-CAPTURE interval: {capture_interval:.2f}s")
             print("  ENTER = finish (requires 2+ frames) | ESC = abort")
         else:
-            print("  MANUAL CAPTURE: SPACE = capture frame | ENTER = finish | ESC = abort")
+            print("  MODE: BOX / OBJECT SCAN (Point Cloud)")
+            if self.cfg.camera.auto_capture:
+                print(f"  AUTO-CAPTURE: move camera around object (interval: "
+                      f"{capture_interval:.2f}s)")
+                print("  ENTER = finish (requires 2+ frames) | ESC = abort")
+            else:
+                print("  MANUAL CAPTURE: SPACE = capture frame | ENTER = finish | ESC = abort")
         print("=" * 60)
 
         start_capture_time = time.time()
@@ -182,9 +219,9 @@ class ScanPipeline:
                     depth_color = cv2.resize(depth_color, (w, h),
                                              interpolation=cv2.INTER_NEAREST)
 
-                # Draw the rich HUD onto the depth panel (in-place, copy first
-                # so we don't clobber the original colorized image).
+                # Draw the rich HUD onto the depth panel
                 depth_panel = depth_color.copy()
+                hud_title = "HUMAN 180° SCAN" if is_human_mode else "D455f STATUS"
                 _draw_hud(
                     depth_panel,
                     depth_m,
@@ -193,17 +230,20 @@ class ScanPipeline:
                     vis_min_m=self.cfg.camera.depth_vis.visual_min_m,
                     vis_max_m=self.cfg.camera.depth_vis.visual_max_m,
                     auto_capture=self.cfg.camera.auto_capture,
+                    mode_title=hud_title,
+                    is_human=is_human_mode,
                 )
 
                 preview = np.hstack([color_bgr, depth_panel])
-                cv2.imshow("Stage 1: D455f Capture (RGB | Depth)", preview)
+                window_name = "Stage 1: Human 180° Capture" if is_human_mode else "Stage 1: D455f Capture (RGB | Depth)"
+                cv2.imshow(window_name, preview)
                 key = cv2.waitKey(1) & 0xFF
 
                 now = time.time()
 
                 # ---- Auto-capture logic --------------------------------
                 if self.cfg.camera.auto_capture:
-                    if now - last_capture_time >= self.cfg.camera.capture_interval_s:
+                    if now - last_capture_time >= capture_interval:
                         is_duplicate = False
                         if (self.cfg.camera.skip_near_duplicate_frames
                                 and last_captured_depth is not None):
@@ -216,36 +256,61 @@ class ScanPipeline:
                                 print("  ... camera hasn't moved enough, still waiting ...")
                                 last_skip_warn_time = now
                         else:
-                            pcd = cam.to_point_cloud(color_bgr, depth_m)
-                            iso_test = isolate_object(pcd, self.cfg.preprocess, self.cfg.target)
-                            n_obj_pts = len(iso_test.points)
-                            if n_obj_pts < self.cfg.target.min_object_points:
-                                print(f"  Frame discarded: isolated to only {n_obj_pts} pts "
-                                      f"(need >= {self.cfg.target.min_object_points}) -- "
-                                      f"this angle didn't capture usable object data, keep moving")
+                            if is_human_mode:
+                                rgbd_frame, _ = cam.capture_rgbd_frame(frame_id=len(raw_frames))
+                                if rgbd_frame is not None:
+                                    n_pts = len(rgbd_frame.pcd.points)
+                                    if n_pts < self.cfg.target.min_object_points:
+                                        print(f"  Frame discarded: only {n_pts} pts in range -- check distance to subject (0.4m - 1.2m)")
+                                    else:
+                                        raw_frames.append(rgbd_frame)
+                                        last_n_pts = n_pts
+                                        last_capture_time = now
+                                        last_captured_depth = depth_m.copy()
+                                        print(f"  Captured human frame {len(raw_frames):2d}: {n_pts:>6} pts with RGB-D [OK]")
                             else:
-                                raw_frames.append(pcd)
-                                last_n_pts = len(pcd.points)
-                                last_capture_time = now
-                                last_captured_depth = depth_m.copy()
-                                print(f"  Captured frame {len(raw_frames):2d}: "
-                                      f"{last_n_pts:>7} raw pts -> {n_obj_pts:>5} object pts [OK]")
+                                pcd = cam.to_point_cloud(color_bgr, depth_m)
+                                iso_test = isolate_object(pcd, self.cfg.preprocess, self.cfg.target)
+                                n_obj_pts = len(iso_test.points)
+                                if n_obj_pts < self.cfg.target.min_object_points:
+                                    print(f"  Frame discarded: isolated to only {n_obj_pts} pts "
+                                          f"(need >= {self.cfg.target.min_object_points}) -- "
+                                          f"this angle didn't capture usable object data, keep moving")
+                                else:
+                                    raw_frames.append(pcd)
+                                    last_n_pts = len(pcd.points)
+                                    last_capture_time = now
+                                    last_captured_depth = depth_m.copy()
+                                    print(f"  Captured frame {len(raw_frames):2d}: "
+                                          f"{last_n_pts:>7} raw pts -> {n_obj_pts:>5} object pts [OK]")
 
                 # ---- Manual capture handling ---------------------------
                 elif key == 32:  # SPACE — manual capture
-                    pcd = cam.to_point_cloud(color_bgr, depth_m)
-                    iso_test = isolate_object(pcd, self.cfg.preprocess, self.cfg.target)
-                    n_obj_pts = len(iso_test.points)
-                    if n_obj_pts < self.cfg.target.min_object_points:
-                        print(f"  Frame discarded: isolated to only {n_obj_pts} pts "
-                              f"(need >= {self.cfg.target.min_object_points}) -- "
-                              f"this angle didn't capture usable object data, try adjusting angle")
+                    if is_human_mode:
+                        rgbd_frame, _ = cam.capture_rgbd_frame(frame_id=len(raw_frames))
+                        if rgbd_frame is not None:
+                            n_pts = len(rgbd_frame.pcd.points)
+                            if n_pts < self.cfg.target.min_object_points:
+                                print(f"  Frame discarded: only {n_pts} pts in range -- check distance to subject")
+                            else:
+                                raw_frames.append(rgbd_frame)
+                                last_n_pts = n_pts
+                                last_captured_depth = depth_m.copy()
+                                print(f"  Captured human frame {len(raw_frames):2d}: {n_pts:>6} pts with RGB-D [OK]")
                     else:
-                        raw_frames.append(pcd)
-                        last_n_pts = len(pcd.points)
-                        last_captured_depth = depth_m.copy()
-                        print(f"  Captured frame {len(raw_frames):2d}: "
-                              f"{last_n_pts:>7} raw pts -> {n_obj_pts:>5} object pts [OK]")
+                        pcd = cam.to_point_cloud(color_bgr, depth_m)
+                        iso_test = isolate_object(pcd, self.cfg.preprocess, self.cfg.target)
+                        n_obj_pts = len(iso_test.points)
+                        if n_obj_pts < self.cfg.target.min_object_points:
+                            print(f"  Frame discarded: isolated to only {n_obj_pts} pts "
+                                  f"(need >= {self.cfg.target.min_object_points}) -- "
+                                  f"this angle didn't capture usable object data, try adjusting angle")
+                        else:
+                            raw_frames.append(pcd)
+                            last_n_pts = len(pcd.points)
+                            last_captured_depth = depth_m.copy()
+                            print(f"  Captured frame {len(raw_frames):2d}: "
+                                  f"{last_n_pts:>7} raw pts -> {n_obj_pts:>5} object pts [OK]")
 
                 # ---- Finish / Abort keys -------------------------------
                 if key == 13:  # ENTER — finish
@@ -276,20 +341,20 @@ class ScanPipeline:
 
     def isolate_frames(
         self,
-        raw_frames: list[o3d.geometry.PointCloud],
-    ) -> list[o3d.geometry.PointCloud]:
+        raw_frames: list[o3d.geometry.PointCloud | RGBDFrame],
+    ) -> list[o3d.geometry.PointCloud | RGBDFrame]:
         """
-        Run per-frame isolation (downsample → plane removal → cluster).
+        Run per-frame isolation.
 
         Parameters
         ----------
         raw_frames:
-            List of raw PointClouds from :meth:`capture_frames`.
+            List of raw PointClouds or RGBDFrames from :meth:`capture_frames`.
 
         Returns
         -------
-        list[o3d.geometry.PointCloud]
-            Isolated, cleaned per-frame object clouds.
+        list[PointCloud | RGBDFrame]
+            Isolated, cleaned per-frame objects.
         """
         print("\n" + "=" * 60)
         print("  Stage 2: Isolating object per frame ...")
@@ -297,8 +362,31 @@ class ScanPipeline:
 
         pre_cfg = self.cfg.preprocess
         target_cfg = self.cfg.target
-        isolated: list[o3d.geometry.PointCloud] = []
 
+        # Branch for human RGB-D frames: retain RGBDFrame representation
+        if raw_frames and isinstance(raw_frames[0], RGBDFrame):
+            isolated_rgbd: list[RGBDFrame] = []
+            for i, f in enumerate(raw_frames):
+                pcd = f.pcd
+                n_before = len(pcd.points)
+                # Denoise point cloud while preserving RGB-D arrays
+                cl, _ = pcd.remove_statistical_outlier(
+                    nb_neighbors=pre_cfg.outlier_neighbors,
+                    std_ratio=pre_cfg.outlier_std_ratio,
+                )
+                f.pcd = cl
+                isolated_rgbd.append(f)
+                print(f"  frame {i:02d}: {n_before:>7} pts -> {len(cl.points):>6} clean pts [ACCEPTED]")
+
+            if self.cfg.show_stage_windows:
+                show(
+                    color_frames_distinctly([f.pcd for f in isolated_rgbd]),
+                    window_name="Stage 2: preprocessed human frames",
+                )
+            return isolated_rgbd
+
+        # Box / standard PointCloud path:
+        isolated: list[o3d.geometry.PointCloud] = []
         for i, frame in enumerate(raw_frames):
             n_before = len(frame.points)
             iso = isolate_object(frame, pre_cfg, target_cfg)
@@ -331,7 +419,6 @@ class ScanPipeline:
             )
 
         if self.cfg.save_intermediate:
-            # remove stale frames from previous runs so the folder only ever holds this run
             for old in self.cfg.output_dir.glob("frame_*_isolated.ply"):
                 old.unlink()
 
@@ -348,18 +435,10 @@ class ScanPipeline:
 
     def register(
         self,
-        isolated_frames: list[o3d.geometry.PointCloud],
-    ) -> tuple[list[o3d.geometry.PointCloud], list[tuple[float, float, bool]]]:
+        isolated_frames: list[o3d.geometry.PointCloud | RGBDFrame],
+    ) -> tuple[list[o3d.geometry.PointCloud], list[tuple[float, float, bool]], list[np.ndarray] | None]:
         """
         Align all isolated frames into the shared reference coordinate system.
-
-        Uses multi-candidate registration with acceptance gating against
-        cfg.registration.min_accept_fitness to protect against reference corruption.
-
-        Parameters
-        ----------
-        isolated_frames:
-            Cleaned per-frame clouds from :meth:`isolate_frames`.
 
         Returns
         -------
@@ -367,8 +446,74 @@ class ScanPipeline:
             List of all aligned point clouds in frame-0 coordinates.
         diagnostics:
             List of (fitness, rmse, accepted) tuples per frame.
+        poses:
+            List of 4x4 camera poses (or None in sequential pointcloud mode).
         """
         print("\n" + "=" * 60)
+        is_human_mode = (self.cfg.registration.registration_mode == "rgbd_human")
+
+        if is_human_mode:
+            print("  Stage 3: Registering human frames (RGB-D Odometry + Colored ICP + Pose Graph) ...")
+            print("=" * 60)
+            aligned, diagnostics, poses, summary_stats = register_sequence_rgbd_human(
+                isolated_frames, self.cfg.registration
+            )
+
+            # Output the required Section 21 diagnostic report
+            print("\n" + "=" * 60)
+            print("HUMAN RGB-D REGISTRATION")
+            print("------------------------")
+            print(f"Frames captured: {summary_stats.get('captured', len(isolated_frames))}")
+            print(f"Frames accepted: {summary_stats.get('accepted', 0)}")
+            print(f"Frames rejected: {summary_stats.get('rejected', 0)}")
+            print("")
+            print(f"Average pairwise RMSE: {summary_stats.get('avg_rmse_mm', 0.0):.2f} mm")
+            print(f"Median pairwise RMSE:  {summary_stats.get('median_rmse_mm', 0.0):.2f} mm")
+            print(f"Maximum translation jump: {summary_stats.get('max_trans_jump_mm', 0.0):.1f} mm")
+            print(f"Maximum rotation jump:    {summary_stats.get('max_rot_jump_deg', 0.0):.1f} deg")
+            print("")
+            print("Pose graph:")
+            print(f"    nodes: {summary_stats.get('n_nodes', 0)}")
+            print(f"    edges: {summary_stats.get('n_edges', 0)}")
+            print(f"    loop closures: {summary_stats.get('n_loop', 0)}")
+            print("")
+            first_rej = summary_stats.get("first_rejected_frame")
+            if first_rej is not None:
+                print(f"First rejected or suspicious frame: Frame {first_rej:02d}")
+            else:
+                print("First rejected or suspicious frame: None (all accepted)")
+            print("=" * 60)
+
+            # Pairwise inspection visualization
+            if self.cfg.registration.show_registration_pairs and self.cfg.show_stage_windows:
+                print("\n  Displaying pairwise registration inspection windows...")
+                for idx in range(min(2, len(isolated_frames) - 1)):
+                    if isinstance(isolated_frames[idx], RGBDFrame) and isinstance(isolated_frames[idx + 1], RGBDFrame):
+                        T_rel = np.linalg.inv(poses[idx]) @ poses[idx + 1]
+                        visualize_registration_pair(
+                            isolated_frames[idx].pcd,
+                            isolated_frames[idx + 1].pcd,
+                            T_rel,
+                            pair_name=f"Pair {idx:02d} -> {idx+1:02d}",
+                        )
+
+            # Camera trajectory visualization
+            if self.cfg.registration.show_camera_trajectory and self.cfg.show_stage_windows:
+                print("\n  Displaying estimated camera trajectory...")
+                traj_geoms = draw_camera_trajectory(poses, scale=0.04)
+                if traj_geoms:
+                    acc_clouds = [f for f, (*_, acc) in zip(aligned, diagnostics) if acc]
+                    show(traj_geoms + acc_clouds, window_name="Estimated Camera Trajectory")
+
+            if self.cfg.show_stage_windows:
+                show(
+                    color_frames_distinctly(aligned),
+                    window_name="Stage 3: registered/aligned human clouds",
+                )
+
+            return aligned, diagnostics, poses
+
+        # Standard box / pointcloud path:
         if self.cfg.registration.use_multiway:
             print("  Stage 3: Registering frames (Pose Graph Multiway Registration) ...")
         else:
@@ -395,13 +540,11 @@ class ScanPipeline:
             print("  Tip: low acceptance ratio (< 70%). Try moving the camera more slowly")
             print("       or reducing --interval for higher frame overlap.")
 
-        # Optional diagnostic loop-closure check (gated behind cfg.attempt_loop_closure)
         if self.cfg.attempt_loop_closure:
             accepted_indices = [idx for idx, (*_, acc) in enumerate(diagnostics) if acc]
             if len(accepted_indices) >= 8:
                 last_idx = accepted_indices[-1]
                 try:
-                    # Register the last accepted raw frame directly against the initial frame (frame 0)
                     _, loop_fitness, loop_rmse = register_frame_pair(
                         isolated_frames[last_idx], isolated_frames[0], self.cfg.registration
                     )
@@ -410,25 +553,18 @@ class ScanPipeline:
                     else:
                         print(f"\n  [!] Loop closure check: low overlap (fitness={loop_fitness:.4f}) with initial frame.")
                         print("      Drift may have accumulated over the full orbit.")
-                        print("      Tip: orbit more slowly/steadily or reduce capture interval.")
-                        # Note: implementing full pose-graph optimization across all frame pairs
-                        # (e.g. o3d.pipelines.registration.global_optimization) would be the next step
-                        # if drift is persistent, but is out of scope for this pass.
                 except Exception as exc:
                     print(f"\n  [!] Loop closure check skipped: {exc}")
-            else:
-                print("\n  [!] Loop closure check skipped: requires at least 8 accepted frames.")
 
         if self.cfg.show_stage_windows:
             if rejected_indices:
                 print(f"\n  [!] Note: Visualizing all frames including rejected frame(s) {rejected_indices}.")
-                print("      They may appear misaligned or disconnected from the coherent reconstruction.")
             show(
                 color_frames_distinctly(aligned),
                 window_name="Stage 3: registered/aligned clouds",
             )
 
-        return aligned, diagnostics
+        return aligned, diagnostics, None
 
     # ------------------------------------------------------------------
     # Stage 4: fuse
@@ -438,11 +574,14 @@ class ScanPipeline:
         self,
         aligned_frames: list[o3d.geometry.PointCloud],
         diagnostics: list[tuple[float, float, bool]] | None = None,
+        raw_frames: list | None = None,
+        poses: list[np.ndarray] | None = None,
     ) -> o3d.geometry.PointCloud:
         """
         Merge registered frames into one clean point cloud.
 
         Only frames with accepted=True in diagnostics are included in the final fusion.
+        Supports volumetric TSDF integration for human RGB-D frames.
 
         Parameters
         ----------
@@ -450,7 +589,10 @@ class ScanPipeline:
             Registered per-frame clouds from :meth:`register`.
         diagnostics:
             Optional registration diagnostics tuples (fitness, rmse, accepted).
-            If provided, rejected frames are excluded from fusion.
+        raw_frames:
+            Optional original raw / isolated frames (e.g. RGBDFrame instances).
+        poses:
+            Optional list of 4x4 camera poses.
 
         Returns
         -------
@@ -462,24 +604,51 @@ class ScanPipeline:
         print("=" * 60)
 
         if diagnostics is not None:
-            accepted_frames = [f for f, (*_, acc) in zip(aligned_frames, diagnostics) if acc]
+            accepted_indices = [i for i, (*_, acc) in enumerate(diagnostics) if acc]
+            accepted_frames = [aligned_frames[i] for i in accepted_indices]
             if not accepted_frames:
                 print("  [!] Warning: No frames met acceptance criteria; falling back to frame 0.")
                 accepted_frames = aligned_frames[:1]
+                accepted_indices = [0]
         else:
             accepted_frames = aligned_frames
+            accepted_indices = list(range(len(aligned_frames)))
 
         n_skipped = len(aligned_frames) - len(accepted_frames)
         skip_msg = f" (excluded {n_skipped} rejected frame{'s' if n_skipped != 1 else ''})" if n_skipped > 0 else ""
         print(f"  Fusing {len(accepted_frames)} accepted frame(s){skip_msg} ...")
 
-        fused = fuse_point_clouds(accepted_frames, self.cfg.preprocess)
-        print(f"  Fused cloud: {len(fused.points):>7} points")
+        # Volumetric TSDF or Point Cloud Concatenation
+        if (
+            self.cfg.fusion_method == "tsdf"
+            and raw_frames is not None
+            and raw_frames
+            and isinstance(raw_frames[0], RGBDFrame)
+            and poses is not None
+        ):
+            print("  Reconstruction mode: TSDF Volumetric Integration")
+            acc_raw = [raw_frames[i] for i in accepted_indices]
+            acc_poses = [poses[i] for i in accepted_indices]
+            fused = fuse_tsdf_volume(
+                acc_raw,
+                acc_poses,
+                self.cfg.preprocess,
+                voxel_length=self.cfg.tsdf_voxel_length_m,
+                sdf_trunc=self.cfg.tsdf_trunc_m,
+            )
+            fusion_name = "TSDF"
+        else:
+            print("  Reconstruction mode: Point Cloud Concatenation")
+            fused = fuse_point_clouds(accepted_frames, self.cfg.preprocess)
+            fusion_name = "POINT CLOUD"
+
+        print(f"  Reconstruction:\n    method: {fusion_name}\n    points: {len(fused.points):,}")
 
         if self.cfg.show_stage_windows:
             display_pcd = o3d.geometry.PointCloud(fused)
-            display_pcd.paint_uniform_color([0.65, 0.65, 0.65])  # flat grey
-            show(display_pcd, window_name="Stage 4: fused reconstruction")
+            if not display_pcd.has_colors():
+                display_pcd.paint_uniform_color([0.65, 0.65, 0.65])
+            show(display_pcd, window_name=f"Stage 4: fused reconstruction ({fusion_name})")
 
         if self.cfg.save_intermediate:
             out = self.cfg.output_dir / "fused.ply"
@@ -535,7 +704,8 @@ class ScanPipeline:
 
         if self.cfg.show_stage_windows and obb is not None:
             seg_display = o3d.geometry.PointCloud(segmented)
-            seg_display.paint_uniform_color([0.18, 0.72, 0.38])  # green
+            if not seg_display.has_colors():
+                seg_display.paint_uniform_color([0.18, 0.72, 0.38])
             show(
                 [seg_display, obb_lineset(obb)],
                 window_name="Stage 5: measured object",
@@ -574,11 +744,11 @@ class ScanPipeline:
         dict
             JSON-serialisable measurement result from :meth:`measure`.
         """
-        raw_frames           = self.capture_frames()
-        isolated             = self.isolate_frames(raw_frames)
-        aligned, diagnostics = self.register(isolated)
-        fused                = self.fuse(aligned, diagnostics)
-        result               = self.measure(fused)
+        raw_frames                  = self.capture_frames()
+        isolated                    = self.isolate_frames(raw_frames)
+        aligned, diagnostics, poses = self.register(isolated)
+        fused                       = self.fuse(aligned, diagnostics, raw_frames=isolated, poses=poses)
+        result                      = self.measure(fused)
 
         print("\n" + "=" * 60)
         print(f"  Done. Outputs written to: {self.cfg.output_dir.resolve()}")

@@ -13,3 +13,6 @@ venv/
 scan_output/
 .idea/
 .vscode/
+ScreenCapture*
+ScreenCamera*
+Screenshot*
