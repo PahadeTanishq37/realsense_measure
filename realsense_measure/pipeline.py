@@ -217,21 +217,35 @@ class ScanPipeline:
                                 last_skip_warn_time = now
                         else:
                             pcd = cam.to_point_cloud(color_bgr, depth_m)
-                            raw_frames.append(pcd)
-                            last_n_pts = len(pcd.points)
-                            last_capture_time = now
-                            last_captured_depth = depth_m.copy()
-                            print(f"  Captured frame {len(raw_frames):2d}: "
-                                  f"{last_n_pts:>7} raw points")
+                            iso_test = isolate_object(pcd, self.cfg.preprocess, self.cfg.target)
+                            n_obj_pts = len(iso_test.points)
+                            if n_obj_pts < self.cfg.target.min_object_points:
+                                print(f"  Frame discarded: isolated to only {n_obj_pts} pts "
+                                      f"(need >= {self.cfg.target.min_object_points}) -- "
+                                      f"this angle didn't capture usable object data, keep moving")
+                            else:
+                                raw_frames.append(pcd)
+                                last_n_pts = len(pcd.points)
+                                last_capture_time = now
+                                last_captured_depth = depth_m.copy()
+                                print(f"  Captured frame {len(raw_frames):2d}: "
+                                      f"{last_n_pts:>7} raw pts -> {n_obj_pts:>5} object pts [OK]")
 
                 # ---- Manual capture handling ---------------------------
                 elif key == 32:  # SPACE — manual capture
                     pcd = cam.to_point_cloud(color_bgr, depth_m)
-                    raw_frames.append(pcd)
-                    last_n_pts = len(pcd.points)
-                    last_captured_depth = depth_m.copy()
-                    print(f"  Captured frame {len(raw_frames):2d}: "
-                          f"{last_n_pts:>7} raw points")
+                    iso_test = isolate_object(pcd, self.cfg.preprocess, self.cfg.target)
+                    n_obj_pts = len(iso_test.points)
+                    if n_obj_pts < self.cfg.target.min_object_points:
+                        print(f"  Frame discarded: isolated to only {n_obj_pts} pts "
+                              f"(need >= {self.cfg.target.min_object_points}) -- "
+                              f"this angle didn't capture usable object data, try adjusting angle")
+                    else:
+                        raw_frames.append(pcd)
+                        last_n_pts = len(pcd.points)
+                        last_captured_depth = depth_m.copy()
+                        print(f"  Captured frame {len(raw_frames):2d}: "
+                              f"{last_n_pts:>7} raw pts -> {n_obj_pts:>5} object pts [OK]")
 
                 # ---- Finish / Abort keys -------------------------------
                 if key == 13:  # ENTER — finish
@@ -282,14 +296,25 @@ class ScanPipeline:
         print("=" * 60)
 
         pre_cfg = self.cfg.preprocess
+        target_cfg = self.cfg.target
         isolated: list[o3d.geometry.PointCloud] = []
 
         for i, frame in enumerate(raw_frames):
             n_before = len(frame.points)
-            iso = isolate_object(frame, pre_cfg)
+            iso = isolate_object(frame, pre_cfg, target_cfg)
             n_after = len(iso.points)
-            print(f"  frame {i:02d}: {n_before:>7} pts -> {n_after:>6} pts")
+            if n_after < target_cfg.min_object_points:
+                print(f"  frame {i:02d}: {n_before:>7} pts -> {n_after:>6} pts -- "
+                      f"DISCARDED (< {target_cfg.min_object_points} pts, unusable object data)")
+                continue
+            print(f"  frame {i:02d}: {n_before:>7} pts -> {n_after:>6} pts [ACCEPTED]")
             isolated.append(iso)
+
+        if not isolated:
+            raise RuntimeError(
+                "No frames survived object isolation. "
+                "Ensure the target object is within camera depth range and on a clear surface."
+            )
 
         if self.cfg.show_stage_windows:
             show(

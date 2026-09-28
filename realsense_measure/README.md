@@ -35,7 +35,7 @@ pip install -r requirements.txt
 ## Usage
 
 ```bash
-# Scan a box with default auto-capture (every 10.0s, Open3D stage windows enabled)
+# Scan a box with default auto-capture (every 2.0s, Open3D stage windows enabled)
 python main.py
 
 # Faster automatic capture interval (e.g. every 1.5s)

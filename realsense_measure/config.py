@@ -86,7 +86,7 @@ class CameraConfig:
 
     # Auto-capture settings
     auto_capture: bool = True
-    capture_interval_s: float = 10.0   # how often a frame is automatically captured (s)
+    capture_interval_s: float = 2.0   # how often a frame is automatically captured (s)
     skip_near_duplicate_frames: bool = True
     duplicate_depth_diff_threshold_m: float = 0.01   # min mean abs depth diff (m) to avoid duplicate capture
 
@@ -175,6 +175,12 @@ class TargetConfig:
 
     # Reject any fitted dimension smaller than this (likely a degenerate fit).
     min_dimension_m: float = 0.02
+
+    # Physical plausibility bounds for isolated object clusters (metres)
+    expected_min_size_m: float = 0.03   # smallest plausible dimension
+    expected_max_size_m: float = 0.60   # largest plausible dimension (well above object, below room clutter)
+    min_object_points: int = 150        # minimum points needed for a valid object capture
+
 
 
 # ---------------------------------------------------------------------------

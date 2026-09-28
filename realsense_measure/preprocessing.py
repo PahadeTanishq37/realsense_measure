@@ -21,7 +21,7 @@ from __future__ import annotations
 import numpy as np
 import open3d as o3d
 
-from config import PreprocessConfig
+from config import PreprocessConfig, TargetConfig
 
 
 def downsample_and_denoise(
@@ -144,9 +144,59 @@ def extract_largest_cluster(
     return pcd.select_by_index(indices)
 
 
+def extract_plausible_cluster(
+    pcd: o3d.geometry.PointCloud,
+    cfg: PreprocessConfig,
+    target_cfg: TargetConfig | None = None,
+) -> o3d.geometry.PointCloud:
+    """
+    Among DBSCAN clusters, picks the one that's both reasonably large
+    AND a plausible physical size for the target object — not just
+    whichever cluster has the most points. This prevents large
+    background/clutter blobs (which often have MORE points than the
+    actual object in a cluttered room) from being mistaken for it.
+    """
+    if not pcd.has_points():
+        return pcd
+
+    labels = np.array(
+        pcd.cluster_dbscan(
+            eps=cfg.cluster_eps_m,
+            min_points=cfg.cluster_min_points,
+            print_progress=False,
+        )
+    )
+    if labels.size == 0 or labels.max() < 0:
+        return pcd
+
+    min_size = target_cfg.expected_min_size_m if target_cfg else 0.0
+    max_size = target_cfg.expected_max_size_m if target_cfg else float("inf")
+
+    best_idx, best_score = None, -1.0
+    for label in np.unique(labels[labels >= 0]):
+        idx = np.where(labels == label)[0]
+        cluster = pcd.select_by_index(idx)
+        extent = cluster.get_axis_aligned_bounding_box().get_extent()
+        largest_dim = float(np.max(extent))
+        # Implausible size -> heavily penalize regardless of point count,
+        # instead of ever letting it win purely on point count
+        if largest_dim < min_size or largest_dim > max_size:
+            continue
+        score = len(idx)  # Among PLAUSIBLE clusters, prefer the biggest
+        if score > best_score:
+            best_score, best_idx = score, idx
+
+    if best_idx is None:
+        # Nothing plausible found — return empty rather than silently
+        # picking an implausible cluster; the caller will flag this
+        return o3d.geometry.PointCloud()
+    return pcd.select_by_index(best_idx)
+
+
 def isolate_object(
     pcd: o3d.geometry.PointCloud,
     cfg: PreprocessConfig,
+    target_cfg: TargetConfig | None = None,
 ) -> o3d.geometry.PointCloud:
     """
     Full per-frame preprocessing pipeline.
@@ -154,11 +204,7 @@ def isolate_object(
     Runs, in order:
       1. :func:`downsample_and_denoise`
       2. :func:`remove_dominant_plane`
-      3. :func:`extract_largest_cluster`
-
-    This is the only function ``pipeline.py`` needs to call.  It is designed
-    to operate on a single frame independently, before any multi-view
-    registration takes place.
+      3. :func:`extract_plausible_cluster` (if target_cfg provided) or :func:`extract_largest_cluster`
 
     Parameters
     ----------
@@ -166,6 +212,8 @@ def isolate_object(
         Raw point cloud from the depth sensor (one frame).
     cfg:
         Preprocessing configuration.
+    target_cfg:
+        Optional Target configuration specifying plausible size & point limits.
 
     Returns
     -------
@@ -173,6 +221,9 @@ def isolate_object(
         Clean, isolated object cloud ready for registration.
     """
     pcd = downsample_and_denoise(pcd, cfg)
-    pcd, _ = remove_dominant_plane(pcd, cfg)
-    pcd = extract_largest_cluster(pcd, cfg)
-    return pcd
+    no_plane, _ = remove_dominant_plane(pcd, cfg)
+    if target_cfg is not None:
+        obj = extract_plausible_cluster(no_plane, cfg, target_cfg)
+    else:
+        obj = extract_largest_cluster(no_plane, cfg)
+    return obj

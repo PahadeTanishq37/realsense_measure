@@ -6,7 +6,7 @@ them into a unified point cloud, and measures the target's dimensions.
 
 Example usage
 -------------
-Scan a box with default settings (auto-capture every 10.0s, Open3D windows enabled)::
+Scan a box with default settings (auto-capture every 2.0s, Open3D windows enabled)::
 
     python main.py
 
@@ -78,7 +78,7 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         metavar="SEC",
-        help="override automatic capture interval in seconds (default: 10.0)",
+        help="override automatic capture interval in seconds (default: 2.0)",
     )
     parser.add_argument(
         "--manual-capture",
