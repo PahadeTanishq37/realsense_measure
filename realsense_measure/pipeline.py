@@ -18,7 +18,7 @@ import open3d as o3d
 
 from camera.realsense_capture import RealSenseCamera
 from config import PipelineConfig
-from preprocessing import isolate_object
+from preprocessing import isolate_object, reject_positional_outliers
 from reconstruction import fuse_point_clouds
 from registration import (
     register_frame_pair,
@@ -310,6 +310,14 @@ class ScanPipeline:
             print(f"  frame {i:02d}: {n_before:>7} pts -> {n_after:>6} pts [ACCEPTED]")
             isolated.append(iso)
 
+        # Positional consistency: a background blob can be object-sized, so size
+        # checks alone let it through.  Drop frames whose centroid jumps away.
+        keep, rejected_pos = reject_positional_outliers(isolated, target_cfg.max_centroid_dev_m)
+        for idx, dist in rejected_pos:
+            print(f"  isolated #{idx:02d}: centroid {dist:.2f} m from median position -- "
+                  f"DISCARDED (likely background, not the object)")
+        isolated = [isolated[i] for i in keep]
+
         if not isolated:
             raise RuntimeError(
                 "No frames survived object isolation. "
@@ -323,6 +331,10 @@ class ScanPipeline:
             )
 
         if self.cfg.save_intermediate:
+            # remove stale frames from previous runs so the folder only ever holds this run
+            for old in self.cfg.output_dir.glob("frame_*_isolated.ply"):
+                old.unlink()
+
             for i, pcd in enumerate(isolated):
                 out = self.cfg.output_dir / f"frame_{i:02d}_isolated.ply"
                 o3d.io.write_point_cloud(str(out), pcd)
