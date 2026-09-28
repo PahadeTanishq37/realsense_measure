@@ -79,9 +79,10 @@ class CameraConfig:
     use_temporal_filter: bool = True  # temporal averaging across frames
     use_hole_filling: bool = True     # fill small depth voids
 
-    # Depth range to keep (metres).  The D455 is unreliable below ~15 cm;
-    # 1.2 m clips far background before it pollutes the point cloud.
-    depth_min_m: float = 0.15
+    # Depth range to keep (metres).
+    # D455 Min-Z is ~0.52 m at 1280x720 (Intel spec) and somewhat less at 848x480.
+    # The ideal range starts at 0.6 m. Hold the object >= 0.5-0.6 m from the camera for reliable depth.
+    depth_min_m: float = 0.40
     depth_max_m: float = 1.20
 
     # Auto-capture settings
@@ -155,7 +156,7 @@ class RegistrationConfig:
     icp_only_fitness_threshold: float = 0.60
 
     # Multiway pose-graph registration settings
-    use_multiway: bool = True
+    use_multiway: bool = False  # sequential is the safer default; set True to use the (corrected, gated) pose graph
     loop_closure_search_window: int = 4   # how many frames back, beyond the immediate previous frame, to also test for a good registration — catches cases where frame i overlaps with frame i-3 or i-4 even though it wasn't captured immediately after it
     pose_graph_edge_prune_threshold: float = 0.25  # Open3D's own default, controls how aggressively weak/inconsistent edges get discarded during global optimization
 
@@ -180,6 +181,8 @@ class TargetConfig:
     expected_min_size_m: float = 0.03   # smallest plausible dimension
     expected_max_size_m: float = 0.60   # largest plausible dimension (well above object, below room clutter)
     min_object_points: int = 150        # minimum points needed for a valid object capture
+    max_centroid_dev_m: float = 0.15   # reject frames whose object centroid is farther than this from the median centroid
+
 
 
 
