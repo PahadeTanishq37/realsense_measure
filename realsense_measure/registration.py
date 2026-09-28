@@ -412,70 +412,87 @@ def get_information_matrix(
 def build_pose_graph(
     frames: list[o3d.geometry.PointCloud],
     cfg: RegistrationConfig,
-) -> PoseGraph:
+):
     """
-    Construct a pose graph containing sequential odometry edges and loop closures.
+    Build a gated pose graph.
 
-    Parameters
-    ----------
-    frames:
-        List of preprocessed point clouds.
-    cfg:
-        Registration configuration containing ICP, loop closure window, and acceptance parameters.
+    CONVENTION (this is what the previous version got wrong):
+    ``register_frame_pair(frames[i], frames[j])`` returns T that maps frame i
+    INTO frame j's coordinates.  Open3D's ``PoseGraphEdge(source, target, T)``
+    expects exactly that, so the edge is declared (i -> j), and node poses
+    (frame -> frame-0 coordinates) compose as ``pose_i = pose_j @ T``.
+
+    GATING: a new frame is registered against the last few *accepted* frames.
+    If even the best of those registrations has fitness below
+    ``cfg.min_accept_fitness`` the frame is REJECTED: it gets no node and no
+    edges, so it cannot corrupt the graph.  The best candidate becomes a
+    certain edge; other good candidates become "uncertain" (loop-closure)
+    edges that the optimiser may down-weight.
 
     Returns
     -------
-    PoseGraph initialized with nodes and pairwise edges.
+    (pose_graph, node_of, diagnostics, n_odometry_edges, n_loop_edges)
+      node_of: dict frame_index -> pose-graph node id (accepted frames only)
+      diagnostics: list of (fitness, rmse, accepted) per frame
     """
+    n = len(frames)
     pose_graph = PoseGraph()
-    if not frames:
-        return pose_graph
-
-    # Frame 0 is the anchor node at world origin
     pose_graph.nodes.append(PoseGraphNode(np.eye(4)))
-    odometry = np.eye(4)  # Running accumulated transform used to seed initial poses
+    node_of: dict[int, int] = {0: 0}
+    poses: dict[int, np.ndarray] = {0: np.eye(4)}
+    accepted_idx: list[int] = [0]
+    diagnostics: list = [(1.0, 0.0, True)] + [None] * (n - 1)
+    n_odom = n_loop = 0
 
-    for i in range(1, len(frames)):
-        # 1. Mandatory odometry edge: register frame i against frame i-1
-        transform, fitness, rmse = register_frame_pair(frames[i], frames[i - 1], cfg)
-        odometry = transform @ odometry
-        pose_graph.nodes.append(PoseGraphNode(np.linalg.inv(odometry)))
-        info = get_information_matrix(frames[i], frames[i - 1], transform, cfg)
-        pose_graph.edges.append(
-            PoseGraphEdge(i - 1, i, transform, info, uncertain=False)
-        )
+    for i in range(1, n):
+        window = accepted_idx[-(cfg.loop_closure_search_window + 1):]
+        results = []
+        for j in window:
+            try:
+                T, fit, rmse = register_frame_pair(frames[i], frames[j], cfg)
+            except Exception:
+                continue
+            results.append((j, T, fit, rmse))
 
-        # 2. Loop closures: test frames further back than i-1, up to the search window
-        start_j = max(0, i - cfg.loop_closure_search_window - 1)
-        for j in range(start_j, i - 1):
-            transform_lc, fitness_lc, rmse_lc = register_frame_pair(frames[i], frames[j], cfg)
-            if fitness_lc >= cfg.min_accept_fitness:
-                info_lc = get_information_matrix(frames[i], frames[j], transform_lc, cfg)
-                pose_graph.edges.append(
-                    PoseGraphEdge(j, i, transform_lc, info_lc, uncertain=True)
-                )
+        if not results:
+            diagnostics[i] = (0.0, float("inf"), False)
+            continue
 
-    return pose_graph
+        j_best, T_best, fit_best, rmse_best = max(results, key=lambda r: r[2])
+        if fit_best < cfg.min_accept_fitness:
+            diagnostics[i] = (fit_best, rmse_best, False)
+            continue
+
+        pose_i = poses[j_best] @ T_best
+        node_id = len(pose_graph.nodes)
+        pose_graph.nodes.append(PoseGraphNode(pose_i))
+        node_of[i] = node_id
+        poses[i] = pose_i
+
+        for j, T, fit, rmse in results:
+            if fit < cfg.min_accept_fitness:
+                continue
+            info = get_information_matrix(frames[i], frames[j], T, cfg)
+            certain = (j == j_best)
+            pose_graph.edges.append(
+                PoseGraphEdge(node_id, node_of[j], T, info, uncertain=not certain)
+            )
+            if certain:
+                n_odom += 1
+            else:
+                n_loop += 1
+
+        accepted_idx.append(i)
+        diagnostics[i] = (fit_best, rmse_best, True)
+
+    return pose_graph, node_of, diagnostics, n_odom, n_loop
 
 
 def optimize_pose_graph(
     pose_graph: PoseGraph,
     cfg: RegistrationConfig,
 ) -> PoseGraph:
-    """
-    Run global pose-graph optimization with Levenberg-Marquardt and edge pruning.
-
-    Parameters
-    ----------
-    pose_graph:
-        Pose graph with initial node poses and edges.
-    cfg:
-        Registration configuration with edge pruning threshold and max correspondence distance.
-
-    Returns
-    -------
-    Optimized PoseGraph.
-    """
+    """Global Levenberg-Marquardt optimisation with edge pruning."""
     option = GlobalOptimizationOption(
         max_correspondence_distance=cfg.icp_max_dist_m,
         edge_prune_threshold=cfg.pose_graph_edge_prune_threshold,
@@ -495,60 +512,33 @@ def register_sequence_multiway(
     cfg: RegistrationConfig,
 ) -> tuple[list[o3d.geometry.PointCloud], list[tuple[float, float, bool]]]:
     """
-    Register a sequence of frames using global pose-graph multiway registration.
+    Gated pose-graph registration (see :func:`build_pose_graph`).
 
-    Builds an odometry backbone and loop-closure edges across a sliding temporal
-    window, then optimizes all node poses jointly to prevent drift / unrolling.
-
-    Parameters
-    ----------
-    frames:
-        Ordered list of preprocessed, per-frame object clouds.
-    cfg:
-        Registration configuration.
-
-    Returns
-    -------
-    aligned:
-        List of point clouds transformed into the globally optimized coordinate frame.
-    diagnostics:
-        List of (fitness, rmse, accepted) tuples per frame.
+    Diagnostics carry the REAL best-candidate fitness/rmse per frame and
+    ``accepted=False`` for frames that could not be registered reliably, so
+    the pipeline's REJECTED/exclude-from-fusion logic actually works.
+    Rejected frames are returned un-transformed (for inspection only).
     """
     if not frames:
         return [], []
     if len(frames) == 1:
         return [copy.deepcopy(frames[0])], [(1.0, 0.0, True)]
 
-    pose_graph = build_pose_graph(frames, cfg)
-    num_edges_before = len(pose_graph.edges)
-    num_odom = len(frames) - 1
-    num_lc = num_edges_before - num_odom
-
-    optimize_pose_graph(pose_graph, cfg)
-    num_edges_after = len(pose_graph.edges)
-
+    pose_graph, node_of, diagnostics, n_odom, n_loop = build_pose_graph(frames, cfg)
+    n_before = len(pose_graph.edges)
+    if len(pose_graph.nodes) > 1:
+        optimize_pose_graph(pose_graph, cfg)
     print(
-        f"  Pose graph: {num_edges_before} total edges ({num_odom} odometry + "
-        f"{num_lc} loop closures), {num_edges_after} survived pruning."
+        f"  Pose graph: {len(pose_graph.nodes)} of {len(frames)} frames in graph, "
+        f"{n_before} edges ({n_odom} primary + {n_loop} loop-closure), "
+        f"{len(pose_graph.edges)} survived pruning."
     )
 
-    aligned = [
-        copy.deepcopy(frames[i]).transform(pose_graph.nodes[i].pose)
-        for i in range(len(frames))
-    ]
-
-    # Diagnostics: identify which nodes have surviving edges touching them
-    connected_nodes: set[int] = {0}
-    for edge in pose_graph.edges:
-        connected_nodes.add(edge.source_node_id)
-        connected_nodes.add(edge.target_node_id)
-
-    diagnostics: list[tuple[float, float, bool]] = []
-    for i in range(len(frames)):
-        if i in connected_nodes:
-            diagnostics.append((1.0, 0.0, True))
+    aligned: list[o3d.geometry.PointCloud] = []
+    for i, f in enumerate(frames):
+        if i in node_of:
+            aligned.append(copy.deepcopy(f).transform(pose_graph.nodes[node_of[i]].pose))
         else:
-            diagnostics.append((0.0, float("inf"), False))
-
+            aligned.append(copy.deepcopy(f))
     return aligned, diagnostics
 
