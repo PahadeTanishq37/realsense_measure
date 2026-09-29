@@ -144,6 +144,44 @@ def extract_largest_cluster(
     return pcd.select_by_index(indices)
 
 
+def get_plausible_clusters(
+    pcd: o3d.geometry.PointCloud,
+    cfg: PreprocessConfig,
+    target_cfg: TargetConfig | None = None,
+) -> list[tuple[np.ndarray, o3d.geometry.PointCloud]]:
+    """
+    Run DBSCAN and return a list of (indices, cluster_pcd) for clusters that fall
+    within the physical size limits defined in target_cfg (or all clusters if target_cfg is None).
+    """
+    if not pcd.has_points():
+        return []
+
+    labels = np.array(
+        pcd.cluster_dbscan(
+            eps=cfg.cluster_eps_m,
+            min_points=cfg.cluster_min_points,
+            print_progress=False,
+        )
+    )
+    if labels.size == 0 or labels.max() < 0:
+        return []
+
+    min_size = target_cfg.expected_min_size_m if target_cfg else 0.0
+    max_size = target_cfg.expected_max_size_m if target_cfg else float("inf")
+
+    candidates: list[tuple[np.ndarray, o3d.geometry.PointCloud]] = []
+    for label in np.unique(labels[labels >= 0]):
+        idx = np.where(labels == label)[0]
+        cluster = pcd.select_by_index(idx)
+        extent = cluster.get_axis_aligned_bounding_box().get_extent()
+        largest_dim = float(np.max(extent))
+        if largest_dim < min_size or largest_dim > max_size:
+            continue
+        candidates.append((idx, cluster))
+
+    return candidates
+
+
 def extract_plausible_cluster(
     pcd: o3d.geometry.PointCloud,
     cfg: PreprocessConfig,
@@ -156,47 +194,63 @@ def extract_plausible_cluster(
     background/clutter blobs (which often have MORE points than the
     actual object in a cluttered room) from being mistaken for it.
     """
-    if not pcd.has_points():
-        return pcd
-
-    labels = np.array(
-        pcd.cluster_dbscan(
-            eps=cfg.cluster_eps_m,
-            min_points=cfg.cluster_min_points,
-            print_progress=False,
-        )
-    )
-    if labels.size == 0 or labels.max() < 0:
-        return pcd
-
-    min_size = target_cfg.expected_min_size_m if target_cfg else 0.0
-    max_size = target_cfg.expected_max_size_m if target_cfg else float("inf")
-
-    best_idx, best_score = None, -1.0
-    for label in np.unique(labels[labels >= 0]):
-        idx = np.where(labels == label)[0]
-        cluster = pcd.select_by_index(idx)
-        extent = cluster.get_axis_aligned_bounding_box().get_extent()
-        largest_dim = float(np.max(extent))
-        # Implausible size -> heavily penalize regardless of point count,
-        # instead of ever letting it win purely on point count
-        if largest_dim < min_size or largest_dim > max_size:
-            continue
-        score = len(idx)  # Among PLAUSIBLE clusters, prefer the biggest
-        if score > best_score:
-            best_score, best_idx = score, idx
-
-    if best_idx is None:
-        # Nothing plausible found — return empty rather than silently
-        # picking an implausible cluster; the caller will flag this
+    candidates = get_plausible_clusters(pcd, cfg, target_cfg)
+    if not candidates:
+        if not pcd.has_points():
+            return pcd
         return o3d.geometry.PointCloud()
-    return pcd.select_by_index(best_idx)
+
+    _, best_cluster = max(candidates, key=lambda c: len(c[0]))
+    return best_cluster
+
+
+def extract_tracked_cluster(
+    pcd: o3d.geometry.PointCloud,
+    cfg: PreprocessConfig,
+    target_cfg: TargetConfig,
+    last_centroid: np.ndarray | None,
+) -> o3d.geometry.PointCloud:
+    """
+    Among size-plausible DBSCAN clusters, pick the one closest to the previously
+    tracked object centroid (position memory).
+
+    - If last_centroid is None (first frame), picks the candidate with the most points.
+    - If last_centroid is not None, picks the candidate with minimum distance from its
+      centroid to last_centroid. If that closest candidate is farther than
+      target_cfg.max_centroid_dev_m, falls back to the largest candidate.
+    """
+    candidates = get_plausible_clusters(pcd, cfg, target_cfg)
+    if not candidates:
+        if not pcd.has_points():
+            return pcd
+        return o3d.geometry.PointCloud()
+
+    if last_centroid is None:
+        _, best_cluster = max(candidates, key=lambda c: len(c[0]))
+        return best_cluster
+
+    best_dist = float("inf")
+    closest_cluster = None
+    for idx, cluster in candidates:
+        centroid = np.asarray(cluster.points).mean(axis=0)
+        dist = float(np.linalg.norm(centroid - last_centroid))
+        if dist < best_dist:
+            best_dist = dist
+            closest_cluster = cluster
+
+    if closest_cluster is not None and best_dist <= target_cfg.max_centroid_dev_m:
+        return closest_cluster
+
+    # Fallback to largest candidate if closest is too far (> max_centroid_dev_m)
+    _, largest_cluster = max(candidates, key=lambda c: len(c[0]))
+    return largest_cluster
 
 
 def isolate_object(
     pcd: o3d.geometry.PointCloud,
     cfg: PreprocessConfig,
     target_cfg: TargetConfig | None = None,
+    last_centroid: np.ndarray | None = None,
 ) -> o3d.geometry.PointCloud:
     """
     Full per-frame preprocessing pipeline.
@@ -204,7 +258,7 @@ def isolate_object(
     Runs, in order:
       1. :func:`downsample_and_denoise`
       2. :func:`remove_dominant_plane`
-      3. :func:`extract_plausible_cluster` (if target_cfg provided) or :func:`extract_largest_cluster`
+      3. :func:`extract_tracked_cluster` (if target_cfg provided) or :func:`extract_largest_cluster`
 
     Parameters
     ----------
@@ -214,6 +268,8 @@ def isolate_object(
         Preprocessing configuration.
     target_cfg:
         Optional Target configuration specifying plausible size & point limits.
+    last_centroid:
+        Optional (3,) centroid of the object from previous frame(s) for position-tracked isolation.
 
     Returns
     -------
@@ -223,7 +279,7 @@ def isolate_object(
     pcd = downsample_and_denoise(pcd, cfg)
     no_plane, _ = remove_dominant_plane(pcd, cfg)
     if target_cfg is not None:
-        obj = extract_plausible_cluster(no_plane, cfg, target_cfg)
+        obj = extract_tracked_cluster(no_plane, cfg, target_cfg, last_centroid)
     else:
         obj = extract_largest_cluster(no_plane, cfg)
     return obj

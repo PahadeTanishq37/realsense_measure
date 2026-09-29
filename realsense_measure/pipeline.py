@@ -195,6 +195,7 @@ class ScanPipeline:
 
         raw_frames: list[o3d.geometry.PointCloud | RGBDFrame] = []
         captured_centroids: list[np.ndarray] = []
+        last_centroid: np.ndarray | None = None
 
         print("\n" + "=" * 60)
         print("  Stage 1: Capture")
@@ -291,7 +292,7 @@ class ScanPipeline:
                                         print(f"  Captured human frame {len(raw_frames):2d}: {n_pts:>6} pts with RGB-D [OK]")
                             else:
                                 pcd = cam.to_point_cloud(color_bgr, depth_m)
-                                iso_test = isolate_object(pcd, self.cfg.preprocess, self.cfg.target)
+                                iso_test = isolate_object(pcd, self.cfg.preprocess, self.cfg.target, last_centroid=last_centroid)
                                 n_obj_pts = len(iso_test.points)
                                 if n_obj_pts < self.cfg.target.min_object_points:
                                     print(f"  Frame discarded: isolated to only {n_obj_pts} pts "
@@ -309,6 +310,7 @@ class ScanPipeline:
 
                                     raw_frames.append(pcd)
                                     captured_centroids.append(centroid)
+                                    last_centroid = centroid
                                     last_n_pts = len(pcd.points)
                                     last_capture_time = now
                                     last_captured_depth = depth_m.copy()
@@ -336,7 +338,7 @@ class ScanPipeline:
                                 print(f"  Captured human frame {len(raw_frames):2d}: {n_pts:>6} pts with RGB-D [OK]")
                     else:
                         pcd = cam.to_point_cloud(color_bgr, depth_m)
-                        iso_test = isolate_object(pcd, self.cfg.preprocess, self.cfg.target)
+                        iso_test = isolate_object(pcd, self.cfg.preprocess, self.cfg.target, last_centroid=last_centroid)
                         n_obj_pts = len(iso_test.points)
                         if n_obj_pts < self.cfg.target.min_object_points:
                             print(f"  Frame discarded: isolated to only {n_obj_pts} pts "
@@ -354,6 +356,7 @@ class ScanPipeline:
 
                             raw_frames.append(pcd)
                             captured_centroids.append(centroid)
+                            last_centroid = centroid
                             last_n_pts = len(pcd.points)
                             last_captured_depth = depth_m.copy()
 
@@ -440,14 +443,16 @@ class ScanPipeline:
 
         # Box / standard PointCloud path:
         isolated: list[o3d.geometry.PointCloud] = []
+        last_iso_centroid: np.ndarray | None = None
         for i, frame in enumerate(raw_frames):
             n_before = len(frame.points)
-            iso = isolate_object(frame, pre_cfg, target_cfg)
+            iso = isolate_object(frame, pre_cfg, target_cfg, last_centroid=last_iso_centroid)
             n_after = len(iso.points)
             if n_after < target_cfg.min_object_points:
                 print(f"  frame {i:02d}: {n_before:>7} pts -> {n_after:>6} pts -- "
                       f"DISCARDED (< {target_cfg.min_object_points} pts, unusable object data)")
                 continue
+            last_iso_centroid = np.asarray(iso.points).mean(axis=0)
             print(f"  frame {i:02d}: {n_before:>7} pts -> {n_after:>6} pts [ACCEPTED]")
             isolated.append(iso)
 
