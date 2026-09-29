@@ -720,6 +720,28 @@ class ScanPipeline:
         # JSON-serialisable and must be kept separate for visualisation.
         obb = result.pop("geometry_for_viz", None)
 
+        planarity = result.get("planarity_check")
+        if planarity:
+            print("\n  " + "-" * 50)
+            print("  PLANARITY CHECK (Face RMS Deviations):")
+            rms_list = planarity.get("rms_deviation_mm", [])
+            if len(rms_list) == 6:
+                print(f"    Axis 0 faces (near/far): {rms_list[0]:.2f} mm | {rms_list[1]:.2f} mm")
+                print(f"    Axis 1 faces (near/far): {rms_list[2]:.2f} mm | {rms_list[3]:.2f} mm")
+                print(f"    Axis 2 faces (near/far): {rms_list[4]:.2f} mm | {rms_list[5]:.2f} mm")
+            else:
+                print(f"    RMS deviations         : {rms_list}")
+            print(f"    Max Face RMS Deviation : {planarity.get('max_rms_mm', 0.0):.2f} mm (limit: 4.0 mm)")
+
+            warning = planarity.get("warning")
+            if warning:
+                print("\n  " + "!" * 58)
+                print(f"  [!] WARNING: {warning.upper()}")
+                print("  " + "!" * 58)
+            else:
+                print("    Box Shape Validation   : PASS (Rigid planar box)")
+            print("  " + "-" * 50)
+
         obb_info = result.get("oriented_bbox", {})
         print(f"\n  Target : {result.get('target', '?')}")
         print(f"  Length : {obb_info.get('length_m', 0) * 1000:.1f} mm")

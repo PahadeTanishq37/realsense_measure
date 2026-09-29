@@ -15,6 +15,27 @@ from preprocessing import extract_largest_cluster, remove_dominant_plane
 from targets.base import Target, register_target
 
 
+def _fit_plane_rms_mm(pts: np.ndarray) -> float:
+    """
+    Fit a plane to 3D points using SVD and compute the RMS perpendicular distance in mm.
+    """
+    if len(pts) < 3:
+        return 0.0
+    centroid = np.mean(pts, axis=0)
+    centered = pts - centroid
+    try:
+        _, _, vh = np.linalg.svd(centered)
+        normal = vh[-1]  # normal corresponds to smallest singular value
+        norm_len = np.linalg.norm(normal)
+        if norm_len > 1e-12:
+            normal = normal / norm_len
+        dists = np.abs(centered @ normal)
+        rms_m = float(np.sqrt(np.mean(dists**2)))
+        return rms_m * 1000.0
+    except Exception:
+        return 0.0
+
+
 @register_target
 class BoxTarget(Target):
     """
@@ -149,6 +170,41 @@ class BoxTarget(Target):
         dims = np.sort(trimmed_extent)[::-1]
         length, width, height = float(dims[0]), float(dims[1]), float(dims[2])
 
+        # ------------------------------------------------------------------
+        # Planarity self-check: check the outer 10% faces along each axis.
+        # Rigid box faces should be flat planes (RMS deviation <= 4.0 mm).
+        # ------------------------------------------------------------------
+        rms_values: list[float] = []
+        for axis in range(3):
+            vals = local_pts[:, axis]
+            min_v = float(np.min(vals))
+            max_v = float(np.max(vals))
+            span = max_v - min_v
+
+            near_mask = vals <= (min_v + 0.10 * span)
+            far_mask = vals >= (max_v - 0.10 * span)
+
+            near_rms = _fit_plane_rms_mm(local_pts[near_mask])
+            far_rms = _fit_plane_rms_mm(local_pts[far_mask])
+
+            rms_values.append(round(near_rms, 2))
+            rms_values.append(round(far_rms, 2))
+
+        max_rms = float(max(rms_values)) if rms_values else 0.0
+        is_valid_box = bool(max_rms <= 4.0)
+        warning_msg = (
+            f"This does not look like a rigid box (face RMS deviation {max_rms:.1f} mm > 4 mm threshold) "
+            "— measurements may be meaningless."
+            if not is_valid_box else None
+        )
+
+        planarity_check = {
+            "rms_deviation_mm": rms_values,
+            "max_rms_mm": round(max_rms, 2),
+            "is_valid_box": is_valid_box,
+            "warning": warning_msg,
+        }
+
         # Axis-aligned bounding box for reference / sanity checking.
         aabb = pcd.get_axis_aligned_bounding_box()
         aabb_extent = [
@@ -158,6 +214,7 @@ class BoxTarget(Target):
         return {
             "target": "box",
             "num_points": len(pcd.points),
+            "planarity_check": planarity_check,
             "oriented_bbox": {
                 "length_m": round(length, 4),
                 "width_m": round(width, 4),
