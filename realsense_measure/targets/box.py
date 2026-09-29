@@ -94,6 +94,51 @@ class BoxTarget(Target):
 
         return extract_largest_cluster(no_plane, self.cfg)
 
+    def is_plausible_box(self, pcd: o3d.geometry.PointCloud) -> tuple[bool, str]:
+        """
+        Quick pre-check before OBB fitting to verify whether the cloud is plausibly box-shaped.
+
+        Checks:
+          1. len(pcd.points) >= 200 (minimum points required to judge 3D box shape).
+          2. Aspect ratio sanity: AABB extents sorted descending [a, b, c].
+             If a / max(c, 1e-6) > 20 -> implausible aspect ratio (sliver or plane fragment).
+          3. Point density sanity: volume = a * b * c.
+             If volume > 1e-6 and points/volume < 500 (pts/m^3) -> too sparse.
+
+        Parameters
+        ----------
+        pcd:
+            Segmented candidate box cloud.
+
+        Returns
+        -------
+        tuple[bool, str]
+            (is_plausible, reason_if_false)
+        """
+        n_pts = len(pcd.points)
+        if n_pts < 200:
+            return False, f"too few points ({n_pts}) to determine box shape (minimum 200)"
+
+        pts = np.asarray(pcd.points)
+        mins = np.min(pts, axis=0)
+        maxs = np.max(pts, axis=0)
+        extent = maxs - mins
+        extents_sorted = sorted(extent, reverse=True)
+        a, b, c = float(extents_sorted[0]), float(extents_sorted[1]), float(extents_sorted[2])
+
+        c_safe = max(c, 1e-6)
+        aspect_ratio = a / c_safe
+        if aspect_ratio > 20.0:
+            return False, f"aspect ratio {aspect_ratio:.1f}:1 is implausible for a rigid box"
+
+        volume = a * b * c
+        if volume > 1e-6:
+            density = n_pts / volume
+            if density < 500.0:
+                return False, "too sparse for a solid object; likely a small fragment stretched over a large empty region"
+
+        return True, ""
+
     def measure(
         self,
         pcd: o3d.geometry.PointCloud,

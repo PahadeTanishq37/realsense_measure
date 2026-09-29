@@ -794,6 +794,21 @@ class ScanPipeline:
         segmented = self.target.segment(fused_pcd)
         print(f"  Segmented cloud: {len(segmented.points):>7} points")
 
+        # Fast shape-plausibility pre-check (e.g. for BoxTarget)
+        if hasattr(self.target, "is_plausible_box"):
+            is_plausible, reason = self.target.is_plausible_box(segmented)
+            if not is_plausible:
+                print("\n" + "!" * 60)
+                print("  [!] NOT BOX SHAPED -- MEASUREMENT REFUSED")
+                print("  " + "=" * 56)
+                print(f"  Reason: {reason}")
+                print("!" * 60)
+                return {
+                    "target": "box",
+                    "status": "not_box_shaped",
+                    "reason": reason,
+                }
+
         result = self.target.measure(segmented)
 
         # Pop the Open3D geometry before printing / saving — it is not
