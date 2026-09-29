@@ -812,8 +812,64 @@ class ScanPipeline:
         return result
 
     # ------------------------------------------------------------------
-    # Full pipeline
+    # Sufficiency Gate & Full pipeline
     # ------------------------------------------------------------------
+
+    def check_measurement_sufficiency(
+        self,
+        diagnostics: list[tuple[float, float, bool]] | None,
+        fused_pcd: o3d.geometry.PointCloud,
+        aligned_frames: list[o3d.geometry.PointCloud] | None = None,
+    ) -> tuple[bool, list[str]]:
+        """
+        Validate whether the registered and fused scan has sufficient data for reliable measurement.
+
+        Checks:
+          1. Number of accepted frames >= 3.
+          2. Fused point count >= min_object_points * 3.
+          3. Viewpoint spread among accepted frames' centroids >= 0.03 m (3.0 cm).
+
+        Returns
+        -------
+        tuple[bool, list[str]]
+            (is_sufficient, reasons_if_failed)
+        """
+        reasons: list[str] = []
+        n_accepted = sum(1 for d in (diagnostics or []) if d is not None and d[2])
+        n_total = len(diagnostics) if diagnostics else 0
+
+        # Check 1: at least 3 accepted frames
+        if n_accepted < 3:
+            reasons.append(f"only {n_accepted} of {n_total} frames were accepted (need >= 3)")
+
+        # Check 2: fused cloud point count
+        min_fused = self.cfg.target.min_object_points * 3
+        fused_pts = len(fused_pcd.points)
+        if fused_pts < min_fused:
+            reasons.append(f"fused cloud has only {fused_pts} points (need >= {min_fused})")
+
+        # Check 3: viewpoint spread among accepted frames
+        if aligned_frames and diagnostics:
+            accepted_clouds = [
+                f for f, d in zip(aligned_frames, diagnostics)
+                if d is not None and d[2] and len(f.points) > 0
+            ]
+            if len(accepted_clouds) >= 2:
+                centroids = [np.mean(np.asarray(c.points), axis=0) for c in accepted_clouds]
+                max_spread_m = float(max(
+                    np.linalg.norm(c1 - c2)
+                    for i, c1 in enumerate(centroids)
+                    for c2 in centroids[i + 1:]
+                ))
+                if max_spread_m < 0.03:
+                    reasons.append(
+                        f"accepted frames only span {max_spread_m * 100.0:.1f} cm (need >= 3.0 cm) "
+                        "— camera barely moved between shots"
+                    )
+            elif n_accepted >= 2:
+                reasons.append("fewer than 2 valid point clouds to compute viewpoint spread")
+
+        return (len(reasons) == 0, reasons)
 
     def run(self) -> dict:
         """
@@ -865,7 +921,28 @@ class ScanPipeline:
                 "output": str(out),
             }
         else:
-            result = self.measure(fused)
+            is_sufficient, reasons = self.check_measurement_sufficiency(diagnostics, fused, aligned)
+            if not is_sufficient:
+                n_accepted = sum(1 for d in (diagnostics or []) if d is not None and d[2])
+                n_total    = len(diagnostics) if diagnostics else 0
+                print("\n" + "!" * 60)
+                print("  [!] SCAN INSUFFICIENT -- MEASUREMENT REFUSED")
+                print("  " + "=" * 56)
+                print("  The scan did not meet the minimum data sufficiency criteria:")
+                for r in reasons:
+                    print(f"    - {r}")
+                print("!" * 60)
+
+                result = {
+                    "target": self.cfg.target.name,
+                    "status": "insufficient_data",
+                    "reasons": reasons,
+                    "frames_accepted": n_accepted,
+                    "frames_total": n_total,
+                    "fused_points": len(fused.points),
+                }
+            else:
+                result = self.measure(fused)
 
         print("\n" + "=" * 60)
         print(f"  Done. Outputs written to: {self.cfg.output_dir.resolve()}")
