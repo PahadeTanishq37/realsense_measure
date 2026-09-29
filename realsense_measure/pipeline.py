@@ -232,6 +232,9 @@ class ScanPipeline:
             if self.cfg.camera.auto_capture:
                 print(f"  AUTO-CAPTURE: move camera around object (interval: "
                       f"{capture_interval:.2f}s)")
+                print("  TIP: for small or irregular objects, --manual-capture "
+                      "(press SPACE per angle) gives much more consistent results "
+                      "than auto-capture.")
                 print("  ENTER = finish (requires 2+ frames) | ESC = abort")
             else:
                 print("  MANUAL CAPTURE: SPACE = capture frame | ENTER = finish | ESC = abort")

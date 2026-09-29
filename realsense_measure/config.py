@@ -87,7 +87,7 @@ class CameraConfig:
 
     # Auto-capture settings
     auto_capture: bool = True
-    capture_interval_s: float = 2.0   # how often a frame is automatically captured for box scans (s)
+    capture_interval_s: float = 3.5   # how often a frame is automatically captured for box scans (s)
     human_capture_interval_s: float = 0.4  # dense capture interval for human head/body scans (s)
     skip_near_duplicate_frames: bool = True
     duplicate_depth_diff_threshold_m: float = 0.01   # min mean abs depth diff (m) to avoid duplicate capture

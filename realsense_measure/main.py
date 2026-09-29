@@ -100,12 +100,13 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         metavar="SEC",
-        help="override automatic capture interval in seconds (default: 2.0s for box, 0.4s for human)",
+        help="override automatic capture interval in seconds (default: 3.5s for box, 0.4s for human)",
     )
     parser.add_argument(
         "--manual-capture",
         action="store_true",
-        help="disable automatic capture and require pressing SPACE for each frame",
+        help="disable automatic capture and require pressing SPACE for each frame "
+             "(strongly recommended for small or irregular objects for consistent scans)",
     )
     parser.add_argument(
         "--loop-closure",
