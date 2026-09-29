@@ -194,6 +194,7 @@ class ScanPipeline:
             capture_interval = self.cfg.camera.human_capture_interval_s
 
         raw_frames: list[o3d.geometry.PointCloud | RGBDFrame] = []
+        captured_centroids: list[np.ndarray] = []
 
         print("\n" + "=" * 60)
         print("  Stage 1: Capture")
@@ -266,7 +267,7 @@ class ScanPipeline:
                     if now - last_capture_time >= capture_interval:
                         is_duplicate = False
                         if (self.cfg.camera.skip_near_duplicate_frames
-                                and last_captured_depth is not None):
+                                 and last_captured_depth is not None):
                             diff_m = _depth_mean_diff(depth_m, last_captured_depth)
                             if diff_m < self.cfg.camera.duplicate_depth_diff_threshold_m:
                                 is_duplicate = True
@@ -297,12 +298,28 @@ class ScanPipeline:
                                           f"(need >= {self.cfg.target.min_object_points}) -- "
                                           f"this angle didn't capture usable object data, keep moving")
                                 else:
+                                    centroid = np.asarray(iso_test.points).mean(axis=0)
+                                    dev = 0.0
+                                    is_outlier = False
+                                    if captured_centroids:
+                                        median_c = np.median(np.array(captured_centroids), axis=0)
+                                        dev = float(np.linalg.norm(centroid - median_c))
+                                        if dev > self.cfg.target.max_centroid_dev_m:
+                                            is_outlier = True
+
                                     raw_frames.append(pcd)
+                                    captured_centroids.append(centroid)
                                     last_n_pts = len(pcd.points)
                                     last_capture_time = now
                                     last_captured_depth = depth_m.copy()
-                                    print(f"  Captured frame {len(raw_frames):2d}: "
-                                          f"{last_n_pts:>7} raw pts -> {n_obj_pts:>5} object pts [OK]")
+
+                                    if is_outlier:
+                                        print(f"  Captured frame {len(raw_frames):2d}: {n_obj_pts:>5} object "
+                                              f"pts, but {dev*100:.0f} cm from your other frames -- "
+                                              f"[WARNING] this may not be the same object, keep it centered")
+                                    else:
+                                        print(f"  Captured frame {len(raw_frames):2d}: "
+                                              f"{last_n_pts:>7} raw pts -> {n_obj_pts:>5} object pts [OK]")
 
                 # ---- Manual capture handling ---------------------------
                 elif key == 32:  # SPACE — manual capture
@@ -326,11 +343,27 @@ class ScanPipeline:
                                   f"(need >= {self.cfg.target.min_object_points}) -- "
                                   f"this angle didn't capture usable object data, try adjusting angle")
                         else:
+                            centroid = np.asarray(iso_test.points).mean(axis=0)
+                            dev = 0.0
+                            is_outlier = False
+                            if captured_centroids:
+                                median_c = np.median(np.array(captured_centroids), axis=0)
+                                dev = float(np.linalg.norm(centroid - median_c))
+                                if dev > self.cfg.target.max_centroid_dev_m:
+                                    is_outlier = True
+
                             raw_frames.append(pcd)
+                            captured_centroids.append(centroid)
                             last_n_pts = len(pcd.points)
                             last_captured_depth = depth_m.copy()
-                            print(f"  Captured frame {len(raw_frames):2d}: "
-                                  f"{last_n_pts:>7} raw pts -> {n_obj_pts:>5} object pts [OK]")
+
+                            if is_outlier:
+                                print(f"  Captured frame {len(raw_frames):2d}: {n_obj_pts:>5} object "
+                                      f"pts, but {dev*100:.0f} cm from your other frames -- "
+                                      f"[WARNING] this may not be the same object, keep it centered")
+                            else:
+                                print(f"  Captured frame {len(raw_frames):2d}: "
+                                      f"{last_n_pts:>7} raw pts -> {n_obj_pts:>5} object pts [OK]")
 
                 # ---- Finish / Abort keys -------------------------------
                 if key == 13:  # ENTER — finish
