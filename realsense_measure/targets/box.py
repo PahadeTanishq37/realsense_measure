@@ -161,20 +161,19 @@ class BoxTarget(Target):
         # Translate to OBB centre, then rotate into the OBB's local frame.
         local_pts = (pts - center) @ R
 
-        lo = np.percentile(local_pts, trim_percentile, axis=0)
-        hi = np.percentile(local_pts, 100.0 - trim_percentile, axis=0)
-        trimmed_extent = hi - lo        # trimmed span along each local axis
-
-        # Sort longest → shortest so index 0=length, 1=width, 2=height
-        # regardless of which physical axis the OBB happened to assign each.
-        dims = np.sort(trimmed_extent)[::-1]
-        length, width, height = float(dims[0]), float(dims[1]), float(dims[2])
-
         # ------------------------------------------------------------------
-        # Planarity self-check: check the outer 10% faces along each axis.
-        # Rigid box faces should be flat planes (RMS deviation <= 4.0 mm).
+        # Planarity self-check and dimension estimation:
+        # For each of the 3 local axes:
+        #   1. Extract the outer 10% face points on near and far ends.
+        #   2. Compute SVD plane-fit RMS perpendicular distances (planarity check).
+        #   3. Compute dimension as distance between near-face and far-face mean
+        #      positions along that axis (plane-fit dimension).
+        #   4. Fallback: if either face has < 30 points, use trimmed percentiles.
         # ------------------------------------------------------------------
         rms_values: list[float] = []
+        per_axis_dims: list[float] = []
+        dimension_methods: list[str] = []
+
         for axis in range(3):
             vals = local_pts[:, axis]
             min_v = float(np.min(vals))
@@ -184,11 +183,27 @@ class BoxTarget(Target):
             near_mask = vals <= (min_v + 0.10 * span)
             far_mask = vals >= (max_v - 0.10 * span)
 
-            near_rms = _fit_plane_rms_mm(local_pts[near_mask])
-            far_rms = _fit_plane_rms_mm(local_pts[far_mask])
+            near_pts = local_pts[near_mask]
+            far_pts = local_pts[far_mask]
+
+            near_rms = _fit_plane_rms_mm(near_pts)
+            far_rms = _fit_plane_rms_mm(far_pts)
 
             rms_values.append(round(near_rms, 2))
             rms_values.append(round(far_rms, 2))
+
+            if len(near_pts) >= 30 and len(far_pts) >= 30:
+                near_mean = float(np.mean(near_pts[:, axis]))
+                far_mean = float(np.mean(far_pts[:, axis]))
+                axis_dim = abs(far_mean - near_mean)
+                dimension_methods.append("plane_fit")
+            else:
+                lo_k = float(np.percentile(vals, trim_percentile))
+                hi_k = float(np.percentile(vals, 100.0 - trim_percentile))
+                axis_dim = float(hi_k - lo_k)
+                dimension_methods.append("percentile_fallback")
+
+            per_axis_dims.append(axis_dim)
 
         max_rms = float(max(rms_values)) if rms_values else 0.0
         is_valid_box = bool(max_rms <= 4.0)
@@ -205,6 +220,11 @@ class BoxTarget(Target):
             "warning": warning_msg,
         }
 
+        # Sort longest → shortest so index 0=length, 1=width, 2=height
+        # regardless of which physical axis the OBB happened to assign each.
+        dims = np.sort(per_axis_dims)[::-1]
+        length, width, height = float(dims[0]), float(dims[1]), float(dims[2])
+
         # Axis-aligned bounding box for reference / sanity checking.
         aabb = pcd.get_axis_aligned_bounding_box()
         aabb_extent = [
@@ -214,6 +234,7 @@ class BoxTarget(Target):
         return {
             "target": "box",
             "num_points": len(pcd.points),
+            "dimension_method": dimension_methods,
             "planarity_check": planarity_check,
             "oriented_bbox": {
                 "length_m": round(length, 4),
