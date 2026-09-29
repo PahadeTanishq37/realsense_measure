@@ -117,6 +117,13 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="disable multiway pose-graph registration and use sequential registration instead",
     )
+    parser.add_argument(
+        "--reference-dims",
+        type=str,
+        default=None,
+        metavar="L,W,H",
+        help="comma-separated ground-truth box dimensions in mm (e.g. '300,200,150') for accuracy comparison",
+    )
 
     return parser
 
@@ -130,6 +137,16 @@ def main() -> None:
 
     cfg.target.name        = args.target
     cfg.show_stage_windows = not args.no_viz
+
+    if args.reference_dims is not None:
+        try:
+            raw_vals = [float(x.strip()) for x in args.reference_dims.split(",") if x.strip()]
+            if len(raw_vals) != 3:
+                raise ValueError(f"Expected exactly 3 dimensions (length, width, height in mm), got {len(raw_vals)}")
+            # Convert mm to metres and sort descending
+            cfg.reference_dims_m = sorted([v / 1000.0 for v in raw_vals], reverse=True)
+        except Exception as err:
+            parser.error(f"Invalid value for --reference-dims '{args.reference_dims}': {err}")
 
     if args.mode is not None:
         cfg.registration.registration_mode = args.mode

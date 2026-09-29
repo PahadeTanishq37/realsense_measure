@@ -743,10 +743,47 @@ class ScanPipeline:
             print("  " + "-" * 50)
 
         obb_info = result.get("oriented_bbox", {})
+        meas_dims_m = sorted(
+            [obb_info.get("length_m", 0.0), obb_info.get("width_m", 0.0), obb_info.get("height_m", 0.0)],
+            reverse=True,
+        )
+
+        # ---- ground-truth reference comparison (if provided) -----------
+        if self.cfg.reference_dims_m is not None:
+            ref_dims_m = sorted(self.cfg.reference_dims_m, reverse=True)
+            axis_names = ["length", "width", "height"]
+            ref_comparison = {}
+            for name, m_val, r_val in zip(axis_names, meas_dims_m, ref_dims_m):
+                err_mm = abs(m_val - r_val) * 1000.0
+                err_pct = (abs(m_val - r_val) / r_val * 100.0) if r_val > 0 else 0.0
+                ref_comparison[name] = {
+                    "measured_m": round(m_val, 4),
+                    "reference_m": round(r_val, 4),
+                    "measured_mm": round(m_val * 1000.0, 1),
+                    "reference_mm": round(r_val * 1000.0, 1),
+                    "error_mm": round(err_mm, 2),
+                    "error_pct": round(err_pct, 2),
+                }
+            result["reference_comparison"] = ref_comparison
+
+        ref_comp = result.get("reference_comparison", {})
+
         print(f"\n  Target : {result.get('target', '?')}")
-        print(f"  Length : {obb_info.get('length_m', 0) * 1000:.1f} mm")
-        print(f"  Width  : {obb_info.get('width_m',  0) * 1000:.1f} mm")
-        print(f"  Height : {obb_info.get('height_m', 0) * 1000:.1f} mm")
+
+        def _fmt_dim_line(label: str, key: str) -> str:
+            val_mm = obb_info.get(f"{key}_m", 0.0) * 1000.0
+            line = f"  {label:<6} : {val_mm:>7.1f} mm"
+            if key in ref_comp:
+                info = ref_comp[key]
+                ref_mm = info["reference_mm"]
+                err_mm = info["error_mm"]
+                err_pct = info["error_pct"]
+                line += f"  (ref: {ref_mm:5.1f} mm | error: {err_mm:4.1f} mm, {err_pct:4.1f}%)"
+            return line
+
+        print(_fmt_dim_line("Length", "length"))
+        print(_fmt_dim_line("Width", "width"))
+        print(_fmt_dim_line("Height", "height"))
         print(f"  Volume : {obb_info.get('volume_m3', 0) * 1e6:.1f} cm^3")
         aabb_ext = result.get("axis_aligned_bbox_extent_m", [])
         if aabb_ext:

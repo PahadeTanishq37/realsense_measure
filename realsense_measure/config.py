@@ -256,6 +256,9 @@ class PipelineConfig:
     # Diagnostic full-orbit check
     attempt_loop_closure: bool = False   # check last vs first frame alignment after registration
 
+    # Ground-truth reference dimensions for accuracy comparison (metres, sorted descending)
+    reference_dims_m: list[float] | None = None
+
     def __post_init__(self) -> None:
         # Ensure output_dir is always a Path, even if a plain string was passed.
         self.output_dir = Path(self.output_dir)
