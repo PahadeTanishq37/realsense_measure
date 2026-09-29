@@ -124,6 +124,11 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="L,W,H",
         help="comma-separated ground-truth box dimensions in mm (e.g. '300,200,150') for accuracy comparison",
     )
+    parser.add_argument(
+        "--manual-roi",
+        action="store_true",
+        help="interactively select a 2D bounding box ROI on the first frame to focus isolation",
+    )
 
     return parser
 
@@ -137,6 +142,9 @@ def main() -> None:
 
     cfg.target.name        = args.target
     cfg.show_stage_windows = not args.no_viz
+
+    if args.manual_roi:
+        cfg.target.use_manual_roi = True
 
     if args.reference_dims is not None:
         try:

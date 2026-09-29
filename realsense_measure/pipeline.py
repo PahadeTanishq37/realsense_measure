@@ -40,6 +40,23 @@ from visualizer import (
 )
 
 
+def select_roi_on_frame(
+    color_bgr: np.ndarray,
+    window_name: str = "Select Object ROI (Drag Box & press SPACE/ENTER)",
+) -> tuple[int, int, int, int] | None:
+    """
+    Open an OpenCV interactive window letting the user drag a bounding box around the target object.
+
+    Returns (x, y, w, h) in pixels, or None if cancelled.
+    """
+    rect = cv2.selectROI(window_name, color_bgr, showCrosshair=True, fromCenter=False)
+    cv2.destroyWindow(window_name)
+    x, y, w, h = int(rect[0]), int(rect[1]), int(rect[2]), int(rect[3])
+    if w <= 0 or h <= 0:
+        return None
+    return (x, y, w, h)
+
+
 def _draw_hud(
     panel: np.ndarray,
     depth_m: np.ndarray,
@@ -226,6 +243,24 @@ class ScanPipeline:
         last_skip_warn_time = 0.0
         last_n_pts = 0  # point count of the most recently captured cloud
 
+        manual_roi: tuple[int, int, int, int] | None = None
+        if self.cfg.target.use_manual_roi and not is_human_mode:
+            print("\n  [MANUAL ROI MODE] Acquiring initial frame for ROI selection...")
+            init_color, init_depth = None, None
+            for _ in range(40):
+                init_color, init_depth, _ = cam.read_with_colorized()
+                if init_color is not None and init_depth is not None:
+                    break
+                time.sleep(0.05)
+            if init_color is not None:
+                print("  --> Drag a rectangle around the target object in the window, then press SPACE or ENTER.")
+                manual_roi = select_roi_on_frame(init_color)
+                if manual_roi is not None:
+                    rx, ry, rw, rh = manual_roi
+                    print(f"  --> Manual ROI locked: x={rx}, y={ry}, w={rw}, h={rh} px\n")
+                else:
+                    print("  [!] Manual ROI selection cancelled -- falling back to full-frame.\n")
+
         try:
             while True:
                 color_bgr, depth_m, depth_color = cam.read_with_colorized()
@@ -256,7 +291,14 @@ class ScanPipeline:
                     is_human=is_human_mode,
                 )
 
-                preview = np.hstack([color_bgr, depth_panel])
+                display_color = color_bgr.copy()
+                if manual_roi is not None:
+                    rx, ry, rw, rh = manual_roi
+                    cv2.rectangle(display_color, (rx, ry), (rx + rw, ry + rh), (0, 255, 0), 2)
+                    cv2.putText(display_color, "ROI", (rx + 4, max(ry - 6, 16)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1, cv2.LINE_AA)
+
+                preview = np.hstack([display_color, depth_panel])
                 window_name = "Stage 1: Human 180° Capture" if is_human_mode else "Stage 1: D455f Capture (RGB | Depth)"
                 cv2.imshow(window_name, preview)
                 key = cv2.waitKey(1) & 0xFF
@@ -291,7 +333,7 @@ class ScanPipeline:
                                         last_captured_depth = depth_m.copy()
                                         print(f"  Captured human frame {len(raw_frames):2d}: {n_pts:>6} pts with RGB-D [OK]")
                             else:
-                                pcd = cam.to_point_cloud(color_bgr, depth_m)
+                                pcd = cam.to_point_cloud(color_bgr, depth_m, roi=manual_roi)
                                 iso_test = isolate_object(pcd, self.cfg.preprocess, self.cfg.target, last_centroid=last_centroid)
                                 n_obj_pts = len(iso_test.points)
                                 if n_obj_pts < self.cfg.target.min_object_points:
@@ -337,7 +379,7 @@ class ScanPipeline:
                                 last_captured_depth = depth_m.copy()
                                 print(f"  Captured human frame {len(raw_frames):2d}: {n_pts:>6} pts with RGB-D [OK]")
                     else:
-                        pcd = cam.to_point_cloud(color_bgr, depth_m)
+                        pcd = cam.to_point_cloud(color_bgr, depth_m, roi=manual_roi)
                         iso_test = isolate_object(pcd, self.cfg.preprocess, self.cfg.target, last_centroid=last_centroid)
                         n_obj_pts = len(iso_test.points)
                         if n_obj_pts < self.cfg.target.min_object_points:

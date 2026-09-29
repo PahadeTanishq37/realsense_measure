@@ -368,6 +368,7 @@ class RealSenseCamera:
         self,
         color_bgr: np.ndarray,
         depth_m: np.ndarray,
+        roi: tuple[int, int, int, int] | None = None,
     ) -> o3d.geometry.PointCloud:
         """
         Convert a colour + depth frame pair into an Open3D point cloud.
@@ -378,6 +379,8 @@ class RealSenseCamera:
             HxWx3 uint8 BGR image from :meth:`read`.
         depth_m:
             HxW float32 depth image in metres from :meth:`read`.
+        roi:
+            Optional (x, y, w, h) pixel bounding box to crop the point cloud to.
 
         Returns
         -------
@@ -391,6 +394,12 @@ class RealSenseCamera:
         # Clip depth to the usable range; zeroed pixels become "no data"
         # and are excluded from the RGBD image by depth_trunc.
         depth_clipped = depth_m.copy()
+        if roi is not None:
+            rx, ry, rw, rh = roi
+            mask = np.zeros_like(depth_clipped, dtype=bool)
+            mask[max(0, ry) : max(0, ry + rh), max(0, rx) : max(0, rx + rw)] = True
+            depth_clipped[~mask] = 0.0
+
         depth_clipped[depth_clipped < self.cfg.depth_min_m] = 0.0
         depth_clipped[depth_clipped > self.cfg.depth_max_m] = 0.0
 
