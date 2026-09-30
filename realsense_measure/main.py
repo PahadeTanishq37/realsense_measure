@@ -34,11 +34,73 @@ Use a finer voxel grid for higher-resolution scans (slower)::
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
 from pathlib import Path
 
 from config import PipelineConfig
 from pipeline import ScanPipeline
+
+# Tests run by --selfcheck, in order.  Both are pure computation (synthetic
+# data + saved .ply files) — neither one touches the camera, so this is safe
+# to run before every real scan.
+_SELFCHECK_SCRIPTS = [
+    "test_registration_regression.py",
+    "test_synthetic.py",
+]
+
+
+def run_selfcheck() -> bool:
+    """
+    Run the project's no-hardware regression tests and report PASS/FAIL.
+
+    This exists because a silently-broken registration stage (the exact bug
+    found earlier: a pose-graph convention error that made results WORSE
+    than no registration at all, while reporting every frame as accepted)
+    produces measurement.json output that looks completely normal — there is
+    no other signal that anything is wrong until you compare against a known
+    object.  Running this before a real capture catches that class of
+    problem for free, in seconds, with no camera needed.
+
+    Returns
+    -------
+    bool
+        True if every script in ``_SELFCHECK_SCRIPTS`` exited 0.
+    """
+    print("=" * 60)
+    print("  Self-check: running registration + measurement tests")
+    print("  (no camera needed for this)")
+    print("=" * 60)
+
+    all_ok = True
+    for script in _SELFCHECK_SCRIPTS:
+        script_path = Path(__file__).parent / script
+        if not script_path.exists():
+            print(f"  SKIP  {script} (file not found)")
+            continue
+        print(f"\n  running {script} ...")
+        result = subprocess.run(
+            [sys.executable, str(script_path)],
+            cwd=script_path.parent,
+            capture_output=True,
+            text=True,
+        )
+        ok = result.returncode == 0
+        all_ok = all_ok and ok
+        status = "PASS" if ok else "FAIL"
+        print(f"  {status}  {script}")
+        if not ok:
+            tail = "\n".join(result.stdout.splitlines()[-15:])
+            print("  --- last lines of output ---")
+            print("  " + tail.replace("\n", "\n  "))
+            if result.stderr.strip():
+                print("  --- stderr ---")
+                print("  " + result.stderr.strip().replace("\n", "\n  "))
+
+    print("\n" + "=" * 60)
+    print("  SELF-CHECK:", "PASS" if all_ok else "FAIL")
+    print("=" * 60)
+    return all_ok
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -48,6 +110,15 @@ def _build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
+    parser.add_argument(
+        "--selfcheck",
+        action="store_true",
+        help=(
+            "run the no-camera regression tests (test_registration_regression.py, "
+            "test_synthetic.py) before starting a real capture; abort if either "
+            "fails, instead of trusting output from a possibly-broken pipeline"
+        ),
+    )
     parser.add_argument(
         "--target",
         default="box",
@@ -137,6 +208,13 @@ def _build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
+
+    if args.selfcheck:
+        if not run_selfcheck():
+            print("\nSelf-check failed -- aborting before touching the camera.")
+            print("Fix the failing test above (or re-apply the tested patch) before scanning.")
+            sys.exit(1)
+        print()
 
     # ---- build configuration -------------------------------------------
     cfg = PipelineConfig(output_dir=Path(args.out))
