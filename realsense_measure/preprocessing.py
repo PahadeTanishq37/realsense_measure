@@ -148,7 +148,6 @@ def extract_plausible_cluster(
     pcd: o3d.geometry.PointCloud,
     cfg: PreprocessConfig,
     target_cfg: TargetConfig | None = None,
-    last_centroid: np.ndarray | None = None,
 ) -> o3d.geometry.PointCloud:
     """
     Among DBSCAN clusters, picks the one that's both reasonably large
@@ -156,9 +155,6 @@ def extract_plausible_cluster(
     whichever cluster has the most points. This prevents large
     background/clutter blobs (which often have MORE points than the
     actual object in a cluttered room) from being mistaken for it.
-
-    If last_centroid is provided, prefers the size-plausible cluster whose
-    centroid is closest to last_centroid.
     """
     if not pcd.has_points():
         return pcd
@@ -176,7 +172,7 @@ def extract_plausible_cluster(
     min_size = target_cfg.expected_min_size_m if target_cfg else 0.0
     max_size = target_cfg.expected_max_size_m if target_cfg else float("inf")
 
-    candidates: list[tuple[np.ndarray, o3d.geometry.PointCloud]] = []
+    best_idx, best_score = None, -1.0
     for label in np.unique(labels[labels >= 0]):
         idx = np.where(labels == label)[0]
         cluster = pcd.select_by_index(idx)
@@ -186,26 +182,14 @@ def extract_plausible_cluster(
         # instead of ever letting it win purely on point count
         if largest_dim < min_size or largest_dim > max_size:
             continue
-        candidates.append((idx, cluster))
+        score = len(idx)  # Among PLAUSIBLE clusters, prefer the biggest
+        if score > best_score:
+            best_score, best_idx = score, idx
 
-    if not candidates:
+    if best_idx is None:
         # Nothing plausible found — return empty rather than silently
         # picking an implausible cluster; the caller will flag this
         return o3d.geometry.PointCloud()
-
-    if last_centroid is not None:
-        # Prefer the plausible cluster closest to last_centroid
-        best_idx, _ = min(
-            candidates,
-            key=lambda c: (
-                np.linalg.norm(np.asarray(c[1].points).mean(axis=0) - last_centroid),
-                -len(c[0]),
-            ),
-        )
-        return pcd.select_by_index(best_idx)
-
-    # If last_centroid is None, prefer the largest plausible cluster
-    best_idx, _ = max(candidates, key=lambda c: len(c[0]))
     return pcd.select_by_index(best_idx)
 
 
@@ -213,7 +197,6 @@ def isolate_object(
     pcd: o3d.geometry.PointCloud,
     cfg: PreprocessConfig,
     target_cfg: TargetConfig | None = None,
-    last_centroid: np.ndarray | None = None,
 ) -> o3d.geometry.PointCloud:
     """
     Full per-frame preprocessing pipeline.
@@ -231,8 +214,6 @@ def isolate_object(
         Preprocessing configuration.
     target_cfg:
         Optional Target configuration specifying plausible size & point limits.
-    last_centroid:
-        Optional (3,) centroid from previous frame(s) to track the object position.
 
     Returns
     -------
@@ -242,7 +223,7 @@ def isolate_object(
     pcd = downsample_and_denoise(pcd, cfg)
     no_plane, _ = remove_dominant_plane(pcd, cfg)
     if target_cfg is not None:
-        obj = extract_plausible_cluster(no_plane, cfg, target_cfg, last_centroid=last_centroid)
+        obj = extract_plausible_cluster(no_plane, cfg, target_cfg)
     else:
         obj = extract_largest_cluster(no_plane, cfg)
     return obj
@@ -251,51 +232,25 @@ def isolate_object(
 def reject_positional_outliers(
     frames: list[o3d.geometry.PointCloud],
     max_dev_m: float,
-    alpha: float = 0.3,
 ) -> tuple[list[int], list[tuple[int, float]]]:
     """
-    Drop frames whose object centroid jumps far from the running smoothed centroid.
+    Drop frames whose object centroid is far from the median centroid.
 
-    Uses an exponential moving average (EMA) of accepted centroids:
-    `expected_centroid = (1 - alpha) * expected_centroid + alpha * this_centroid`.
-    This tolerates slow, continuous drift (e.g. a subject rotating) while catching
-    sudden jumps from background/clutter mis-segmentation.
-
-    Parameters
-    ----------
-    frames:
-        List of segmented object point clouds.
-    max_dev_m:
-        Maximum allowed distance (m) between frame centroid and expected running centroid.
-    alpha:
-        Smoothing factor for centroid EMA update (default 0.3).
+    A size-plausibility check cannot tell a background blob from the object
+    when both are object-sized.  But if the camera is roughly fixed on the
+    object, the object's centroid should stay put from frame to frame while a
+    wrongly-picked background cluster jumps to a very different place.
 
     Returns
     -------
     keep:      indices of frames to keep
-    rejected:  list of (index, distance_from_expected_m) for dropped frames
+    rejected:  list of (index, distance_from_median_m) for dropped frames
     """
-    if not frames:
-        return [], []
-
-    keep: list[int] = []
-    rejected: list[tuple[int, float]] = []
-    running_centroid: np.ndarray | None = None
-
-    for i, f in enumerate(frames):
-        if not f.has_points():
-            rejected.append((i, float("inf")))
-            continue
-        cents = np.asarray(f.points).mean(axis=0)
-        if running_centroid is None:
-            running_centroid = cents.copy()
-            keep.append(i)
-        else:
-            dev = float(np.linalg.norm(cents - running_centroid))
-            if dev <= max_dev_m:
-                keep.append(i)
-                running_centroid = (1.0 - alpha) * running_centroid + alpha * cents
-            else:
-                rejected.append((i, dev))
-
+    if len(frames) < 3:
+        return list(range(len(frames))), []
+    cents = np.array([np.asarray(f.points).mean(axis=0) for f in frames])
+    median = np.median(cents, axis=0)
+    dists = np.linalg.norm(cents - median, axis=1)
+    keep = [i for i, d in enumerate(dists) if d <= max_dev_m]
+    rejected = [(i, float(dists[i])) for i in range(len(frames)) if dists[i] > max_dev_m]
     return keep, rejected

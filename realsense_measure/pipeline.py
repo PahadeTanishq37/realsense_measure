@@ -67,7 +67,6 @@ def _draw_hud(
     auto_capture: bool = True,
     mode_title: str = "D455f STATUS",
     is_human: bool = False,
-    recommended_min_m: float | None = None,
 ) -> None:
     """
     Render the D455f status HUD onto the depth panel in-place.
@@ -94,14 +93,6 @@ def _draw_hud(
         Title header displayed at the top of the HUD.
     is_human:
         Whether human 180° scan mode is active.
-    recommended_min_m:
-        If given, and the median depth of the current frame is closer than
-        this, a "TOO CLOSE" warning is drawn instead of the normal legend
-        line, in a color that stands out from the rest of the HUD.  This is
-        a LIVE, real-time check using the actual current frame's depth —
-        distinct from ``CameraConfig.depth_min_m``, which only clips what
-        gets converted to a point cloud after the fact and gives no
-        warning while you're still positioning the object.
     """
     valid = depth_m[depth_m > 0]
     n_valid   = int(valid.size)
@@ -117,19 +108,6 @@ def _draw_hud(
         legend = "AUTO-CAPTURING -- move camera around object -- press ENTER when done"
     else:
         legend = "SPACE: capture  ENTER: finish (2+)  ESC: abort"
-
-    # Live too-close check: uses the CURRENT frame's median depth, so it
-    # warns you while you're still positioning the object, not after a bad
-    # capture is already in the list.
-    too_close = (
-        recommended_min_m is not None
-        and n_valid > 0
-        and d_median < recommended_min_m
-    )
-    distance_line = (
-        f"!! TOO CLOSE ({d_median:.2f} m) - move back to >= {recommended_min_m:.2f} m !!"
-        if too_close else None
-    )
 
     lines = [
         mode_title,
@@ -147,8 +125,6 @@ def _draw_hud(
         "",
         legend,
     ]
-    if distance_line is not None:
-        lines.append(distance_line)
 
     y0, dy = 28, 22
     for i, line in enumerate(lines):
@@ -157,13 +133,8 @@ def _draw_hud(
         cv2.putText(panel, line, (10, y),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.52,
                     (0, 0, 0), 3, cv2.LINE_AA)
-        # White / yellow text, or red for the too-close warning
-        if line == distance_line:
-            color = (0, 0, 255)      # red (BGR) — stands out from everything else
-        elif line == mode_title:
-            color = (0, 255, 255)
-        else:
-            color = (255, 255, 255)
+        # White / yellow text
+        color = (0, 255, 255) if line == mode_title else (255, 255, 255)
         cv2.putText(panel, line, (10, y),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.52,
                     color, 1, cv2.LINE_AA)
@@ -191,17 +162,30 @@ class ScanPipeline:
     def __init__(self, cfg: PipelineConfig) -> None:
         self.cfg = cfg
         # If targeting human head or body, default to rgbd_human registration mode unless overridden
-        if cfg.target.name in ("head", "body"):
-            if cfg.registration.registration_mode == "pointcloud":
-                cfg.registration.registration_mode = "rgbd_human"
-            if cfg.target.max_centroid_dev_m == 0.15:
-                cfg.target.max_centroid_dev_m = 0.70
+        if cfg.target.name in ("head", "body") and cfg.registration.registration_mode == "pointcloud":
+            cfg.registration.registration_mode = "rgbd_human"
 
-        if cfg.clear_output_dir_on_run and cfg.output_dir.exists():
-            import shutil
-            shutil.rmtree(cfg.output_dir)
-        cfg.output_dir.mkdir(parents=True, exist_ok=True)
+        self._clean_output_dir()
         self.target = get_target(cfg.target.name)
+
+    def _clean_output_dir(self) -> None:
+        """
+        Safely empty the output directory before running a new scan.
+
+        Removes all files and subdirectories inside cfg.output_dir so results from
+        previous runs are never mixed with fresh scan outputs.
+        """
+        out_dir = self.cfg.output_dir
+        if out_dir.exists() and out_dir.is_dir():
+            for item in out_dir.iterdir():
+                try:
+                    if item.is_file() or item.is_symlink():
+                        item.unlink()
+                    elif item.is_dir():
+                        shutil.rmtree(item)
+                except Exception as e:
+                    print(f"  [!] Warning: Failed to remove old output item {item.name}: {e}")
+        out_dir.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
     # Stage 1: capture
@@ -229,7 +213,6 @@ class ScanPipeline:
         raw_frames: list[o3d.geometry.PointCloud | RGBDFrame] = []
         captured_centroids: list[np.ndarray] = []
         last_centroid: np.ndarray | None = None
-        expected_centroid: np.ndarray | None = None
 
         print("\n" + "=" * 60)
         print("  Stage 1: Capture")
@@ -309,7 +292,6 @@ class ScanPipeline:
                     auto_capture=self.cfg.camera.auto_capture,
                     mode_title=hud_title,
                     is_human=is_human_mode,
-                    recommended_min_m=self.cfg.camera.recommended_min_distance_m,
                 )
 
                 display_color = color_bgr.copy()
@@ -365,8 +347,9 @@ class ScanPipeline:
                                     centroid = np.asarray(iso_test.points).mean(axis=0)
                                     dev = 0.0
                                     is_outlier = False
-                                    if expected_centroid is not None:
-                                        dev = float(np.linalg.norm(centroid - expected_centroid))
+                                    if captured_centroids:
+                                        median_c = np.median(np.array(captured_centroids), axis=0)
+                                        dev = float(np.linalg.norm(centroid - median_c))
                                         if dev > self.cfg.target.max_centroid_dev_m:
                                             is_outlier = True
 
@@ -377,15 +360,9 @@ class ScanPipeline:
                                     last_capture_time = now
                                     last_captured_depth = depth_m.copy()
 
-                                    if not is_outlier:
-                                        if expected_centroid is None:
-                                            expected_centroid = centroid.copy()
-                                        else:
-                                            expected_centroid = 0.7 * expected_centroid + 0.3 * centroid
-
                                     if is_outlier:
                                         print(f"  Captured frame {len(raw_frames):2d}: {n_obj_pts:>5} object "
-                                              f"pts, but {dev*100:.0f} cm from expected position -- "
+                                              f"pts, but {dev*100:.0f} cm from your other frames -- "
                                               f"[WARNING] this may not be the same object, keep it centered")
                                     else:
                                         print(f"  Captured frame {len(raw_frames):2d}: "
@@ -416,8 +393,9 @@ class ScanPipeline:
                             centroid = np.asarray(iso_test.points).mean(axis=0)
                             dev = 0.0
                             is_outlier = False
-                            if expected_centroid is not None:
-                                dev = float(np.linalg.norm(centroid - expected_centroid))
+                            if captured_centroids:
+                                median_c = np.median(np.array(captured_centroids), axis=0)
+                                dev = float(np.linalg.norm(centroid - median_c))
                                 if dev > self.cfg.target.max_centroid_dev_m:
                                     is_outlier = True
 
@@ -427,15 +405,9 @@ class ScanPipeline:
                             last_n_pts = len(pcd.points)
                             last_captured_depth = depth_m.copy()
 
-                            if not is_outlier:
-                                if expected_centroid is None:
-                                    expected_centroid = centroid.copy()
-                                else:
-                                    expected_centroid = 0.7 * expected_centroid + 0.3 * centroid
-
                             if is_outlier:
                                 print(f"  Captured frame {len(raw_frames):2d}: {n_obj_pts:>5} object "
-                                      f"pts, but {dev*100:.0f} cm from expected position -- "
+                                      f"pts, but {dev*100:.0f} cm from your other frames -- "
                                       f"[WARNING] this may not be the same object, keep it centered")
                             else:
                                 print(f"  Captured frame {len(raw_frames):2d}: "
@@ -530,11 +502,10 @@ class ScanPipeline:
             isolated.append(iso)
 
         # Positional consistency: a background blob can be object-sized, so size
-        # checks alone let it through.  Drop frames whose centroid jumps away from
-        # the running smoothed centroid.
+        # checks alone let it through.  Drop frames whose centroid jumps away.
         keep, rejected_pos = reject_positional_outliers(isolated, target_cfg.max_centroid_dev_m)
         for idx, dist in rejected_pos:
-            print(f"  isolated #{idx:02d}: centroid {dist:.2f} m from expected position -- "
+            print(f"  isolated #{idx:02d}: centroid {dist:.2f} m from median position -- "
                   f"DISCARDED (likely background, not the object)")
         isolated = [isolated[i] for i in keep]
 

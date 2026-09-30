@@ -85,12 +85,6 @@ class CameraConfig:
     depth_min_m: float = 0.40
     depth_max_m: float = 1.20
 
-    # LIVE too-close warning shown in the capture preview (see pipeline._draw_hud).
-    # Distinct from depth_min_m: this checks the CURRENT frame while you're
-    # still positioning the object, instead of silently clipping bad-range
-    # points after the fact with no feedback.
-    recommended_min_distance_m: float = 0.55
-
     # Auto-capture settings
     auto_capture: bool = True
     capture_interval_s: float = 3.5   # how often a frame is automatically captured for box scans (s)
@@ -215,12 +209,8 @@ class TargetConfig:
     expected_min_size_m: float = 0.03   # smallest plausible dimension
     expected_max_size_m: float = 0.60   # largest plausible dimension (well above object, below room clutter)
     min_object_points: int = 150        # minimum points needed for a valid object capture
-    max_centroid_dev_m: float = 0.15   # reject frames whose object centroid jumps farther than this from running position (0.15m for box, 0.70m for head/body)
+    max_centroid_dev_m: float = 0.15   # reject frames whose object centroid is farther than this from the median centroid
     use_manual_roi: bool = False       # interactively select 2D pixel ROI on first frame for cropped point cloud isolation
-
-    def __post_init__(self) -> None:
-        if self.name in ("head", "body") and self.max_centroid_dev_m == 0.15:
-            self.max_centroid_dev_m = 0.70
 
 
 
@@ -248,12 +238,6 @@ class PipelineConfig:
     """
 
     output_dir: Path = field(default_factory=lambda: Path("scan_output"))
-    # If True (default), output_dir is deleted and recreated at the start of
-    # each run, so a fresh run can never mix in stale files (frame clouds,
-    # fused.ply, segmented_object.ply, measurement.json) from a previous,
-    # possibly different-target, scan.  Set False only if you deliberately
-    # want to accumulate outputs across runs in the same folder.
-    clear_output_dir_on_run: bool = True
 
     # Per-stage configs — constructed with their own defaults automatically.
     camera: CameraConfig = field(default_factory=CameraConfig)
