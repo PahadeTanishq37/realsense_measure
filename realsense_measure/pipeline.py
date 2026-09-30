@@ -165,27 +165,11 @@ class ScanPipeline:
         if cfg.target.name in ("head", "body") and cfg.registration.registration_mode == "pointcloud":
             cfg.registration.registration_mode = "rgbd_human"
 
-        self._clean_output_dir()
+        if cfg.clear_output_dir_on_run and cfg.output_dir.exists():
+            import shutil
+            shutil.rmtree(cfg.output_dir)
+        cfg.output_dir.mkdir(parents=True, exist_ok=True)
         self.target = get_target(cfg.target.name)
-
-    def _clean_output_dir(self) -> None:
-        """
-        Safely empty the output directory before running a new scan.
-
-        Removes all files and subdirectories inside cfg.output_dir so results from
-        previous runs are never mixed with fresh scan outputs.
-        """
-        out_dir = self.cfg.output_dir
-        if out_dir.exists() and out_dir.is_dir():
-            for item in out_dir.iterdir():
-                try:
-                    if item.is_file() or item.is_symlink():
-                        item.unlink()
-                    elif item.is_dir():
-                        shutil.rmtree(item)
-                except Exception as e:
-                    print(f"  [!] Warning: Failed to remove old output item {item.name}: {e}")
-        out_dir.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
     # Stage 1: capture

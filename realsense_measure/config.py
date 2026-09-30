@@ -238,6 +238,12 @@ class PipelineConfig:
     """
 
     output_dir: Path = field(default_factory=lambda: Path("scan_output"))
+    # If True (default), output_dir is deleted and recreated at the start of
+    # each run, so a fresh run can never mix in stale files (frame clouds,
+    # fused.ply, segmented_object.ply, measurement.json) from a previous,
+    # possibly different-target, scan.  Set False only if you deliberately
+    # want to accumulate outputs across runs in the same folder.
+    clear_output_dir_on_run: bool = True
 
     # Per-stage configs — constructed with their own defaults automatically.
     camera: CameraConfig = field(default_factory=CameraConfig)
