@@ -67,6 +67,7 @@ def _draw_hud(
     auto_capture: bool = True,
     mode_title: str = "D455f STATUS",
     is_human: bool = False,
+    recommended_min_m: float | None = None,
 ) -> None:
     """
     Render the D455f status HUD onto the depth panel in-place.
@@ -93,6 +94,14 @@ def _draw_hud(
         Title header displayed at the top of the HUD.
     is_human:
         Whether human 180° scan mode is active.
+    recommended_min_m:
+        If given, and the median depth of the current frame is closer than
+        this, a "TOO CLOSE" warning is drawn instead of the normal legend
+        line, in a color that stands out from the rest of the HUD.  This is
+        a LIVE, real-time check using the actual current frame's depth —
+        distinct from ``CameraConfig.depth_min_m``, which only clips what
+        gets converted to a point cloud after the fact and gives no
+        warning while you're still positioning the object.
     """
     valid = depth_m[depth_m > 0]
     n_valid   = int(valid.size)
@@ -108,6 +117,19 @@ def _draw_hud(
         legend = "AUTO-CAPTURING -- move camera around object -- press ENTER when done"
     else:
         legend = "SPACE: capture  ENTER: finish (2+)  ESC: abort"
+
+    # Live too-close check: uses the CURRENT frame's median depth, so it
+    # warns you while you're still positioning the object, not after a bad
+    # capture is already in the list.
+    too_close = (
+        recommended_min_m is not None
+        and n_valid > 0
+        and d_median < recommended_min_m
+    )
+    distance_line = (
+        f"!! TOO CLOSE ({d_median:.2f} m) - move back to >= {recommended_min_m:.2f} m !!"
+        if too_close else None
+    )
 
     lines = [
         mode_title,
@@ -125,6 +147,8 @@ def _draw_hud(
         "",
         legend,
     ]
+    if distance_line is not None:
+        lines.append(distance_line)
 
     y0, dy = 28, 22
     for i, line in enumerate(lines):
@@ -133,8 +157,13 @@ def _draw_hud(
         cv2.putText(panel, line, (10, y),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.52,
                     (0, 0, 0), 3, cv2.LINE_AA)
-        # White / yellow text
-        color = (0, 255, 255) if line == mode_title else (255, 255, 255)
+        # White / yellow text, or red for the too-close warning
+        if line == distance_line:
+            color = (0, 0, 255)      # red (BGR) — stands out from everything else
+        elif line == mode_title:
+            color = (0, 255, 255)
+        else:
+            color = (255, 255, 255)
         cv2.putText(panel, line, (10, y),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.52,
                     color, 1, cv2.LINE_AA)
@@ -276,6 +305,7 @@ class ScanPipeline:
                     auto_capture=self.cfg.camera.auto_capture,
                     mode_title=hud_title,
                     is_human=is_human_mode,
+                    recommended_min_m=self.cfg.camera.recommended_min_distance_m,
                 )
 
                 display_color = color_bgr.copy()

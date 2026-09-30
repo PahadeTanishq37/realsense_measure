@@ -85,6 +85,12 @@ class CameraConfig:
     depth_min_m: float = 0.40
     depth_max_m: float = 1.20
 
+    # LIVE too-close warning shown in the capture preview (see pipeline._draw_hud).
+    # Distinct from depth_min_m: this checks the CURRENT frame while you're
+    # still positioning the object, instead of silently clipping bad-range
+    # points after the fact with no feedback.
+    recommended_min_distance_m: float = 0.55
+
     # Auto-capture settings
     auto_capture: bool = True
     capture_interval_s: float = 3.5   # how often a frame is automatically captured for box scans (s)
