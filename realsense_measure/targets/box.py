@@ -14,26 +14,69 @@ from config import PreprocessConfig
 from preprocessing import extract_largest_cluster, remove_dominant_plane
 from targets.base import Target, register_target
 
+# Below this, a "face" is considered flat (sensor-noise-only deviation).
+# Above it, the surface at that end of that axis is curved and/or the
+# registration that put it there is misaligned — either way the reported
+# dimension for that axis should not be trusted at face value.
+DEFAULT_FLATNESS_WARN_M = 0.006  # 6 mm
 
-def _fit_plane_rms_mm(pts: np.ndarray) -> float:
+
+def fit_plane_to_slab(
+    local_pts: np.ndarray,
+    axis: int,
+    end: str,
+    slab_fraction: float = 0.08,
+) -> dict:
     """
-    Fit a plane to 3D points using SVD and compute the RMS perpendicular distance in mm.
+    Fit a plane to the outer slab of points at one end of one local axis.
+
+    Parameters
+    ----------
+    local_pts:
+        Nx3 points already expressed in the OBB's local frame (see
+        ``BoxTarget.measure`` for how this is built).
+    axis:
+        Which local axis (0, 1, or 2) to take the slab from.
+    end:
+        ``"lo"`` for the slab at the minimum end of this axis, ``"hi"`` for
+        the slab at the maximum end.
+    slab_fraction:
+        Fraction of points (by percentile along this axis) that make up the
+        slab, e.g. 0.08 takes the outermost 8%.
+
+    Returns
+    -------
+    dict with keys:
+        ``coord``   -- the slab centroid's coordinate along ``axis`` (this
+                       is what "where is this face" means for the extent
+                       calculation)
+        ``rms_m``   -- RMS distance of slab points from the fitted plane;
+                       near sensor noise (~1-3 mm) for a real flat face,
+                       much higher for a curved surface or a misaligned
+                       double-wall from imperfect registration
+        ``n_points`` -- how many points made up the slab (a very small
+                       count means the fit itself is unreliable)
     """
-    if len(pts) < 3:
-        return 0.0
-    centroid = np.mean(pts, axis=0)
-    centered = pts - centroid
-    try:
-        _, _, vh = np.linalg.svd(centered)
-        normal = vh[-1]  # normal corresponds to smallest singular value
-        norm_len = np.linalg.norm(normal)
-        if norm_len > 1e-12:
-            normal = normal / norm_len
-        dists = np.abs(centered @ normal)
-        rms_m = float(np.sqrt(np.mean(dists**2)))
-        return rms_m * 1000.0
-    except Exception:
-        return 0.0
+    v = local_pts[:, axis]
+    if end == "lo":
+        cutoff = np.percentile(v, slab_fraction * 100.0)
+        slab = local_pts[v <= cutoff]
+    else:
+        cutoff = np.percentile(v, 100.0 - slab_fraction * 100.0)
+        slab = local_pts[v >= cutoff]
+
+    if len(slab) < 10:
+        return {"coord": float(cutoff), "rms_m": float("nan"), "n_points": len(slab)}
+
+    centroid = slab.mean(axis=0)
+    _, _, vt = np.linalg.svd(slab - centroid)
+    normal = vt[-1]
+    residuals = (slab - centroid) @ normal
+    return {
+        "coord": float(centroid[axis]),
+        "rms_m": float(residuals.std()),
+        "n_points": int(len(slab)),
+    }
 
 
 @register_target
@@ -44,22 +87,36 @@ class BoxTarget(Target):
     The measurement pipeline is:
       1. :meth:`segment` — strip any residual planar background, keep the
          single largest connected component.
-      2. :meth:`measure` — fit a minimum-volume oriented bounding box and
-         return trimmed (bias-corrected) axis lengths, volume, and OBB
-         geometry for the visualizer.
+      2. :meth:`measure` — fit a minimum-volume oriented bounding box, then
+         measure each axis by fitting a plane to the two opposing faces
+         (rather than trusting raw point extent), and flag any axis whose
+         "face" isn't actually flat.
     """
 
     name: str = "box"
 
-    def __init__(self, preprocess_cfg: PreprocessConfig | None = None) -> None:
+    def __init__(
+        self,
+        preprocess_cfg: PreprocessConfig | None = None,
+        flatness_warn_m: float = DEFAULT_FLATNESS_WARN_M,
+        slab_fraction: float = 0.08,
+    ) -> None:
         """
         Parameters
         ----------
         preprocess_cfg:
             Preprocessing settings shared with the rest of the pipeline.
             If ``None``, sensible defaults are used (``PreprocessConfig()``).
+        flatness_warn_m:
+            RMS-from-plane threshold above which a face is flagged as not
+            flat (see :data:`DEFAULT_FLATNESS_WARN_M`).
+        slab_fraction:
+            Fraction of points taken as each face's slab for plane fitting
+            (see :func:`fit_plane_to_slab`).
         """
         self.cfg: PreprocessConfig = preprocess_cfg or PreprocessConfig()
+        self.flatness_warn_m = flatness_warn_m
+        self.slab_fraction = slab_fraction
 
     # ------------------------------------------------------------------
     # Target interface
@@ -73,17 +130,6 @@ class BoxTarget(Target):
         small amounts of table/wall geometry can be dragged back in during
         registration (especially near the edges of the reference cloud).
         This extra plane-removal pass mops those up before measurement.
-
-        Parameters
-        ----------
-        pcd:
-            Fused, mostly-clean object cloud.
-
-        Returns
-        -------
-        o3d.geometry.PointCloud
-            Box points only.  Falls back to the input cloud if plane removal
-            produces an empty result.
         """
         no_plane, _ = remove_dominant_plane(pcd, self.cfg)
 
@@ -94,73 +140,32 @@ class BoxTarget(Target):
 
         return extract_largest_cluster(no_plane, self.cfg)
 
-    def is_plausible_box(self, pcd: o3d.geometry.PointCloud) -> tuple[bool, str]:
-        """
-        Quick pre-check before OBB fitting to verify whether the cloud is plausibly box-shaped.
-
-        Checks:
-          1. len(pcd.points) >= 200 (minimum points required to judge 3D box shape).
-          2. Aspect ratio sanity: AABB extents sorted descending [a, b, c].
-             If a / max(c, 1e-6) > 20 -> implausible aspect ratio (sliver or plane fragment).
-          3. Point density sanity: volume = a * b * c.
-             If volume > 1e-6 and points/volume < 500 (pts/m^3) -> too sparse.
-
-        Parameters
-        ----------
-        pcd:
-            Segmented candidate box cloud.
-
-        Returns
-        -------
-        tuple[bool, str]
-            (is_plausible, reason_if_false)
-        """
-        n_pts = len(pcd.points)
-        if n_pts < 200:
-            return False, f"too few points ({n_pts}) to determine box shape (minimum 200)"
-
-        pts = np.asarray(pcd.points)
-        mins = np.min(pts, axis=0)
-        maxs = np.max(pts, axis=0)
-        extent = maxs - mins
-        extents_sorted = sorted(extent, reverse=True)
-        a, b, c = float(extents_sorted[0]), float(extents_sorted[1]), float(extents_sorted[2])
-
-        c_safe = max(c, 1e-6)
-        aspect_ratio = a / c_safe
-        if aspect_ratio > 20.0:
-            return False, f"aspect ratio {aspect_ratio:.1f}:1 is implausible for a rigid box"
-
-        volume = a * b * c
-        if volume > 1e-6:
-            density = n_pts / volume
-            if density < 500.0:
-                return False, "too sparse for a solid object; likely a small fragment stretched over a large empty region"
-
-        return True, ""
-
     def measure(
         self,
         pcd: o3d.geometry.PointCloud,
         trim_percentile: float = 0.5,
     ) -> dict:
         """
-        Fit an oriented bounding box and return trimmed axis measurements.
+        Fit an oriented bounding box, then measure each axis from its two
+        fitted faces rather than raw point extent.
 
         Parameters
         ----------
         pcd:
             Segmented box cloud, as returned by :meth:`segment`.
         trim_percentile:
-            Percentile (0–50) used for outlier-trimming when computing
-            dimensions.  Default 0.5 trims the outermost 0.5 % of points
-            on each side of each local axis.
+            Percentile used for the legacy percentile-trimmed extent, kept
+            in the output under ``"percentile_trim_extent_m"`` purely for
+            comparison/debugging — it is no longer what ``length_m`` /
+            ``width_m`` / ``height_m`` are computed from.
 
         Returns
         -------
         dict
             JSON-serialisable measurement dict with one extra key
-            ``"geometry_for_viz"`` holding the fitted OBB for the visualizer.
+            ``"geometry_for_viz"`` holding the fitted OBB for the
+            visualizer, and a ``"warnings"`` list that is non-empty when
+            one or more axes did not look like real flat box faces.
 
         Raises
         ------
@@ -173,124 +178,92 @@ class BoxTarget(Target):
                 f"(got {len(pcd.points)}, need at least 10)."
             )
 
-        # ------------------------------------------------------------------
         # Fit a minimum-volume oriented bounding box.
-        # get_minimal_oriented_bounding_box was added in Open3D ≥ 0.18;
+        # get_minimal_oriented_bounding_box was added in Open3D >= 0.18;
         # fall back to get_oriented_bounding_box for older installs.
-        # ------------------------------------------------------------------
         try:
             obb = pcd.get_minimal_oriented_bounding_box(robust=True)
         except AttributeError:
             obb = pcd.get_oriented_bounding_box(robust=True)
 
-        # ------------------------------------------------------------------
-        # CRITICAL — bias-corrected dimension estimation.
-        #
-        # Using obb.extent directly gives the min/max span of the cloud in
-        # each local axis, which is measurably biased HIGH on real sensor
-        # data.  Even a handful of noisy points sitting at the cloud's
-        # extremities can inflate every axis by several millimetres, and the
-        # bias grows with point density.  This is a systematic over-estimate,
-        # not random noise.
-        #
-        # Fix: project all points into the OBB's local frame, then use
-        # trimmed percentiles (default: 0.5 % each tail) instead of the
-        # absolute min/max.  This robustly clips outlier points that push
-        # the boundary outward without pulling in the bulk of real surface
-        # points — giving unbiased, repeatable dimension estimates.
-        # ------------------------------------------------------------------
         pts = np.asarray(pcd.points)
-        R = np.asarray(obb.R)           # 3×3 rotation matrix (OBB axes as columns)
+        R = np.asarray(obb.R)           # 3x3 rotation matrix (OBB axes as columns)
         center = np.asarray(obb.center)
-
-        # Translate to OBB centre, then rotate into the OBB's local frame.
-        local_pts = (pts - center) @ R
+        local_pts = (pts - center) @ R  # points expressed in the OBB's local frame
 
         # ------------------------------------------------------------------
-        # Planarity self-check and dimension estimation:
-        # For each of the 3 local axes:
-        #   1. Extract the outer 10% face points on near and far ends.
-        #   2. Compute SVD plane-fit RMS perpendicular distances (planarity check).
-        #   3. Compute dimension as distance between near-face and far-face mean
-        #      positions along that axis (plane-fit dimension).
-        #   4. Fallback: if either face has < 30 points, use trimmed percentiles.
+        # Legacy percentile-trimmed extent — kept for comparison only.
+        # This is measurably biased HIGH on real sensor data (a handful of
+        # noisy edge points inflate every axis by several millimetres), and
+        # gives no indication of WHETHER a face is actually flat.
         # ------------------------------------------------------------------
-        rms_values: list[float] = []
-        per_axis_dims: list[float] = []
-        dimension_methods: list[str] = []
+        lo_pct = np.percentile(local_pts, trim_percentile, axis=0)
+        hi_pct = np.percentile(local_pts, 100.0 - trim_percentile, axis=0)
+        percentile_extent = hi_pct - lo_pct
 
-        for axis in range(3):
-            vals = local_pts[:, axis]
-            min_v = float(np.min(vals))
-            max_v = float(np.max(vals))
-            span = max_v - min_v
+        # ------------------------------------------------------------------
+        # PRIMARY measurement: fit a plane to each of the six faces and
+        # measure the perpendicular distance between opposing plane pairs.
+        # This is both more accurate (a plane fit is not moved by a single
+        # outlier point the way a percentile cutoff can be) and
+        # self-validating: the RMS-from-plane residual tells you directly
+        # whether that face was actually flat, instead of silently
+        # returning a confident-looking number for a curved or
+        # misregistered surface.
+        # ------------------------------------------------------------------
+        order = np.argsort(percentile_extent)[::-1]  # longest -> shortest local axis
+        axis_names = ["length", "width", "height"]
 
-            near_mask = vals <= (min_v + 0.10 * span)
-            far_mask = vals >= (max_v - 0.10 * span)
+        face_extent_m = [0.0, 0.0, 0.0]
+        face_rms_m = [0.0, 0.0, 0.0]
+        warnings: list[str] = []
 
-            near_pts = local_pts[near_mask]
-            far_pts = local_pts[far_mask]
+        for rank, axis in enumerate(order):
+            lo = fit_plane_to_slab(local_pts, axis, "lo", self.slab_fraction)
+            hi = fit_plane_to_slab(local_pts, axis, "hi", self.slab_fraction)
+            extent = hi["coord"] - lo["coord"]
+            rms = max(
+                lo["rms_m"] if lo["rms_m"] == lo["rms_m"] else 0.0,   # nan-safe
+                hi["rms_m"] if hi["rms_m"] == hi["rms_m"] else 0.0,
+            )
+            face_extent_m[rank] = float(extent)
+            face_rms_m[rank] = float(rms)
 
-            near_rms = _fit_plane_rms_mm(near_pts)
-            far_rms = _fit_plane_rms_mm(far_pts)
+            if rms > self.flatness_warn_m:
+                warnings.append(
+                    f"{axis_names[rank]} axis: face RMS-from-flat = {rms * 1000:.1f} mm "
+                    f"(threshold {self.flatness_warn_m * 1000:.0f} mm) -- this face is not "
+                    f"flat. The object may not be a rigid box, or registration may be "
+                    f"misaligned along this axis. Treat this dimension as unreliable."
+                )
+            if lo["n_points"] < 20 or hi["n_points"] < 20:
+                warnings.append(
+                    f"{axis_names[rank]} axis: only {min(lo['n_points'], hi['n_points'])} "
+                    f"points on one face -- too few to fit reliably."
+                )
 
-            rms_values.append(round(near_rms, 2))
-            rms_values.append(round(far_rms, 2))
+        length, width, height = face_extent_m
 
-            if len(near_pts) >= 30 and len(far_pts) >= 30:
-                near_mean = float(np.mean(near_pts[:, axis]))
-                far_mean = float(np.mean(far_pts[:, axis]))
-                axis_dim = abs(far_mean - near_mean)
-                dimension_methods.append("plane_fit")
-            else:
-                lo_k = float(np.percentile(vals, trim_percentile))
-                hi_k = float(np.percentile(vals, 100.0 - trim_percentile))
-                axis_dim = float(hi_k - lo_k)
-                dimension_methods.append("percentile_fallback")
-
-            per_axis_dims.append(axis_dim)
-
-        max_rms = float(max(rms_values)) if rms_values else 0.0
-        is_valid_box = bool(max_rms <= 4.0)
-        warning_msg = (
-            f"This does not look like a rigid box (face RMS deviation {max_rms:.1f} mm > 4 mm threshold) "
-            "— measurements may be meaningless."
-            if not is_valid_box else None
-        )
-
-        planarity_check = {
-            "rms_deviation_mm": rms_values,
-            "max_rms_mm": round(max_rms, 2),
-            "is_valid_box": is_valid_box,
-            "warning": warning_msg,
-        }
-
-        # Sort longest → shortest so index 0=length, 1=width, 2=height
-        # regardless of which physical axis the OBB happened to assign each.
-        dims = np.sort(per_axis_dims)[::-1]
-        length, width, height = float(dims[0]), float(dims[1]), float(dims[2])
-
-        # Axis-aligned bounding box for reference / sanity checking.
         aabb = pcd.get_axis_aligned_bounding_box()
-        aabb_extent = [
-            round(float(v), 4) for v in np.asarray(aabb.get_extent())
-        ]
+        aabb_extent = [round(float(v), 4) for v in np.asarray(aabb.get_extent())]
 
         return {
             "target": "box",
             "num_points": len(pcd.points),
-            "dimension_method": dimension_methods,
-            "planarity_check": planarity_check,
+            "warnings": warnings,
             "oriented_bbox": {
                 "length_m": round(length, 4),
                 "width_m": round(width, 4),
                 "height_m": round(height, 4),
                 "volume_m3": round(length * width * height, 6),
+                "face_rms_m": [round(v, 5) for v in face_rms_m],
                 "center": center.tolist(),
                 "rotation": R.tolist(),
             },
+            # Legacy percentile-trim result, for comparison / debugging only.
+            "percentile_trim_extent_m": [
+                round(float(v), 4) for v in np.sort(percentile_extent)[::-1]
+            ],
             "axis_aligned_bbox_extent_m": aabb_extent,
-            # Original (untrimmed) OBB geometry — used by the visualizer to
-            # draw the fitted box on top of the point cloud.
             "geometry_for_viz": obb,
         }
