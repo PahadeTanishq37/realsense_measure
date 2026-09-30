@@ -251,25 +251,51 @@ def isolate_object(
 def reject_positional_outliers(
     frames: list[o3d.geometry.PointCloud],
     max_dev_m: float,
+    alpha: float = 0.3,
 ) -> tuple[list[int], list[tuple[int, float]]]:
     """
-    Drop frames whose object centroid is far from the median centroid.
+    Drop frames whose object centroid jumps far from the running smoothed centroid.
 
-    A size-plausibility check cannot tell a background blob from the object
-    when both are object-sized.  But if the camera is roughly fixed on the
-    object, the object's centroid should stay put from frame to frame while a
-    wrongly-picked background cluster jumps to a very different place.
+    Uses an exponential moving average (EMA) of accepted centroids:
+    `expected_centroid = (1 - alpha) * expected_centroid + alpha * this_centroid`.
+    This tolerates slow, continuous drift (e.g. a subject rotating) while catching
+    sudden jumps from background/clutter mis-segmentation.
+
+    Parameters
+    ----------
+    frames:
+        List of segmented object point clouds.
+    max_dev_m:
+        Maximum allowed distance (m) between frame centroid and expected running centroid.
+    alpha:
+        Smoothing factor for centroid EMA update (default 0.3).
 
     Returns
     -------
     keep:      indices of frames to keep
-    rejected:  list of (index, distance_from_median_m) for dropped frames
+    rejected:  list of (index, distance_from_expected_m) for dropped frames
     """
-    if len(frames) < 3:
-        return list(range(len(frames))), []
-    cents = np.array([np.asarray(f.points).mean(axis=0) for f in frames])
-    median = np.median(cents, axis=0)
-    dists = np.linalg.norm(cents - median, axis=1)
-    keep = [i for i, d in enumerate(dists) if d <= max_dev_m]
-    rejected = [(i, float(dists[i])) for i in range(len(frames)) if dists[i] > max_dev_m]
+    if not frames:
+        return [], []
+
+    keep: list[int] = []
+    rejected: list[tuple[int, float]] = []
+    running_centroid: np.ndarray | None = None
+
+    for i, f in enumerate(frames):
+        if not f.has_points():
+            rejected.append((i, float("inf")))
+            continue
+        cents = np.asarray(f.points).mean(axis=0)
+        if running_centroid is None:
+            running_centroid = cents.copy()
+            keep.append(i)
+        else:
+            dev = float(np.linalg.norm(cents - running_centroid))
+            if dev <= max_dev_m:
+                keep.append(i)
+                running_centroid = (1.0 - alpha) * running_centroid + alpha * cents
+            else:
+                rejected.append((i, dev))
+
     return keep, rejected

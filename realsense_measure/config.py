@@ -215,8 +215,12 @@ class TargetConfig:
     expected_min_size_m: float = 0.03   # smallest plausible dimension
     expected_max_size_m: float = 0.60   # largest plausible dimension (well above object, below room clutter)
     min_object_points: int = 150        # minimum points needed for a valid object capture
-    max_centroid_dev_m: float = 0.15   # reject frames whose object centroid is farther than this from the median centroid
+    max_centroid_dev_m: float = 0.15   # reject frames whose object centroid jumps farther than this from running position (0.15m for box, 0.70m for head/body)
     use_manual_roi: bool = False       # interactively select 2D pixel ROI on first frame for cropped point cloud isolation
+
+    def __post_init__(self) -> None:
+        if self.name in ("head", "body") and self.max_centroid_dev_m == 0.15:
+            self.max_centroid_dev_m = 0.70
 
 
 
