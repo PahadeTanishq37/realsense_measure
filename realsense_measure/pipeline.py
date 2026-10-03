@@ -467,17 +467,36 @@ class ScanPipeline:
         # Branch for human RGB-D frames: retain RGBDFrame representation
         if raw_frames and isinstance(raw_frames[0], RGBDFrame):
             isolated_rgbd: list[RGBDFrame] = []
+            last_iso_centroid: np.ndarray | None = None
             for i, f in enumerate(raw_frames):
                 pcd = f.pcd
                 n_before = len(pcd.points)
-                # Denoise point cloud while preserving RGB-D arrays
-                cl, _ = pcd.remove_statistical_outlier(
-                    nb_neighbors=pre_cfg.outlier_neighbors,
-                    std_ratio=pre_cfg.outlier_std_ratio,
-                )
-                f.pcd = cl
+                # Full 3-step isolation: downsample+denoise, dominant plane removal (walls/floor), and single plausible cluster selection
+                iso = isolate_object(pcd, pre_cfg, target_cfg, last_centroid=last_iso_centroid)
+                n_after = len(iso.points)
+                if n_after < target_cfg.min_object_points:
+                    print(f"  frame {i:02d}: {n_before:>7} pts -> {n_after:>6} pts -- "
+                          f"DISCARDED (< {target_cfg.min_object_points} pts, unusable object data)")
+                    continue
+                last_iso_centroid = np.asarray(iso.points).mean(axis=0)
+                f.pcd = iso
+                print(f"  frame {i:02d}: {n_before:>7} pts -> {n_after:>6} pts [ACCEPTED]")
                 isolated_rgbd.append(f)
-                print(f"  frame {i:02d}: {n_before:>7} pts -> {len(cl.points):>6} clean pts [ACCEPTED]")
+
+            # Positional consistency: drop frames whose centroid jumps away
+            keep, rejected_pos = reject_positional_outliers(
+                [f.pcd for f in isolated_rgbd], target_cfg.max_centroid_dev_m
+            )
+            for idx, dist in rejected_pos:
+                print(f"  isolated #{idx:02d}: centroid {dist:.2f} m from median position -- "
+                      f"DISCARDED (likely background, not the object)")
+            isolated_rgbd = [isolated_rgbd[i] for i in keep]
+
+            if not isolated_rgbd:
+                raise RuntimeError(
+                    "No frames survived object isolation. "
+                    "Ensure the subject is within camera depth range (0.4m - 1.2m) and centered in frame."
+                )
 
             if self.cfg.show_stage_windows:
                 show(

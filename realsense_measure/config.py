@@ -212,6 +212,27 @@ class TargetConfig:
     max_centroid_dev_m: float = 0.15   # reject frames whose object centroid is farther than this from the median centroid
     use_manual_roi: bool = False       # interactively select 2D pixel ROI on first frame for cropped point cloud isolation
 
+    def __post_init__(self) -> None:
+        """Set target-specific physical bounds and rejection tolerances if at defaults."""
+        if self.name == "head":
+            if self.expected_min_size_m == 0.03:
+                self.expected_min_size_m = 0.12
+            if self.expected_max_size_m == 0.60:
+                self.expected_max_size_m = 0.55
+            if self.min_object_points == 150:
+                self.min_object_points = 200
+            if self.max_centroid_dev_m == 0.15:
+                self.max_centroid_dev_m = 0.25
+        elif self.name == "body":
+            if self.expected_min_size_m == 0.03:
+                self.expected_min_size_m = 0.20
+            if self.expected_max_size_m == 0.60:
+                self.expected_max_size_m = 1.20
+            if self.min_object_points == 150:
+                self.min_object_points = 300
+            if self.max_centroid_dev_m == 0.15:
+                self.max_centroid_dev_m = 0.35
+
 
 
 
