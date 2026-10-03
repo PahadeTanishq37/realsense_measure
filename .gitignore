@@ -14,6 +14,8 @@ scan_output/
 test_out*/
 test_output_*/
 head_scan_manual/
+models/
+*.task
 .idea/
 .vscode/
 ScreenCapture*
