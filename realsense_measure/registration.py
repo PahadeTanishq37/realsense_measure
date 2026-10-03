@@ -347,6 +347,54 @@ def register_frame_pair(
     )
 
 
+def register_frame_pair_landmark_guided(
+    source_pcd: o3d.geometry.PointCloud,
+    source_color: np.ndarray,
+    source_depth: np.ndarray,
+    target_pcd: o3d.geometry.PointCloud,
+    target_color: np.ndarray,
+    target_depth: np.ndarray,
+    intrinsics_o3d: o3d.camera.PinholeCameraIntrinsic,
+    cfg: RegistrationConfig,
+    residual_accept_mm: float = 15.0,
+) -> tuple[np.ndarray, float, float, str]:
+    """
+    Register one frame pair using facial landmarks as the initial guess for
+    ICP, instead of FPFH+RANSAC global registration. Falls back to the
+    existing register_frame_pair() (unchanged FPFH+RANSAC+ICP) whenever
+    landmarks aren't usable for this particular pair — e.g. the back of the
+    head or an extreme profile won't have a detectable face, and that's
+    expected, not a bug.
+
+    Returns
+    -------
+    (transform, fitness, rmse, method) where method is "landmark" or
+    "fpfh_fallback", for logging/diagnostics.
+    """
+    from landmarks import detect_face_landmarks_3d
+
+    src_lm = detect_face_landmarks_3d(source_color, source_depth, intrinsics_o3d)
+    dst_lm = detect_face_landmarks_3d(target_color, target_depth, intrinsics_o3d)
+
+    if src_lm is not None and dst_lm is not None:
+        common = sorted(set(src_lm) & set(dst_lm))
+        if len(common) >= 4:
+            src_pts = np.array([src_lm[k] for k in common])
+            dst_pts = np.array([dst_lm[k] for k in common])
+            init_T, residual_mm = rigid_transform_from_correspondences(src_pts, dst_pts)
+            if residual_mm <= residual_accept_mm:
+                icp_result = _icp_refine(source_pcd, target_pcd, init_T, cfg)
+                return (
+                    icp_result.transformation,
+                    float(icp_result.fitness),
+                    float(icp_result.inlier_rmse),
+                    "landmark",
+                )
+
+    transform, fitness, rmse = register_frame_pair(source_pcd, target_pcd, cfg)
+    return transform, fitness, rmse, "fpfh_fallback"
+
+
 def register_against_candidates(
     new_frame: o3d.geometry.PointCloud,
     candidates: list[o3d.geometry.PointCloud | None],
@@ -617,7 +665,7 @@ def register_rgbd_pair(
     cfg: RegistrationConfig,
 ) -> tuple[np.ndarray, float, float, bool, str, float, float, str]:
     """
-    Register source_frame onto target_frame with RGB-D Odometry -> Colored ICP -> Quality Gate -> FPFH/RANSAC Fallback.
+    Register source_frame onto target_frame with Landmark-Guided ICP -> RGB-D Odometry -> Colored ICP -> Quality Gate -> FPFH/RANSAC Fallback.
 
     CONVENTION
     ----------
@@ -644,7 +692,51 @@ def register_rgbd_pair(
             "Insufficient points in source or target frame (< 20 points)",
         )
 
-    # 1. RGB-D Odometry initial pose estimation
+    src_pcd = copy.deepcopy(source_frame.pcd)
+    tgt_pcd = copy.deepcopy(target_frame.pcd)
+
+    # 1. Landmark-guided registration
+    if (
+        hasattr(source_frame, "color_bgr") and source_frame.color_bgr is not None
+        and hasattr(source_frame, "depth_m") and source_frame.depth_m is not None
+        and hasattr(target_frame, "color_bgr") and target_frame.color_bgr is not None
+        and hasattr(target_frame, "depth_m") and target_frame.depth_m is not None
+        and hasattr(source_frame, "intrinsics") and source_frame.intrinsics is not None
+    ):
+        try:
+            lm_T, lm_fit, lm_rmse, lm_method = register_frame_pair_landmark_guided(
+                source_pcd=src_pcd,
+                source_color=source_frame.color_bgr,
+                source_depth=source_frame.depth_m,
+                target_pcd=tgt_pcd,
+                target_color=target_frame.color_bgr,
+                target_depth=target_frame.depth_m,
+                intrinsics_o3d=source_frame.intrinsics,
+                cfg=cfg,
+            )
+            if lm_method == "landmark":
+                lm_rot = compute_rotation_deg(lm_T)
+                lm_trans = compute_translation_mm(lm_T)
+                if (
+                    lm_fit >= cfg.min_accept_fitness
+                    and lm_rmse <= cfg.max_colored_icp_rmse_m * 1.5
+                    and lm_rot <= cfg.max_rotation_deg_per_frame
+                    and lm_trans <= (cfg.max_translation_m_per_frame * 1000.0)
+                ):
+                    return (
+                        lm_T,
+                        lm_fit,
+                        lm_rmse,
+                        True,
+                        "landmark",
+                        lm_rot,
+                        lm_trans,
+                        "Landmark-guided registration PASS",
+                    )
+        except Exception:
+            pass
+
+    # 2. RGB-D Odometry initial pose estimation
     init_trans = np.eye(4)
     odo_status = "NOT RUN"
     try:
@@ -683,10 +775,7 @@ def register_rgbd_pair(
     except Exception as exc:
         odo_status = f"ERROR ({exc})"
 
-    # 2. Colored ICP Refinement
-    src_pcd = copy.deepcopy(source_frame.pcd)
-    tgt_pcd = copy.deepcopy(target_frame.pcd)
-
+    # 3. Colored ICP Refinement
     if not src_pcd.has_normals():
         src_pcd.estimate_normals(
             o3d.geometry.KDTreeSearchParamHybrid(radius=cfg.colored_icp_max_dist_m * 2.0, max_nn=30)
@@ -729,7 +818,7 @@ def register_rgbd_pair(
                 fit_colored,
                 rmse_colored,
                 True,
-                "RGBD_ODOMETRY_COLORED_ICP",
+                "rgbd_odometry_colored_icp",
                 rot_colored,
                 trans_colored,
                 f"Odometry: {odo_status} -> Colored ICP PASS",
@@ -743,7 +832,7 @@ def register_rgbd_pair(
         rot_colored = 0.0
         trans_colored = 0.0
 
-    # 3. Geometric Fallback (FPFH + RANSAC -> Point-to-Plane ICP)
+    # 4. Geometric Fallback (FPFH + RANSAC -> Point-to-Plane ICP)
     try:
         fb_T, fb_fit, fb_rmse = register_frame_pair(src_pcd, tgt_pcd, cfg)
         fb_rot = compute_rotation_deg(fb_T)
@@ -760,7 +849,7 @@ def register_rgbd_pair(
                 fb_fit,
                 fb_rmse,
                 True,
-                "FPFH_RANSAC_FALLBACK",
+                "fpfh_fallback",
                 fb_rot,
                 fb_trans,
                 f"Colored ICP failed ({colored_status}); recovered via FPFH+RANSAC",
@@ -826,8 +915,7 @@ def build_pose_graph_rgbd(
 
             # Print pair log immediately
             status_str = "ACCEPTED" if accepted else f"REJECTED ({reason})"
-            print(f"    frame {i:02d} -> {j:02d}: method={method} fitness={fit:.4f} "
-                  f"rmse={rmse * 1000.0:.2f}mm rot={rot:.1f}deg trans={trans:.1f}mm -> {status_str}")
+            print(f"    frame {i:02d}: fitness={fit:.2f} rmse={rmse * 1000.0:.1f}mm method={method} {status_str}")
 
             if accepted:
                 candidates.append((j, T, fit, rmse, rot, trans, method))
