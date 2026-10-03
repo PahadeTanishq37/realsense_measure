@@ -19,7 +19,7 @@ import copy
 import numpy as np
 import open3d as o3d
 
-from config import PreprocessConfig, RegistrationConfig
+from config import PreprocessConfig, RegistrationConfig, TargetConfig
 from preprocessing import isolate_object
 from reconstruction import fuse_point_clouds
 from registration import register_sequence
@@ -215,11 +215,12 @@ def main() -> None:
 
     # ---- preprocessing: isolate the object per frame ---------------------
     pre_cfg = PreprocessConfig()
+    target_cfg = TargetConfig()
     print(f"\n[1/4] Isolating object in {len(raw_frames)} frames ...")
     isolated_frames: list[o3d.geometry.PointCloud] = []
     for i, frame in enumerate(raw_frames):
         n_before = len(frame.points)
-        iso = isolate_object(frame, pre_cfg)
+        iso = isolate_object(frame, pre_cfg, target_cfg)
         n_after = len(iso.points)
         print(f"  frame {i}: {n_before:>6} pts  ->  {n_after:>5} pts after isolation")
         isolated_frames.append(iso)
@@ -261,7 +262,8 @@ def main() -> None:
     for lbl, gt, rc, err in zip(labels, true_dims, rec_dims, errors_mm):
         print(f"  {lbl:<8} {gt*1000:>11.1f} mm  {rc*1000:>9.1f} mm  {err:>7.2f} mm")
 
-    print(f"\n  Volume: {obb_info['volume_m3']*1e6:.1f} cm^3  "
+    vol = obb_info.get("volume_m3") or obb_info.get("estimated_volume_m3", 0.0)
+    print(f"\n  Volume: {vol*1e6:.1f} cm^3  "
           f"(true: {TRUE_L*TRUE_W*TRUE_H*1e6:.1f} cm^3)")
 
     # ---- assertion -------------------------------------------------------

@@ -161,7 +161,7 @@ class ScanPipeline:
 
     def __init__(self, cfg: PipelineConfig) -> None:
         self.cfg = cfg
-        # If targeting human head or body, default to rgbd_human registration mode unless overridden
+        # If targeting human head or body without explicit registration override, default to rgbd_human
         if cfg.target.name in ("head", "body") and cfg.registration.registration_mode == "pointcloud":
             cfg.registration.registration_mode = "rgbd_human"
 
@@ -205,7 +205,7 @@ class ScanPipeline:
         cam = RealSenseCamera(self.cfg.camera).start()
         is_human_mode = (self.cfg.registration.registration_mode == "rgbd_human")
 
-        # In human mode, use the configured human_capture_interval_s (default 0.4s) unless overridden
+        # In human mode, use the configured human_capture_interval_s (default 3.0s) unless overridden
         capture_interval = self.cfg.camera.capture_interval_s
         if is_human_mode and self.cfg.camera.human_capture_interval_s is not None:
             capture_interval = self.cfg.camera.human_capture_interval_s
@@ -484,6 +484,13 @@ class ScanPipeline:
                     color_frames_distinctly([f.pcd for f in isolated_rgbd]),
                     window_name="Stage 2: preprocessed human frames",
                 )
+
+            if self.cfg.save_intermediate:
+                for i, f in enumerate(isolated_rgbd):
+                    out = self.cfg.output_dir / f"frame_{i:02d}_isolated.ply"
+                    o3d.io.write_point_cloud(str(out), f.pcd)
+                    print(f"  Saved: {out}")
+
             return isolated_rgbd
 
         # Box / standard PointCloud path:
@@ -797,7 +804,7 @@ class ScanPipeline:
         segmented = self.target.segment(fused_pcd)
         print(f"  Segmented cloud: {len(segmented.points):>7} points")
 
-        # Fast shape-plausibility pre-check (e.g. for BoxTarget)
+        # Fast shape-plausibility pre-check (e.g. for BoxTarget or HeadTarget)
         if hasattr(self.target, "is_plausible_box"):
             is_plausible, reason = self.target.is_plausible_box(segmented)
             if not is_plausible:
@@ -811,6 +818,19 @@ class ScanPipeline:
                     "status": "not_box_shaped",
                     "reason": reason,
                 }
+        elif hasattr(self.target, "is_plausible_head"):
+            is_plausible, reason = self.target.is_plausible_head(segmented)
+            if not is_plausible:
+                print("\n" + "!" * 60)
+                print("  [!] NOT HEAD SHAPED -- MEASUREMENT REFUSED")
+                print("  " + "=" * 56)
+                print(f"  Reason: {reason}")
+                print("!" * 60)
+                return {
+                    "target": "head",
+                    "status": "not_head_shaped",
+                    "reason": reason,
+                }
 
         result = self.target.measure(segmented)
 
@@ -818,75 +838,104 @@ class ScanPipeline:
         # JSON-serialisable and must be kept separate for visualisation.
         obb = result.pop("geometry_for_viz", None)
 
-        planarity = result.get("planarity_check")
-        if planarity:
-            print("\n  " + "-" * 50)
-            print("  PLANARITY CHECK (Face RMS Deviations):")
-            rms_list = planarity.get("rms_deviation_mm", [])
-            if len(rms_list) == 6:
-                print(f"    Axis 0 faces (near/far): {rms_list[0]:.2f} mm | {rms_list[1]:.2f} mm")
-                print(f"    Axis 1 faces (near/far): {rms_list[2]:.2f} mm | {rms_list[3]:.2f} mm")
-                print(f"    Axis 2 faces (near/far): {rms_list[4]:.2f} mm | {rms_list[5]:.2f} mm")
+        if result.get("target") == "head" or "cranial_envelope_3d" in result:
+            cranial = result.get("cranial_envelope_3d", {})
+            status = result.get("status", "unverified")
+            print(f"\n  Target : HEAD (3D Geometric Cranial Envelope)")
+            print(f"  Status : {status.upper()}")
+            print(f"  Breadth: {cranial.get('breadth_mm', 0.0):>7.1f} mm  (Left-Right lateral width)")
+            print(f"  Length : {cranial.get('length_mm', 0.0):>7.1f} mm  (Anterior-Posterior depth)")
+            print(f"  Height : {cranial.get('height_mm', 0.0):>7.1f} mm  (Superior-Inferior height)")
+            vol = result.get("volume_m3") or result.get("oriented_bbox", {}).get("volume_m3")
+            est_vol = result.get("oriented_bbox", {}).get("estimated_volume_m3")
+            if vol is not None:
+                print(f"  Volume : {vol * 1e6:.1f} cm^3 (validated cranial envelope volume)")
+            elif est_vol is not None:
+                print(f"  Volume : UNVERIFIED (estimated: {est_vol * 1e6:.1f} cm^3 -- diagnostic only)")
             else:
-                print(f"    RMS deviations         : {rms_list}")
-            print(f"    Max Face RMS Deviation : {planarity.get('max_rms_mm', 0.0):.2f} mm (limit: 4.0 mm)")
+                print("  Volume : UNVERIFIED (null)")
+            diags = result.get("diagnostics", [])
+            if diags:
+                print("  Diagnostics:")
+                for d in diags:
+                    print(f"    - {d}")
+        else:
+            planarity = result.get("planarity_check")
+            if planarity:
+                print("\n  " + "-" * 50)
+                print("  PLANARITY CHECK (Face RMS Deviations):")
+                rms_list = planarity.get("rms_deviation_mm", [])
+                if len(rms_list) == 6:
+                    print(f"    Axis 0 faces (near/far): {rms_list[0]:.2f} mm | {rms_list[1]:.2f} mm")
+                    print(f"    Axis 1 faces (near/far): {rms_list[2]:.2f} mm | {rms_list[3]:.2f} mm")
+                    print(f"    Axis 2 faces (near/far): {rms_list[4]:.2f} mm | {rms_list[5]:.2f} mm")
+                else:
+                    print(f"    RMS deviations         : {rms_list}")
+                print(f"    Max Face RMS Deviation : {planarity.get('max_rms_mm', 0.0):.2f} mm (limit: 4.0 mm)")
 
-            warning = planarity.get("warning")
-            if warning:
-                print("\n  " + "!" * 58)
-                print(f"  [!] WARNING: {warning.upper()}")
-                print("  " + "!" * 58)
+                warning = planarity.get("warning")
+                if warning:
+                    print("\n  " + "!" * 58)
+                    print(f"  [!] WARNING: {warning.upper()}")
+                    print("  " + "!" * 58)
+                else:
+                    print("    Box Shape Validation   : PASS (Rigid planar box)")
+                print("  " + "-" * 50)
+
+            obb_info = result.get("oriented_bbox", {})
+            meas_dims_m = sorted(
+                [obb_info.get("length_m", 0.0), obb_info.get("width_m", 0.0), obb_info.get("height_m", 0.0)],
+                reverse=True,
+            )
+
+            # ---- ground-truth reference comparison (if provided) -----------
+            if self.cfg.reference_dims_m is not None:
+                ref_dims_m = sorted(self.cfg.reference_dims_m, reverse=True)
+                axis_names = ["length", "width", "height"]
+                ref_comparison = {}
+                for name, m_val, r_val in zip(axis_names, meas_dims_m, ref_dims_m):
+                    err_mm = abs(m_val - r_val) * 1000.0
+                    err_pct = (abs(m_val - r_val) / r_val * 100.0) if r_val > 0 else 0.0
+                    ref_comparison[name] = {
+                        "measured_m": round(m_val, 4),
+                        "reference_m": round(r_val, 4),
+                        "measured_mm": round(m_val * 1000.0, 1),
+                        "reference_mm": round(r_val * 1000.0, 1),
+                        "error_mm": round(err_mm, 2),
+                        "error_pct": round(err_pct, 2),
+                    }
+                result["reference_comparison"] = ref_comparison
+
+            ref_comp = result.get("reference_comparison", {})
+
+            print(f"\n  Target : {result.get('target', '?')}")
+
+            def _fmt_dim_line(label: str, key: str) -> str:
+                val_mm = obb_info.get(f"{key}_m", 0.0) * 1000.0
+                line = f"  {label:<6} : {val_mm:>7.1f} mm"
+                if key in ref_comp:
+                    info = ref_comp[key]
+                    ref_mm = info["reference_mm"]
+                    err_mm = info["error_mm"]
+                    err_pct = info["error_pct"]
+                    line += f"  (ref: {ref_mm:5.1f} mm | error: {err_mm:4.1f} mm, {err_pct:4.1f}%)"
+                return line
+
+            print(_fmt_dim_line("Length", "length"))
+            print(_fmt_dim_line("Width", "width"))
+            print(_fmt_dim_line("Height", "height"))
+            vol = obb_info.get("volume_m3")
+            est_vol = obb_info.get("estimated_volume_m3")
+            if vol is not None:
+                print(f"  Volume : {vol * 1e6:.1f} cm^3 (validated)")
+            elif est_vol is not None:
+                print(f"  Volume : UNVERIFIED (estimated: {est_vol * 1e6:.1f} cm^3 -- underlying dimensions unverified)")
             else:
-                print("    Box Shape Validation   : PASS (Rigid planar box)")
-            print("  " + "-" * 50)
-
-        obb_info = result.get("oriented_bbox", {})
-        meas_dims_m = sorted(
-            [obb_info.get("length_m", 0.0), obb_info.get("width_m", 0.0), obb_info.get("height_m", 0.0)],
-            reverse=True,
-        )
-
-        # ---- ground-truth reference comparison (if provided) -----------
-        if self.cfg.reference_dims_m is not None:
-            ref_dims_m = sorted(self.cfg.reference_dims_m, reverse=True)
-            axis_names = ["length", "width", "height"]
-            ref_comparison = {}
-            for name, m_val, r_val in zip(axis_names, meas_dims_m, ref_dims_m):
-                err_mm = abs(m_val - r_val) * 1000.0
-                err_pct = (abs(m_val - r_val) / r_val * 100.0) if r_val > 0 else 0.0
-                ref_comparison[name] = {
-                    "measured_m": round(m_val, 4),
-                    "reference_m": round(r_val, 4),
-                    "measured_mm": round(m_val * 1000.0, 1),
-                    "reference_mm": round(r_val * 1000.0, 1),
-                    "error_mm": round(err_mm, 2),
-                    "error_pct": round(err_pct, 2),
-                }
-            result["reference_comparison"] = ref_comparison
-
-        ref_comp = result.get("reference_comparison", {})
-
-        print(f"\n  Target : {result.get('target', '?')}")
-
-        def _fmt_dim_line(label: str, key: str) -> str:
-            val_mm = obb_info.get(f"{key}_m", 0.0) * 1000.0
-            line = f"  {label:<6} : {val_mm:>7.1f} mm"
-            if key in ref_comp:
-                info = ref_comp[key]
-                ref_mm = info["reference_mm"]
-                err_mm = info["error_mm"]
-                err_pct = info["error_pct"]
-                line += f"  (ref: {ref_mm:5.1f} mm | error: {err_mm:4.1f} mm, {err_pct:4.1f}%)"
-            return line
-
-        print(_fmt_dim_line("Length", "length"))
-        print(_fmt_dim_line("Width", "width"))
-        print(_fmt_dim_line("Height", "height"))
-        print(f"  Volume : {obb_info.get('volume_m3', 0) * 1e6:.1f} cm^3")
-        aabb_ext = result.get("axis_aligned_bbox_extent_m", [])
-        if aabb_ext:
-            ext_mm = [f"{v * 1000:.1f}" for v in aabb_ext]
-            print(f"  AABB   : {' x '.join(ext_mm)} mm (axis-aligned reference)")
+                print("  Volume : UNVERIFIED")
+            aabb_ext = result.get("axis_aligned_bbox_extent_m", [])
+            if aabb_ext:
+                ext_mm = [f"{v * 1000:.1f}" for v in aabb_ext]
+                print(f"  AABB   : {' x '.join(ext_mm)} mm (axis-aligned reference)")
 
         if self.cfg.show_stage_windows and obb is not None:
             seg_display = o3d.geometry.PointCloud(segmented)
@@ -982,19 +1031,19 @@ class ScanPipeline:
             JSON-serialisable result.  For HUMAN mode this contains reconstruction
             statistics rather than dimensional measurements.
         """
-        is_human_mode = (self.cfg.registration.registration_mode == "rgbd_human")
+        is_body_mode = (self.cfg.target.name == "body" and self.cfg.registration.registration_mode == "rgbd_human")
 
         raw_frames                  = self.capture_frames()
         isolated                    = self.isolate_frames(raw_frames)
         aligned, diagnostics, poses = self.register(isolated)
         fused                       = self.fuse(aligned, diagnostics, raw_frames=isolated, poses=poses)
 
-        if is_human_mode:
-            # Human reconstruction: print a clean summary instead of box dimensions.
+        if is_body_mode:
+            # Human full-body reconstruction: print a clean summary
             n_accepted = sum(1 for d in (diagnostics or []) if d is not None and d[2])
             n_total    = len(diagnostics) if diagnostics else 0
             print("\n" + "=" * 60)
-            print("  HUMAN RECONSTRUCTION COMPLETE")
+            print("  HUMAN BODY RECONSTRUCTION COMPLETE")
             print("  ============================")
             print(f"  Fusion mode    : {self.cfg.fusion_method.upper()}")
             print(f"  Frames total   : {n_total}")

@@ -59,6 +59,7 @@ def downsample_and_denoise(
 def remove_dominant_plane(
     pcd: o3d.geometry.PointCloud,
     cfg: PreprocessConfig,
+    target_cfg: TargetConfig | None = None,
 ) -> tuple[o3d.geometry.PointCloud, list[float]]:
     """
     Segment and remove the single largest planar surface from the cloud.
@@ -66,17 +67,23 @@ def remove_dominant_plane(
     Uses RANSAC plane fitting (Open3D ``segment_plane``).  The inliers
     (table / wall / floor) are discarded; the remainder is returned.
 
+    If target_cfg is provided and the detected plane's spatial extent is
+    within the plausible target object dimensions, the plane is preserved
+    as an object face rather than deleted.
+
     Parameters
     ----------
     pcd:
         Input point cloud, already downsampled and denoised.
     cfg:
         Preprocessing configuration.
+    target_cfg:
+        Optional target configuration specifying expected object bounds.
 
     Returns
     -------
     object_pcd:
-        Cloud with the dominant plane removed.
+        Cloud with the dominant plane removed (or preserved if part of the object).
     plane_model:
         [a, b, c, d] coefficients of the fitted plane (ax+by+cz+d=0).
         Returns [0, 0, 0, 0] when the plane fit was skipped.
@@ -90,6 +97,18 @@ def remove_dominant_plane(
         ransac_n=cfg.plane_ransac_n,
         num_iterations=cfg.plane_num_iterations,
     )
+
+    if not inliers:
+        return pcd, list(plane_model)
+
+    if target_cfg is not None and target_cfg.expected_max_size_m > 0:
+        inlier_pcd = pcd.select_by_index(inliers)
+        extent = inlier_pcd.get_axis_aligned_bounding_box().get_extent()
+        max_dim = float(np.max(extent))
+        # If the detected plane fits inside the expected target bounds, it is
+        # a face of the target object — preserve it to prevent corrupting object geometry.
+        if max_dim <= target_cfg.expected_max_size_m:
+            return pcd, [0.0, 0.0, 0.0, 0.0]
 
     object_pcd = pcd.select_by_index(inliers, invert=True)
     return object_pcd, list(plane_model)
@@ -148,6 +167,7 @@ def extract_plausible_cluster(
     pcd: o3d.geometry.PointCloud,
     cfg: PreprocessConfig,
     target_cfg: TargetConfig | None = None,
+    last_centroid: np.ndarray | None = None,
 ) -> o3d.geometry.PointCloud:
     """
     Among DBSCAN clusters, picks the one that's both reasonably large
@@ -155,6 +175,9 @@ def extract_plausible_cluster(
     whichever cluster has the most points. This prevents large
     background/clutter blobs (which often have MORE points than the
     actual object in a cluttered room) from being mistaken for it.
+
+    If last_centroid is provided, prefers the size-plausible cluster whose
+    centroid is closest to last_centroid.
     """
     if not pcd.has_points():
         return pcd
@@ -172,7 +195,7 @@ def extract_plausible_cluster(
     min_size = target_cfg.expected_min_size_m if target_cfg else 0.0
     max_size = target_cfg.expected_max_size_m if target_cfg else float("inf")
 
-    best_idx, best_score = None, -1.0
+    candidates: list[tuple[np.ndarray, o3d.geometry.PointCloud]] = []
     for label in np.unique(labels[labels >= 0]):
         idx = np.where(labels == label)[0]
         cluster = pcd.select_by_index(idx)
@@ -182,14 +205,26 @@ def extract_plausible_cluster(
         # instead of ever letting it win purely on point count
         if largest_dim < min_size or largest_dim > max_size:
             continue
-        score = len(idx)  # Among PLAUSIBLE clusters, prefer the biggest
-        if score > best_score:
-            best_score, best_idx = score, idx
+        candidates.append((idx, cluster))
 
-    if best_idx is None:
+    if not candidates:
         # Nothing plausible found — return empty rather than silently
         # picking an implausible cluster; the caller will flag this
         return o3d.geometry.PointCloud()
+
+    if last_centroid is not None:
+        # Prefer the plausible cluster closest to last_centroid
+        best_idx, _ = min(
+            candidates,
+            key=lambda c: (
+                np.linalg.norm(np.asarray(c[1].points).mean(axis=0) - last_centroid),
+                -len(c[0]),
+            ),
+        )
+        return pcd.select_by_index(best_idx)
+
+    # If last_centroid is None, prefer the largest plausible cluster
+    best_idx, _ = max(candidates, key=lambda c: len(c[0]))
     return pcd.select_by_index(best_idx)
 
 
@@ -197,6 +232,7 @@ def isolate_object(
     pcd: o3d.geometry.PointCloud,
     cfg: PreprocessConfig,
     target_cfg: TargetConfig | None = None,
+    last_centroid: np.ndarray | None = None,
 ) -> o3d.geometry.PointCloud:
     """
     Full per-frame preprocessing pipeline.
@@ -214,6 +250,8 @@ def isolate_object(
         Preprocessing configuration.
     target_cfg:
         Optional Target configuration specifying plausible size & point limits.
+    last_centroid:
+        Optional (3,) centroid from previous frame(s) to track the object position.
 
     Returns
     -------
@@ -221,12 +259,19 @@ def isolate_object(
         Clean, isolated object cloud ready for registration.
     """
     pcd = downsample_and_denoise(pcd, cfg)
-    no_plane, _ = remove_dominant_plane(pcd, cfg)
     if target_cfg is not None:
-        obj = extract_plausible_cluster(no_plane, cfg, target_cfg)
+        # First attempt: Try direct plausible clustering to preserve all object faces intact
+        obj = extract_plausible_cluster(pcd, cfg, target_cfg, last_centroid=last_centroid)
+        if obj.has_points():
+            return obj
+        # Fallback if connected to a large supporting surface: strip dominant plane and retry
+        no_plane, _ = remove_dominant_plane(pcd, cfg, target_cfg=target_cfg)
+        obj = extract_plausible_cluster(no_plane, cfg, target_cfg, last_centroid=last_centroid)
+        return obj
     else:
+        no_plane, _ = remove_dominant_plane(pcd, cfg)
         obj = extract_largest_cluster(no_plane, cfg)
-    return obj
+        return obj
 
 
 def reject_positional_outliers(

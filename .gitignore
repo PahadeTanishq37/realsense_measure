@@ -11,6 +11,9 @@ build/
 venv/
 *.log
 scan_output/
+test_out*/
+test_output_*/
+head_scan_manual/
 .idea/
 .vscode/
 ScreenCapture*

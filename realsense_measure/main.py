@@ -100,7 +100,7 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         metavar="SEC",
-        help="override automatic capture interval in seconds (default: 3.5s for box, 0.4s for human)",
+        help="override automatic capture interval in seconds (default: 3.0s)",
     )
     parser.add_argument(
         "--manual-capture",

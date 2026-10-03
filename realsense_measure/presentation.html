@@ -1,0 +1,616 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Project Progress Review: 3D Point Cloud Scanning Pipeline</title>
+  <style>
+    :root {
+      --bg-dark: #090d16;
+      --card-bg: rgba(19, 26, 43, 0.85);
+      --card-border: rgba(56, 189, 248, 0.22);
+      --accent-blue: #38bdf8;
+      --accent-purple: #c084fc;
+      --accent-green: #4ade80;
+      --accent-orange: #fb923c;
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    }
+
+    body {
+      background-color: var(--bg-dark);
+      color: var(--text-main);
+      overflow: hidden;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 14px 36px;
+      background: rgba(9, 13, 22, 0.95);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      z-index: 100;
+    }
+
+    .logo-badge {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 1.05rem;
+      font-weight: 700;
+      color: var(--accent-blue);
+    }
+
+    .nav-controls {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .btn-nav {
+      background: rgba(56, 189, 248, 0.12);
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      color: #38bdf8;
+      padding: 7px 16px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 0.9rem;
+      transition: all 0.2s ease;
+    }
+
+    .btn-nav:hover {
+      background: rgba(56, 189, 248, 0.25);
+    }
+
+    .slide-counter {
+      color: var(--text-muted);
+      font-size: 0.88rem;
+      min-width: 80px;
+      text-align: center;
+    }
+
+    main {
+      flex: 1;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .slide {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      padding: 36px 60px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      opacity: 0;
+      transform: scale(0.97) translateX(30px);
+      pointer-events: none;
+      transition: all 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .slide.active {
+      opacity: 1;
+      transform: scale(1) translateX(0);
+      pointer-events: auto;
+    }
+
+    .slide-tag {
+      display: inline-block;
+      align-self: flex-start;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 1.5px;
+      font-weight: 700;
+      color: var(--accent-blue);
+      background: rgba(56, 189, 248, 0.1);
+      padding: 3px 10px;
+      border-radius: 14px;
+      border: 1px solid rgba(56, 189, 248, 0.25);
+      margin-bottom: 10px;
+    }
+
+    h1 {
+      font-size: 2.5rem;
+      font-weight: 800;
+      line-height: 1.2;
+      margin-bottom: 14px;
+      color: #ffffff;
+    }
+
+    h2 {
+      font-size: 2rem;
+      font-weight: 700;
+      margin-bottom: 14px;
+      color: #ffffff;
+    }
+
+    p.subtitle {
+      font-size: 1.12rem;
+      color: var(--text-muted);
+      max-width: 850px;
+      line-height: 1.55;
+      margin-bottom: 24px;
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 20px;
+      width: 100%;
+    }
+
+    .grid-3 {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 18px;
+      width: 100%;
+    }
+
+    .grid-4 {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 14px;
+      width: 100%;
+    }
+
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 20px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+    }
+
+    .card-title {
+      font-size: 1.1rem;
+      font-weight: 700;
+      color: #f1f5f9;
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .card-body {
+      font-size: 0.88rem;
+      color: var(--text-muted);
+      line-height: 1.5;
+    }
+
+    .tech-list {
+      margin-top: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .tech-item {
+      font-size: 0.82rem;
+      color: #cbd5e1;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .tech-item strong {
+      color: var(--accent-blue);
+    }
+
+    /* Flowchart */
+    .flowchart {
+      display: flex;
+      gap: 10px;
+      width: 100%;
+      margin: 14px 0 20px 0;
+    }
+
+    .flow-box {
+      flex: 1;
+      background: rgba(30, 41, 59, 0.7);
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      border-radius: 10px;
+      padding: 14px 12px;
+      position: relative;
+    }
+
+    .flow-box::after {
+      content: '➔';
+      position: absolute;
+      right: -12px;
+      top: 50%;
+      transform: translateY(-50%);
+      color: var(--accent-blue);
+      font-size: 1rem;
+      z-index: 10;
+    }
+
+    .flow-box:last-child::after {
+      display: none;
+    }
+
+    .flow-header {
+      font-size: 0.72rem;
+      font-weight: 800;
+      color: var(--accent-blue);
+      text-transform: uppercase;
+      margin-bottom: 4px;
+    }
+
+    .flow-title {
+      font-size: 0.95rem;
+      font-weight: 700;
+      color: #fff;
+      margin-bottom: 6px;
+    }
+
+    .flow-desc {
+      font-size: 0.78rem;
+      color: var(--text-muted);
+      line-height: 1.4;
+    }
+
+    ul.clean-list {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    ul.clean-list li {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      font-size: 0.92rem;
+      color: #e2e8f0;
+      line-height: 1.5;
+    }
+
+    ul.clean-list li span.dot {
+      color: var(--accent-blue);
+      font-weight: bold;
+    }
+
+    .highlight-box {
+      background: rgba(56, 189, 248, 0.08);
+      border-left: 3px solid var(--accent-blue);
+      padding: 12px 16px;
+      border-radius: 0 8px 8px 0;
+      margin-top: 14px;
+      font-size: 0.88rem;
+      color: #cbd5e1;
+    }
+
+    footer {
+      padding: 10px 36px;
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      border-top: 1px solid rgba(255, 255, 255, 0.06);
+      display: flex;
+      justify-content: space-between;
+    }
+  </style>
+</head>
+
+<body>
+
+  <header>
+    <div class="logo-badge">
+      <span>✦</span> Project Progress Review: 3D Point Cloud Reconstruction
+    </div>
+    <div class="nav-controls">
+      <button class="btn-nav" id="prevBtn" onclick="prevSlide()">◀ Prev</button>
+      <span class="slide-counter" id="slideCounter">Slide 1 / 5</span>
+      <button class="btn-nav" id="nextBtn" onclick="nextSlide()">Next ▶</button>
+    </div>
+  </header>
+
+  <main>
+
+    <!-- Slide 1: What Work Has Been Done -->
+    <div class="slide active" id="slide-1">
+      <span class="slide-tag">Slide 1 • Overview</span>
+      <h1>Multi-View 3D Point Cloud Scanning System</h1>
+      <p class="subtitle">
+        We have designed and implemented an end-to-end multi-view 3D scanning system using the Intel RealSense D455
+        depth camera that captures, filters, registers, and fuses multiple angle point clouds into a single coherent 3D
+        model.
+      </p>
+
+      <div class="grid-3">
+        <div class="card">
+          <div class="card-title">1. Real-Time Acquisition</div>
+          <div class="card-body">
+            Implemented hardware-filtered RGB-D acquisition with spatial, temporal, and decimation filtering to suppress
+            depth sensor noise.
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">2. Spatial Isolation</div>
+          <div class="card-body">
+            Built an automatic segmentation module that removes table/floor background planes via RANSAC and isolates
+            target clusters using DBSCAN.
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">3. Multi-View Alignment</div>
+          <div class="card-body">
+            Engineered dual-path registration (FPFH+ICP and RGB-D Odometry+Colored ICP) optimized with
+            Levenberg-Marquardt Pose Graphs.
+          </div>
+        </div>
+      </div>
+
+      <div class="highlight-box">
+        <strong>Current Milestone:</strong> Full multi-view 3D point cloud reconstruction is fully working and verified.
+        Consecutive viewpoints align accurately without drift, producing clean, watertight 3D point clouds.
+      </div>
+    </div>
+
+    <!-- Slide 2: Tech Stack by Stage -->
+    <div class="slide" id="slide-2">
+      <span class="slide-tag">Slide 2 • Implementation</span>
+      <h2>Technical Stack & Algorithms by Stage</h2>
+      <p class="subtitle">
+        Every stage of our pipeline is backed by specific computational geometry algorithms and libraries:
+      </p>
+
+      <div class="grid-4">
+        <div class="card">
+          <div class="card-title">Stage 1: Capture</div>
+          <div class="card-body">
+            <div class="tech-list">
+              <div class="tech-item"><strong>Hardware:</strong> Intel RealSense D455</div>
+              <div class="tech-item"><strong>Library:</strong> pyrealsense2, OpenCV</div>
+              <div class="tech-item"><strong>Filters:</strong> Decimation, Spatial Smooth, Temporal Averaging, Hole
+                Filling</div>
+              <div class="tech-item"><strong>Stream:</strong> 848x480 @ 30fps aligned</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">Stage 2: Isolation</div>
+          <div class="tech-list">
+            <div class="tech-item"><strong>Framework:</strong> Open3D, NumPy</div>
+            <div class="tech-item"><strong>Plane Removal:</strong> RANSAC Plane Fit</div>
+            <div class="tech-item"><strong>Clustering:</strong> DBSCAN (eps=20mm)</div>
+            <div class="tech-item"><strong>Denoising:</strong> Statistical Outliers (SOR)</div>
+            <div class="tech-item"><strong>Tracking:</strong> Centroid distance gate</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">Stage 3: Registration</div>
+          <div class="tech-list">
+            <div class="tech-item"><strong>Features:</strong> 33D FPFH Descriptors</div>
+            <div class="tech-item"><strong>Global:</strong> RANSAC Feature Match</div>
+            <div class="tech-item"><strong>Local ICP:</strong> Point-to-Plane & Colored</div>
+            <div class="tech-item"><strong>Tracking:</strong> RGB-D Hybrid Odometry</div>
+            <div class="tech-item"><strong>Optimization:</strong> Pose Graph (LM)</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">Stage 4: Reconstruction</div>
+          <div class="tech-list">
+            <div class="tech-item"><strong>Fusion:</strong> Uniform TSDF Volume</div>
+            <div class="tech-item"><strong>Grid:</strong> 3mm - 4mm Voxel Grid</div>
+            <div class="tech-item"><strong>Integration:</strong> Raycasting & SDF</div>
+            <div class="tech-item"><strong>Export:</strong> Standard .PLY format</div>
+            <div class="tech-item"><strong>Viz:</strong> Open3D Multi-Camera GUI</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Slide 3: Flowchart -->
+    <div class="slide" id="slide-3">
+      <span class="slide-tag">Slide 3 • Architecture Flowchart</span>
+      <h2>System Execution Flow (Stage 1 ➔ Stage 5)</h2>
+      <p class="subtitle">
+        How data flows from initial stereo camera sensor input to the final reconstructed 3D point cloud:
+      </p>
+
+      <div class="flowchart">
+        <div class="flow-box">
+          <div class="flow-header">Stage 1</div>
+          <div class="flow-title">RGB-D Capture</div>
+          <div class="flow-desc">Acquires aligned color and depth frames; applies hardware denoising.</div>
+        </div>
+        <div class="flow-box">
+          <div class="flow-header">Stage 2</div>
+          <div class="flow-title">Plane Strip & Cluster</div>
+          <div class="flow-desc">RANSAC strips table/floor; DBSCAN extracts target point cloud.</div>
+        </div>
+        <div class="flow-box">
+          <div class="flow-header">Stage 3</div>
+          <div class="flow-title">Multi-View Register</div>
+          <div class="flow-desc">Pairwise ICP & Odometry align views into a shared pose graph.</div>
+        </div>
+        <div class="flow-box">
+          <div class="flow-header">Stage 4</div>
+          <div class="flow-title">TSDF Volumetric Fusion</div>
+          <div class="flow-desc">Integrates depth rays into uniform voxel grid to eliminate overlap noise.</div>
+        </div>
+        <div class="flow-box">
+          <div class="flow-header">Stage 5</div>
+          <div class="flow-title">3D Point Cloud Export</div>
+          <div class="flow-desc">Outputs full unified .PLY point cloud with RGB vertex color.</div>
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-title">Robustness Gating Implemented</div>
+          <div class="card-body">
+            <ul class="clean-list">
+              <li><span class="dot">▹</span> <strong>Motion Quality Gate:</strong> Rejects frame pairs with unnatural
+                rotation jumps (>25°) or translation jumps (>150mm).</li>
+              <li><span class="dot">▹</span> <strong>Loop Closure Checks:</strong> Automatically links distant
+                overlapping frames to eliminate drift over full orbits.</li>
+            </ul>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-title">Key Algorithmic Verification</div>
+          <div class="card-body">
+            <ul class="clean-list">
+              <li><span class="dot">▹</span> Verified with synthetic known-motion test suite (RMSE &lt; 1.5mm, rotation
+                error &lt; 0.5°).</li>
+              <li><span class="dot">▹</span> Trajectory tracking verified across multi-frame continuous sweeps without
+                drift.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Slide 4: Output Showcase & Results -->
+    <div class="slide" id="slide-4">
+      <span class="slide-tag">Slide 4 • Results Showcase</span>
+      <h2>3D Point Cloud Reconstruction Showcase</h2>
+      <p class="subtitle">
+        Demonstrated output results across diverse capture scenarios:
+      </p>
+
+      <div class="grid-3">
+        <div class="card">
+          <div class="card-title">1. Multi-View Human Scanning</div>
+          <div class="card-body">
+            Successfully captures full head, facial relief, and shoulder contours using RGB-D odometry and colored ICP
+            without surface tearing or fragmentation.
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">2. Rigid Object 3D Scanning</div>
+          <div class="card-body">
+            Recovers 3D geometric surfaces from manual repositioning or orbital camera motion, combining FPFH global
+            features with Point-to-Plane ICP refinement.
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">3. Diagnostic & Trajectory Tools</div>
+          <div class="card-body">
+            Visualizes 3D camera frustums along the trajectory and provides pairwise alignment inspection with real-time
+            inlier fitness feedback.
+          </div>
+        </div>
+      </div>
+
+      <div class="highlight-box">
+        <strong>Exported Deliverables:</strong> Clean, high-density `.PLY` 3D point cloud models with calibrated RGB
+        color, compatible with CloudCompare, MeshLab, and Blender.
+      </div>
+    </div>
+
+    <!-- Slide 5: Summary & Next Steps -->
+    <div class="slide" id="slide-5">
+      <span class="slide-tag">Slide 5 • Conclusion</span>
+      <h2>Summary of Completed Work & Next Steps</h2>
+      <p class="subtitle">
+        Core 3D spatial scanning and point cloud reconstruction are completed.
+      </p>
+
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-title">Completed & Verified Capabilities</div>
+          <div class="card-body">
+            <ul class="clean-list">
+              <li><span class="dot">✓</span> Active RealSense depth camera hardware pipeline with real-time HUD.</li>
+              <li><span class="dot">✓</span> Automated RANSAC plane removal + DBSCAN object cluster isolation.</li>
+              <li><span class="dot">✓</span> Gated Pose Graph registration with FPFH, Colored ICP, and loop closures.
+              </li>
+              <li><span class="dot">✓</span> Watertight volumetric TSDF point cloud fusion.</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">Ongoing / Next Phase</div>
+          <div class="card-body">
+            <ul class="clean-list">
+              <li><span class="dot">▹</span> <strong>Meshing:</strong> Generating polygon meshes from TSDF volumes via
+                Marching Cubes.</li>
+              <li><span class="dot">▹</span> <strong>Live Streaming TSDF:</strong> Upgrading to real-time GPU voxel
+                updates during capture.</li>
+              <li><span class="dot">▹</span> <strong>CAD Metrology:</strong> Refinement of automated dimensional
+                bounding box extraction.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </main>
+
+  <footer>
+    <span>Use <strong>Arrow Keys (◀ / ▶)</strong> to switch slides</span>
+    <span>3D Scanning & Multi-View Point Cloud Reconstruction</span>
+  </footer>
+
+  <script>
+    let currentSlide = 0;
+    const slides = document.querySelectorAll('.slide');
+    const totalSlides = slides.length;
+    const slideCounter = document.getElementById('slideCounter');
+    const prevBtn = document.getElementById('prevBtn');
+    const nextBtn = document.getElementById('nextBtn');
+
+    function updateSlides() {
+      slides.forEach((slide, idx) => {
+        slide.classList.toggle('active', idx === currentSlide);
+      });
+      slideCounter.textContent = `Slide ${currentSlide + 1} / ${totalSlides}`;
+      prevBtn.disabled = currentSlide === 0;
+      nextBtn.disabled = currentSlide === totalSlides - 1;
+      prevBtn.style.opacity = currentSlide === 0 ? '0.4' : '1';
+      nextBtn.style.opacity = currentSlide === totalSlides - 1 ? '0.4' : '1';
+    }
+
+    function nextSlide() {
+      if (currentSlide < totalSlides - 1) {
+        currentSlide++;
+        updateSlides();
+      }
+    }
+
+    function prevSlide() {
+      if (currentSlide > 0) {
+        currentSlide--;
+        updateSlides();
+      }
+    }
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowRight' || e.key === ' ' || e.key === 'PageDown') {
+        nextSlide();
+      } else if (e.key === 'ArrowLeft' || e.key === 'PageUp') {
+        prevSlide();
+      }
+    });
+
+    updateSlides();
+  </script>
+</body>
+
+</html>
