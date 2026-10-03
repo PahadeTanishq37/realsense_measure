@@ -203,7 +203,7 @@ class ScanPipeline:
             depth, point clouds with normals, timestamps, and intrinsics.
         """
         cam = RealSenseCamera(self.cfg.camera).start()
-        is_human_mode = (self.cfg.registration.registration_mode == "rgbd_human")
+        is_human_mode = (self.cfg.registration.registration_mode == "rgbd_human") or (self.cfg.target.name in ("head", "body"))
 
         # In human mode, use the configured human_capture_interval_s (default 3.0s) unless overridden
         capture_interval = self.cfg.camera.capture_interval_s
@@ -557,7 +557,7 @@ class ScanPipeline:
             List of 4x4 camera poses (or None in sequential pointcloud mode).
         """
         print("\n" + "=" * 60)
-        is_human_mode = (self.cfg.registration.registration_mode == "rgbd_human")
+        is_human_mode = (self.cfg.registration.registration_mode == "rgbd_human") or (self.cfg.target.name in ("head", "body"))
 
         if is_human_mode:
             print("  Stage 3: Registering human frames (RGB-D Odometry + Colored ICP + Pose Graph) ...")
