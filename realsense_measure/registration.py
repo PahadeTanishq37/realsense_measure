@@ -72,9 +72,53 @@ from camera.frame import RGBDFrame
 from config import RegistrationConfig
 
 
+def rigid_transform_from_correspondences(
+    src_pts: np.ndarray,
+    dst_pts: np.ndarray,
+) -> tuple[np.ndarray, float]:
+    """
+    Kabsch algorithm: finds the rigid transform (R, t) that best maps
+    src_pts onto dst_pts in a least-squares sense.
+
+    Needs at least 3 non-collinear corresponding points to be well-defined;
+    works best with 4 or more (see LANDMARK_INDICES in landmarks.py, which
+    provides up to 8).
+
+    Returns
+    -------
+    T:
+        4x4 homogeneous transform mapping src_pts onto dst_pts.
+    residual_mm:
+        Mean per-point distance (in mm) between dst_pts and src_pts after
+        applying T. Use this as a quality gate — a high residual means the
+        landmark correspondences themselves were unreliable (e.g. a bad
+        detection on one of the two frames), and the caller should fall
+        back to a different registration method rather than trust this
+        transform.
+    """
+    src_c = src_pts.mean(axis=0)
+    dst_c = dst_pts.mean(axis=0)
+    H = (src_pts - src_c).T @ (dst_pts - dst_c)
+    U, S, Vt = np.linalg.svd(H)
+    R = Vt.T @ U.T
+    if np.linalg.det(R) < 0:
+        Vt[-1, :] *= -1
+        R = Vt.T @ U.T
+    t = dst_c - R @ src_c
+
+    T = np.eye(4)
+    T[:3, :3] = R
+    T[:3, 3] = t
+
+    recovered = (R @ src_pts.T).T + t
+    residual_mm = float(np.linalg.norm(recovered - dst_pts, axis=1).mean() * 1000)
+    return T, residual_mm
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
 
 def _prepare(
     pcd: o3d.geometry.PointCloud,
