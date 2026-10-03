@@ -902,11 +902,19 @@ def build_pose_graph_rgbd(
     n_loop = 0
 
     for i in range(1, n):
-        # Bounded search across previously accepted frames
+        # Multi-candidate strategy: check preceding accepted frames in the search window
+        # AND frame 0 (the anchor reference) to pick whichever gives higher inlier fitness.
         window = accepted_idx[-(cfg.search_accepted_window + 1):]
+        target_indices = []
+        for idx in reversed(window):
+            if idx not in target_indices:
+                target_indices.append(idx)
+        if 0 not in target_indices:
+            target_indices.append(0)
+
         candidates = []
 
-        for j in reversed(window):
+        for j in target_indices:
             res = register_rgbd_pair(frames[i], frames[j], cfg)
             T, fit, rmse, accepted, method, rot, trans, reason = res
 

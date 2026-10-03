@@ -599,19 +599,19 @@ class ScanPipeline:
                     print(f"  frame {i:02d}: fitness={fit:.2f} rmse={rmse * 1000.0:.1f}mm method={method} [{status}]")
             print("=" * 60)
 
+            n_accepted = summary_stats.get("accepted", sum(1 for d in diagnostics if d is not None and d[2]))
+            n_total = summary_stats.get("captured", len(isolated_frames))
+            n_rejected = n_total - n_accepted
+            print(f"\n  Registration summary: {n_accepted} of {n_total} frames accepted into the reconstruction"
+                  f" ({n_rejected} rejected -- excluded from fusion).")
+            if n_total > 0 and (n_accepted / n_total) < 0.60:
+                print("  Tip: low acceptance ratio (< 60%). Try moving the camera more slowly for higher frame overlap.")
+
             # Pairwise inspection visualization
             if self.cfg.registration.show_registration_pairs and self.cfg.show_stage_windows:
                 print("\n  Displaying pairwise registration inspection windows...")
                 for idx in range(min(2, len(isolated_frames) - 1)):
                     if isinstance(isolated_frames[idx], RGBDFrame) and isinstance(isolated_frames[idx + 1], RGBDFrame):
-                        # T maps source (idx) INTO target (idx+1):
-                        #   pose_idx   = world_T_cam_idx
-                        #   pose_idx+1 = world_T_cam_(idx+1)
-                        #   T_src_to_tgt = inv(world_T_cam_(idx+1)) @ world_T_cam_idx
-                        # BUT visualize_registration_pair moves the SOURCE cloud,
-                        # so we need the transform that maps source PCD into target PCD space.
-                        # Both PCDs are already in camera coords, so the relative pose is:
-                        #   T = inv(pose_{idx+1}) @ pose_idx
                         T_src_to_tgt = np.linalg.inv(poses[idx + 1]) @ poses[idx]
                         visualize_registration_pair(
                             isolated_frames[idx].pcd,
@@ -629,6 +629,10 @@ class ScanPipeline:
                     show(traj_geoms + acc_clouds, window_name="Estimated Camera Trajectory")
 
             if self.cfg.show_stage_windows:
+                rejected_indices = [i for i, d in enumerate(diagnostics) if d is not None and not d[2]]
+                if rejected_indices:
+                    print(f"\n  [!] Note: Stage 3 visualization displays all frames including rejected frame(s) {rejected_indices}.")
+                    print("      Rejected frames are excluded from Stage 4 fusion.")
                 show(
                     color_frames_distinctly(aligned),
                     window_name="Stage 3: registered/aligned human clouds",
