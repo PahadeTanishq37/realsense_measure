@@ -61,14 +61,21 @@ def fuse_point_clouds(
     for frame in aligned_frames[1:]:
         fused += frame
 
-    # Downsample the dense fused cloud and kill any sensor noise that
-    # survived because it happened to appear in multiple frames.
-    fused = downsample_and_denoise(fused, cfg)
+    # 1. Statistical outlier removal to kill genuine noise/speckle from across frames
+    if fused.has_points():
+        fused, _ = fused.remove_statistical_outlier(
+            nb_neighbors=cfg.outlier_neighbors,
+            std_ratio=cfg.outlier_std_ratio,
+        )
 
-    # Final cluster pass: drop any small stray blobs from imperfect per-frame
+    # 2. Light voxel downsample to merge near-duplicate points from overlapping angles
+    if cfg.voxel_size_m > 0 and fused.has_points():
+        fused = fused.voxel_down_sample(voxel_size=cfg.voxel_size_m)
+
+    # 3. Final cluster pass: drop any small stray blobs from imperfect per-frame
     # isolation that only became visible once all views were merged together.
     # Skip this for human scans — ears, eyebrows, etc. would be discarded.
-    if not skip_final_clustering:
+    if not skip_final_clustering and fused.has_points():
         fused = extract_largest_cluster(fused, cfg)
 
     return fused

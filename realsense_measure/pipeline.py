@@ -767,17 +767,20 @@ class ScanPipeline:
             print("  Reconstruction mode: TSDF Volumetric Integration")
             acc_raw = [raw_frames[i] for i in accepted_indices]
             acc_poses = [poses[i] for i in accepted_indices]
+            is_human_mode = (self.cfg.registration.registration_mode == "rgbd_human") or (self.cfg.target.name in ("head", "body"))
             fused = fuse_tsdf_volume(
                 acc_raw,
                 acc_poses,
                 self.cfg.preprocess,
                 voxel_length=self.cfg.tsdf_voxel_length_m,
                 sdf_trunc=self.cfg.tsdf_trunc_m,
+                skip_final_clustering=is_human_mode,
             )
             fusion_name = "TSDF"
         else:
             print("  Reconstruction mode: Point Cloud Concatenation")
-            fused = fuse_point_clouds(accepted_frames, self.cfg.preprocess)
+            is_human_mode = (self.cfg.registration.registration_mode == "rgbd_human") or (self.cfg.target.name in ("head", "body"))
+            fused = fuse_point_clouds(accepted_frames, self.cfg.preprocess, skip_final_clustering=is_human_mode)
             fusion_name = "POINT CLOUD"
 
         print(f"  Reconstruction:\n    method: {fusion_name}\n    points: {len(fused.points):,}")
