@@ -585,29 +585,18 @@ class ScanPipeline:
                 isolated_frames, self.cfg.registration
             )
 
-            # Output the required Section 21 diagnostic report
+            frame_methods = summary_stats.get("frame_methods", {})
             print("\n" + "=" * 60)
-            print("HUMAN RGB-D REGISTRATION")
-            print("------------------------")
-            print(f"Frames captured: {summary_stats.get('captured', len(isolated_frames))}")
-            print(f"Frames accepted: {summary_stats.get('accepted', 0)}")
-            print(f"Frames rejected: {summary_stats.get('rejected', 0)}")
-            print("")
-            print(f"Average pairwise RMSE: {summary_stats.get('avg_rmse_mm', 0.0):.2f} mm")
-            print(f"Median pairwise RMSE:  {summary_stats.get('median_rmse_mm', 0.0):.2f} mm")
-            print(f"Maximum translation jump: {summary_stats.get('max_trans_jump_mm', 0.0):.1f} mm")
-            print(f"Maximum rotation jump:    {summary_stats.get('max_rot_jump_deg', 0.0):.1f} deg")
-            print("")
-            print("Pose graph:")
-            print(f"    nodes: {summary_stats.get('n_nodes', 0)}")
-            print(f"    edges: {summary_stats.get('n_edges', 0)}")
-            print(f"    loop closures: {summary_stats.get('n_loop', 0)}")
-            print("")
-            first_rej = summary_stats.get("first_rejected_frame")
-            if first_rej is not None:
-                print(f"First rejected or suspicious frame: Frame {first_rej:02d}")
-            else:
-                print("First rejected or suspicious frame: None (all accepted)")
+            print("HUMAN RGB-D REGISTRATION SUMMARY (Method Diagnostics)")
+            print("-----------------------------------------------------")
+            for i, diag in enumerate(diagnostics):
+                if i == 0:
+                    print(f"  frame 00: reference frame (origin) [ACCEPTED]")
+                elif diag is not None:
+                    fit, rmse, acc = diag
+                    method = frame_methods.get(i, "unknown")
+                    status = "ACCEPTED" if acc else "REJECTED"
+                    print(f"  frame {i:02d}: fitness={fit:.2f} rmse={rmse * 1000.0:.1f}mm method={method} [{status}]")
             print("=" * 60)
 
             # Pairwise inspection visualization

@@ -390,6 +390,14 @@ def register_frame_pair_landmark_guided(
                     float(icp_result.inlier_rmse),
                     "landmark",
                 )
+            else:
+                print(f"      [landmarks] Kabsch residual too high: {residual_mm:.1f}mm > {residual_accept_mm:.1f}mm")
+        else:
+            print(f"      [landmarks] Insufficient common landmarks: {len(common)} < 4 (src={len(src_lm)}, dst={len(dst_lm)})")
+    else:
+        src_n = len(src_lm) if src_lm is not None else 0
+        dst_n = len(dst_lm) if dst_lm is not None else 0
+        print(f"      [landmarks] Face not detected on both frames (src={src_n}, dst={dst_n})")
 
     transform, fitness, rmse = register_frame_pair(source_pcd, target_pcd, cfg)
     return transform, fitness, rmse, "fpfh_fallback"
@@ -889,6 +897,7 @@ def build_pose_graph_rgbd(
     accepted_idx: list[int] = [0]
     diagnostics: list[tuple[float, float, bool] | None] = [(1.0, 0.0, True)] + [None] * (n - 1)
     pair_logs: list[dict] = []
+    best_methods: dict[int, str] = {0: "origin_reference"}
     n_odom = 0
     n_loop = 0
 
@@ -915,7 +924,7 @@ def build_pose_graph_rgbd(
 
             # Print pair log immediately
             status_str = "ACCEPTED" if accepted else f"REJECTED ({reason})"
-            print(f"    frame {i:02d}: fitness={fit:.2f} rmse={rmse * 1000.0:.1f}mm method={method} {status_str}")
+            print(f"    pair {i:02d} -> {j:02d}: fitness={fit:.2f} rmse={rmse * 1000.0:.1f}mm method={method} [{status_str}]")
 
             if accepted:
                 candidates.append((j, T, fit, rmse, rot, trans, method))
@@ -924,6 +933,7 @@ def build_pose_graph_rgbd(
             # All candidates in the window failed
             best_prev = pair_logs[-1] if pair_logs else {}
             diagnostics[i] = (best_prev.get("fitness", 0.0), best_prev.get("rmse_mm", float("inf")) / 1000.0, False)
+            best_methods[i] = "FAILED"
             print(f"  [!] Frame {i:02d} could not be registered to any recent accepted frame -- REJECTED.")
             continue
 
@@ -931,6 +941,7 @@ def build_pose_graph_rgbd(
         j_best, T_best, fit_best, rmse_best, rot_best, trans_best, method_best = max(
             candidates, key=lambda c: c[2]
         )
+        best_methods[i] = method_best
 
         pose_i = poses[j_best] @ T_best
         node_id = len(pose_graph.nodes)
@@ -953,7 +964,7 @@ def build_pose_graph_rgbd(
         accepted_idx.append(i)
         diagnostics[i] = (fit_best, rmse_best, True)
 
-    return pose_graph, node_of, diagnostics, n_odom, n_loop, pair_logs, poses
+    return pose_graph, node_of, diagnostics, n_odom, n_loop, pair_logs, poses, best_methods
 
 
 def register_sequence_rgbd_human(
@@ -989,8 +1000,8 @@ def register_sequence_rgbd_human(
             "first_rejected_frame": None,
         }
 
-    print("\n  Running Human RGB-D Pairwise Registration with Colored ICP & Bounded Search...")
-    pose_graph, node_of, diagnostics, n_odom, n_loop, pair_logs, unopt_poses = build_pose_graph_rgbd(frames, cfg)
+    print("\n  Running Human RGB-D Pairwise Registration with Landmark Guidance, Colored ICP & Bounded Search...")
+    pose_graph, node_of, diagnostics, n_odom, n_loop, pair_logs, unopt_poses, best_methods = build_pose_graph_rgbd(frames, cfg)
 
     n_before = len(pose_graph.edges)
     if len(pose_graph.nodes) > 1:
@@ -1048,6 +1059,7 @@ def register_sequence_rgbd_human(
         "n_nodes": len(pose_graph.nodes),
         "n_edges": len(pose_graph.edges),
         "n_loop": n_loop,
+        "frame_methods": best_methods,
     }
 
     return aligned, diagnostics, poses, summary_stats

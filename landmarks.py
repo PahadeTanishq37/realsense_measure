@@ -135,7 +135,13 @@ def detect_face_landmarks_3d(
         patch = depth_m[y0:y1, x0:x1]
         valid = patch[patch > 0]
         if valid.size == 0:
-            continue
+            # Expand search patch up to 7x7 if local pixel had a minor void/dropout
+            y0_w, y1_w = max(0, py - 3), min(h, py + 4)
+            x0_w, x1_w = max(0, px - 3), min(w, px + 4)
+            wide_patch = depth_m[y0_w:y1_w, x0_w:x1_w]
+            valid = wide_patch[wide_patch > 0]
+            if valid.size == 0:
+                continue
         z = float(np.median(valid))
         x = (px - cx) * z / fx
         y = (py - cy) * z / fy
