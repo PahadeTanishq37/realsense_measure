@@ -9,6 +9,7 @@ free with respect to its input geometries — callers' clouds are never mutated.
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 from typing import Sequence
 
 import numpy as np
@@ -67,6 +68,7 @@ def show(
     geometries: Sequence[o3d.geometry.Geometry] | o3d.geometry.Geometry,
     window_name: str = "stage",
     point_size: float = 2.0,
+    screenshot_path: str | Path | None = None,
 ) -> None:
     """
     Open a blocking Open3D window displaying all given geometries.
@@ -85,6 +87,9 @@ def show(
         looking at.
     point_size:
         Rendered radius of each point in pixels.
+    screenshot_path:
+        Optional file path to save a PNG screenshot of the scene right before
+        the window is destroyed.
     """
     vis = o3d.visualization.Visualizer()
     vis.create_window(window_name=window_name, width=1280, height=720)
@@ -104,6 +109,8 @@ def show(
     render_opt.background_color = np.array([0.10, 0.10, 0.12])  # near-black
 
     vis.run()      # blocks until the user closes the window
+    if screenshot_path is not None:
+        vis.capture_screen_image(str(screenshot_path), do_render=True)
     vis.destroy_window()
 
 
