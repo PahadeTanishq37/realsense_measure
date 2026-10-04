@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 
+import numpy as np
 import open3d as o3d
 
 from config import PreprocessConfig
@@ -116,8 +117,6 @@ def fuse_tsdf_volume(
     o3d.geometry.PointCloud
         Integrated, cleaned point cloud with RGB color.
     """
-    import numpy as np
-
     if not frames:
         return o3d.geometry.PointCloud()
 

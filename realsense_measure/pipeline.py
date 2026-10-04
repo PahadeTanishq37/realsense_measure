@@ -726,7 +726,7 @@ class ScanPipeline:
                 print("\n  Displaying estimated camera trajectory...")
                 traj_geoms = draw_camera_trajectory(poses, scale=0.04)
                 if traj_geoms:
-                    acc_clouds = [f for f, (*_, acc) in zip(aligned, diagnostics) if acc]
+                    acc_clouds = [f for f, d in zip(aligned, diagnostics) if d is not None and d[2]]
                     show(traj_geoms + acc_clouds, window_name="Estimated Camera Trajectory")
 
             colored_aligned_frames = color_frames_distinctly(aligned)
@@ -764,14 +764,17 @@ class ScanPipeline:
             aligned, diagnostics = register_sequence(isolated_frames, self.cfg.registration)
 
         rejected_indices: list[int] = []
-        for i, (fitness, rmse, accepted) in enumerate(diagnostics):
+        for i, diag in enumerate(diagnostics):
+            if diag is None:
+                continue
+            fitness, rmse, accepted = diag
             status = "ACCEPTED" if accepted else "REJECTED -- excluded from fusion, consider recapturing this angle"
             if not accepted:
                 rejected_indices.append(i)
             print(f"  frame {i:02d}: fitness={fitness:.4f}  "
                   f"rmse={rmse * 1000:.3f} mm  {status}")
 
-        n_accepted = sum(1 for *_, acc in diagnostics if acc)
+        n_accepted = sum(1 for d in diagnostics if d is not None and d[2])
         n_total = len(diagnostics)
         print(f"\n  Registration summary: {n_accepted} of {n_total} frames accepted into the reconstruction.")
         if n_total > 0 and (n_accepted / n_total) < 0.70:
