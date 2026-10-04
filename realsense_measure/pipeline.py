@@ -666,14 +666,24 @@ class ScanPipeline:
                     acc_clouds = [f for f, (*_, acc) in zip(aligned, diagnostics) if acc]
                     show(traj_geoms + acc_clouds, window_name="Estimated Camera Trajectory")
 
+            colored_aligned_frames = color_frames_distinctly(aligned)
+            if hasattr(self, "scan_folder") and self.scan_folder is not None:
+                combined = o3d.geometry.PointCloud()
+                for frame in colored_aligned_frames:
+                    combined += frame
+                o3d.io.write_point_cloud(str(self.scan_folder / "stage3_output.ply"), combined)
+                print(f"  Saved: {self.scan_folder / 'stage3_output.ply'}")
+
             if self.cfg.show_stage_windows:
                 rejected_indices = [i for i, d in enumerate(diagnostics) if d is not None and not d[2]]
                 if rejected_indices:
                     print(f"\n  [!] Note: Stage 3 visualization displays all frames including rejected frame(s) {rejected_indices}.")
                     print("      Rejected frames are excluded from Stage 4 fusion.")
+                screenshot_path = (self.scan_folder / "stage3_output.png") if (hasattr(self, "scan_folder") and self.scan_folder is not None) else None
                 show(
-                    color_frames_distinctly(aligned),
+                    colored_aligned_frames,
                     window_name="Stage 3: registered/aligned human clouds",
+                    screenshot_path=screenshot_path,
                 )
 
             return aligned, diagnostics, poses
@@ -721,12 +731,22 @@ class ScanPipeline:
                 except Exception as exc:
                     print(f"\n  [!] Loop closure check skipped: {exc}")
 
+        colored_aligned_frames = color_frames_distinctly(aligned)
+        if hasattr(self, "scan_folder") and self.scan_folder is not None:
+            combined = o3d.geometry.PointCloud()
+            for frame in colored_aligned_frames:
+                combined += frame
+            o3d.io.write_point_cloud(str(self.scan_folder / "stage3_output.ply"), combined)
+            print(f"  Saved: {self.scan_folder / 'stage3_output.ply'}")
+
         if self.cfg.show_stage_windows:
             if rejected_indices:
                 print(f"\n  [!] Note: Visualizing all frames including rejected frame(s) {rejected_indices}.")
+            screenshot_path = (self.scan_folder / "stage3_output.png") if (hasattr(self, "scan_folder") and self.scan_folder is not None) else None
             show(
-                color_frames_distinctly(aligned),
+                colored_aligned_frames,
                 window_name="Stage 3: registered/aligned clouds",
+                screenshot_path=screenshot_path,
             )
 
         return aligned, diagnostics, None
@@ -816,11 +836,20 @@ class ScanPipeline:
 
         print(f"  Reconstruction:\n    method: {fusion_name}\n    points: {len(fused.points):,}")
 
+        if hasattr(self, "scan_folder") and self.scan_folder is not None:
+            o3d.io.write_point_cloud(str(self.scan_folder / "stage4_output.ply"), fused)
+            print(f"  Saved: {self.scan_folder / 'stage4_output.ply'}")
+
         if self.cfg.show_stage_windows:
             display_pcd = o3d.geometry.PointCloud(fused)
             if not display_pcd.has_colors():
                 display_pcd.paint_uniform_color([0.65, 0.65, 0.65])
-            show(display_pcd, window_name=f"Stage 4: fused reconstruction ({fusion_name})")
+            screenshot_path = (self.scan_folder / "stage4_output.png") if (hasattr(self, "scan_folder") and self.scan_folder is not None) else None
+            show(
+                [display_pcd],
+                window_name=f"Stage 4: fused reconstruction ({fusion_name})",
+                screenshot_path=screenshot_path,
+            )
 
         if self.cfg.save_intermediate:
             out = self.cfg.output_dir / "fused.ply"
@@ -990,13 +1019,22 @@ class ScanPipeline:
                 ext_mm = [f"{v * 1000:.1f}" for v in aabb_ext]
                 print(f"  AABB   : {' x '.join(ext_mm)} mm (axis-aligned reference)")
 
+        obb_ls = obb_lineset(obb) if obb is not None else None
+
+        if hasattr(self, "scan_folder") and self.scan_folder is not None:
+            o3d.io.write_point_cloud(str(self.scan_folder / "stage5_output.ply"), segmented)
+            print(f"  Saved: {self.scan_folder / 'stage5_output.ply'}")
+
         if self.cfg.show_stage_windows and obb is not None:
             seg_display = o3d.geometry.PointCloud(segmented)
             if not seg_display.has_colors():
                 seg_display.paint_uniform_color([0.18, 0.72, 0.38])
+            geoms_to_show = [seg_display, obb_ls] if obb_ls is not None else [seg_display]
+            screenshot_path = (self.scan_folder / "stage5_output.png") if (hasattr(self, "scan_folder") and self.scan_folder is not None) else None
             show(
-                [seg_display, obb_lineset(obb)],
+                geoms_to_show,
                 window_name="Stage 5: measured object",
+                screenshot_path=screenshot_path,
             )
 
         # ---- persist results -------------------------------------------
@@ -1008,6 +1046,10 @@ class ScanPipeline:
         seg_path = self.cfg.output_dir / "segmented_object.ply"
         o3d.io.write_point_cloud(str(seg_path), segmented)
         print(f"  Saved segmented cloud: {seg_path}")
+
+        if hasattr(self, "scan_folder") and self.scan_folder is not None and meas_path.exists():
+            shutil.copy(meas_path, self.scan_folder / "measurement.json")
+            print(f"  Saved: {self.scan_folder / 'measurement.json'}")
 
         return result
 
