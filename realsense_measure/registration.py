@@ -357,7 +357,7 @@ def register_frame_pair_landmark_guided(
     intrinsics_o3d: o3d.camera.PinholeCameraIntrinsic,
     cfg: RegistrationConfig,
     residual_accept_mm: float = 15.0,
-) -> tuple[np.ndarray, float, float, str]:
+) -> tuple[np.ndarray, float, float, str, float]:
     """
     Register one frame pair using facial landmarks as the initial guess for
     ICP, instead of FPFH+RANSAC global registration. Falls back to the
@@ -368,7 +368,7 @@ def register_frame_pair_landmark_guided(
 
     Returns
     -------
-    (transform, fitness, rmse, method) where method is "landmark" or
+    (transform, fitness, rmse, method, residual_mm) where method is "landmark" or
     "fpfh_fallback", for logging/diagnostics.
     """
     from landmarks import detect_face_landmarks_3d
@@ -389,6 +389,7 @@ def register_frame_pair_landmark_guided(
                     float(icp_result.fitness),
                     float(icp_result.inlier_rmse),
                     "landmark",
+                    float(residual_mm),
                 )
             else:
                 print(f"      [landmarks] Kabsch residual too high: {residual_mm:.1f}mm > {residual_accept_mm:.1f}mm")
@@ -400,7 +401,7 @@ def register_frame_pair_landmark_guided(
         print(f"      [landmarks] Face not detected on both frames (src={src_n}, dst={dst_n})")
 
     transform, fitness, rmse = register_frame_pair(source_pcd, target_pcd, cfg)
-    return transform, fitness, rmse, "fpfh_fallback"
+    return transform, fitness, rmse, "fpfh_fallback", float("nan")
 
 
 def register_against_candidates(
@@ -445,7 +446,7 @@ def register_sequence(
     Uses a multi-candidate growing reference strategy with acceptance gating:
     - Frame 0 becomes the initial reference and last aligned frame.
     - Each subsequent frame is matched against [last_aligned_frame, reference]
-      and picks the candidate alignment with the highest fitness.
+    - and picks the candidate alignment with the highest fitness.
     - If fitness >= cfg.min_accept_fitness, the frame is marked as accepted,
       updates last_aligned_frame, and is merged into reference.
     - If fitness < cfg.min_accept_fitness, the frame is rejected from the
@@ -524,24 +525,16 @@ def build_pose_graph(
     """
     Build a gated pose graph.
 
-    CONVENTION (this is what the previous version got wrong):
+    CONVENTION:
     ``register_frame_pair(frames[i], frames[j])`` returns T that maps frame i
-    INTO frame j's coordinates.  Open3D's ``PoseGraphEdge(source, target, T)``
+    INTO frame j's coordinates. Open3D's ``PoseGraphEdge(source, target, T)``
     expects exactly that, so the edge is declared (i -> j), and node poses
     (frame -> frame-0 coordinates) compose as ``pose_i = pose_j @ T``.
 
     GATING: a new frame is registered against the last few *accepted* frames.
     If even the best of those registrations has fitness below
     ``cfg.min_accept_fitness`` the frame is REJECTED: it gets no node and no
-    edges, so it cannot corrupt the graph.  The best candidate becomes a
-    certain edge; other good candidates become "uncertain" (loop-closure)
-    edges that the optimiser may down-weight.
-
-    Returns
-    -------
-    (pose_graph, node_of, diagnostics, n_odometry_edges, n_loop_edges)
-      node_of: dict frame_index -> pose-graph node id (accepted frames only)
-      diagnostics: list of (fitness, rmse, accepted) per frame
+    edges, so it cannot corrupt the graph.
     """
     n = len(frames)
     pose_graph = PoseGraph()
@@ -621,11 +614,6 @@ def register_sequence_multiway(
 ) -> tuple[list[o3d.geometry.PointCloud], list[tuple[float, float, bool]]]:
     """
     Gated pose-graph registration (see :func:`build_pose_graph`).
-
-    Diagnostics carry the REAL best-candidate fitness/rmse per frame and
-    ``accepted=False`` for frames that could not be registered reliably, so
-    the pipeline's REJECTED/exclude-from-fusion logic actually works.
-    Rejected frames are returned un-transformed (for inspection only).
     """
     if not frames:
         return [], []
@@ -694,7 +682,7 @@ def register_rgbd_pair(
             0.0,
             float("inf"),
             False,
-            "FAILED",
+            "none",
             0.0,
             0.0,
             "Insufficient points in source or target frame (< 20 points)",
@@ -712,7 +700,7 @@ def register_rgbd_pair(
         and hasattr(source_frame, "intrinsics") and source_frame.intrinsics is not None
     ):
         try:
-            lm_T, lm_fit, lm_rmse, lm_method = register_frame_pair_landmark_guided(
+            lm_T, lm_fit, lm_rmse, lm_method, lm_res_mm = register_frame_pair_landmark_guided(
                 source_pcd=src_pcd,
                 source_color=source_frame.color_bgr,
                 source_depth=source_frame.depth_m,
@@ -739,7 +727,7 @@ def register_rgbd_pair(
                         "landmark",
                         lm_rot,
                         lm_trans,
-                        "Landmark-guided registration PASS",
+                        f"residual={lm_res_mm:.1f}mm",
                     )
         except Exception:
             pass
@@ -826,10 +814,10 @@ def register_rgbd_pair(
                 fit_colored,
                 rmse_colored,
                 True,
-                "rgbd_odometry_colored_icp",
+                "colored_icp",
                 rot_colored,
                 trans_colored,
-                f"Odometry: {odo_status} -> Colored ICP PASS",
+                f"fitness={fit_colored:.2f} rmse={rmse_colored * 1000.0:.1f}mm",
             )
         colored_status = "FAIL: " + ", ".join(issues)
     except Exception as exc:
@@ -860,7 +848,7 @@ def register_rgbd_pair(
                 "fpfh_fallback",
                 fb_rot,
                 fb_trans,
-                f"Colored ICP failed ({colored_status}); recovered via FPFH+RANSAC",
+                f"fitness={fb_fit:.2f} rmse={fb_rmse * 1000.0:.1f}mm",
             )
     except Exception as exc:
         pass
@@ -871,7 +859,7 @@ def register_rgbd_pair(
         fit_colored,
         rmse_colored,
         False,
-        "FAILED",
+        "none",
         rot_colored,
         trans_colored,
         fail_reason,
@@ -887,7 +875,7 @@ def build_pose_graph_rgbd(
 
     Returns
     -------
-    (pose_graph, node_of, diagnostics, n_odom, n_loop, pair_logs, poses)
+    (pose_graph, node_of, diagnostics, n_odom, n_loop, pair_logs, poses, best_methods, best_scores)
     """
     n = len(frames)
     pose_graph = PoseGraph()
@@ -897,7 +885,8 @@ def build_pose_graph_rgbd(
     accepted_idx: list[int] = [0]
     diagnostics: list[tuple[float, float, bool] | None] = [(1.0, 0.0, True)] + [None] * (n - 1)
     pair_logs: list[dict] = []
-    best_methods: dict[int, str] = {0: "origin_reference"}
+    best_methods: dict[int, str] = {0: "reference"}
+    best_scores: dict[int, str] = {0: "(origin)"}
     n_odom = 0
     n_loop = 0
 
@@ -930,26 +919,30 @@ def build_pose_graph_rgbd(
                 "reason": reason,
             })
 
-            # Print pair log immediately
-            status_str = "ACCEPTED" if accepted else f"REJECTED ({reason})"
-            print(f"    pair {i:02d} -> {j:02d}: fitness={fit:.2f} rmse={rmse * 1000.0:.1f}mm method={method} [{status_str}]")
-
+            # Print pair log with exact tier and score
             if accepted:
-                candidates.append((j, T, fit, rmse, rot, trans, method))
+                print(f"    pair {i:02d} -> {j:02d}: tier={method} {reason} ACCEPTED")
+                candidates.append((j, T, fit, rmse, rot, trans, method, reason))
+            else:
+                print(f"    pair {i:02d} -> {j:02d}: tier=none REJECTED ({reason})")
 
         if not candidates:
             # All candidates in the window failed
             best_prev = pair_logs[-1] if pair_logs else {}
             diagnostics[i] = (best_prev.get("fitness", 0.0), best_prev.get("rmse_mm", float("inf")) / 1000.0, False)
-            best_methods[i] = "FAILED"
-            print(f"  [!] Frame {i:02d} could not be registered to any recent accepted frame -- REJECTED.")
+            best_methods[i] = "none"
+            best_scores[i] = ""
+            print(f"  frame {i:02d}: tier=none REJECTED")
             continue
 
         # Choose best candidate (highest inlier fitness)
-        j_best, T_best, fit_best, rmse_best, rot_best, trans_best, method_best = max(
+        j_best, T_best, fit_best, rmse_best, rot_best, trans_best, method_best, reason_best = max(
             candidates, key=lambda c: c[2]
         )
         best_methods[i] = method_best
+        best_scores[i] = reason_best
+
+        print(f"  frame {i:02d}: tier={method_best} {reason_best} ACCEPTED")
 
         pose_i = poses[j_best] @ T_best
         node_id = len(pose_graph.nodes)
@@ -958,7 +951,7 @@ def build_pose_graph_rgbd(
         poses[i] = pose_i
 
         # Add edges: best candidate is certain (odometry); other candidates in window are uncertain (loop closures)
-        for j, T, fit, rmse, rot, trans, method in candidates:
+        for j, T, fit, rmse, rot, trans, method, reason in candidates:
             info = get_information_matrix(frames[i].pcd, frames[j].pcd, T, cfg)
             certain = (j == j_best)
             pose_graph.edges.append(
@@ -972,7 +965,7 @@ def build_pose_graph_rgbd(
         accepted_idx.append(i)
         diagnostics[i] = (fit_best, rmse_best, True)
 
-    return pose_graph, node_of, diagnostics, n_odom, n_loop, pair_logs, poses, best_methods
+    return pose_graph, node_of, diagnostics, n_odom, n_loop, pair_logs, poses, best_methods, best_scores
 
 
 def register_sequence_rgbd_human(
@@ -1006,10 +999,14 @@ def register_sequence_rgbd_human(
             "max_trans_jump_mm": 0.0,
             "max_rot_jump_deg": 0.0,
             "first_rejected_frame": None,
+            "frame_methods": {0: "reference"},
+            "frame_scores": {0: "(origin)"},
+            "tier_counts": {"landmark": 0, "colored_icp": 0, "fpfh_fallback": 0, "rejected": 0},
+            "tier_summary_str": "0 landmark, 0 colored_icp, 0 fpfh_fallback, 0 rejected",
         }
 
     print("\n  Running Human RGB-D Pairwise Registration with Landmark Guidance, Colored ICP & Bounded Search...")
-    pose_graph, node_of, diagnostics, n_odom, n_loop, pair_logs, unopt_poses, best_methods = build_pose_graph_rgbd(frames, cfg)
+    pose_graph, node_of, diagnostics, n_odom, n_loop, pair_logs, unopt_poses, best_methods, best_scores = build_pose_graph_rgbd(frames, cfg)
 
     n_before = len(pose_graph.edges)
     if len(pose_graph.nodes) > 1:
@@ -1055,6 +1052,14 @@ def register_sequence_rgbd_human(
     n_accepted = sum(1 for d in diagnostics if d is not None and d[2])
     n_rejected = len(frames) - n_accepted
 
+    tier_counts = {
+        "landmark": sum(1 for m in best_methods.values() if m == "landmark"),
+        "colored_icp": sum(1 for m in best_methods.values() if m in ("colored_icp", "rgbd_odometry_colored_icp")),
+        "fpfh_fallback": sum(1 for m in best_methods.values() if m == "fpfh_fallback"),
+        "rejected": n_rejected,
+    }
+    tier_summary_str = f"{tier_counts['landmark']} landmark, {tier_counts['colored_icp']} colored_icp, {tier_counts['fpfh_fallback']} fpfh_fallback, {tier_counts['rejected']} rejected"
+
     summary_stats = {
         "captured": len(frames),
         "accepted": n_accepted,
@@ -1068,8 +1073,12 @@ def register_sequence_rgbd_human(
         "n_edges": len(pose_graph.edges),
         "n_loop": n_loop,
         "frame_methods": best_methods,
+        "frame_scores": best_scores,
+        "tier_counts": tier_counts,
+        "tier_summary_str": tier_summary_str,
     }
 
     return aligned, diagnostics, poses, summary_stats
+
 
 

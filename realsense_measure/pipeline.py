@@ -586,6 +586,7 @@ class ScanPipeline:
             )
 
             frame_methods = summary_stats.get("frame_methods", {})
+            frame_scores = summary_stats.get("frame_scores", {})
             print("\n" + "=" * 60)
             print("HUMAN RGB-D REGISTRATION SUMMARY (Method Diagnostics)")
             print("-----------------------------------------------------")
@@ -594,15 +595,26 @@ class ScanPipeline:
                     print(f"  frame 00: reference frame (origin) [ACCEPTED]")
                 elif diag is not None:
                     fit, rmse, acc = diag
-                    method = frame_methods.get(i, "unknown")
-                    status = "ACCEPTED" if acc else "REJECTED"
-                    print(f"  frame {i:02d}: fitness={fit:.2f} rmse={rmse * 1000.0:.1f}mm method={method} [{status}]")
+                    method = frame_methods.get(i, "none")
+                    score_str = frame_scores.get(i, f"fitness={fit:.2f} rmse={rmse * 1000.0:.1f}mm")
+                    if acc:
+                        print(f"  frame {i:02d}: tier={method} {score_str} ACCEPTED")
+                    else:
+                        print(f"  frame {i:02d}: tier=none REJECTED")
             print("=" * 60)
 
             n_accepted = summary_stats.get("accepted", sum(1 for d in diagnostics if d is not None and d[2]))
             n_total = summary_stats.get("captured", len(isolated_frames))
             n_rejected = n_total - n_accepted
-            print(f"\n  Registration summary: {n_accepted} of {n_total} frames accepted into the reconstruction"
+            tier_summary = summary_stats.get(
+                "tier_summary_str",
+                f"{sum(1 for m in frame_methods.values() if m == 'landmark')} landmark, "
+                f"{sum(1 for m in frame_methods.values() if m in ('colored_icp', 'rgbd_odometry_colored_icp'))} colored_icp, "
+                f"{sum(1 for m in frame_methods.values() if m == 'fpfh_fallback')} fpfh_fallback, "
+                f"{n_rejected} rejected"
+            )
+            print(f"\n  Registration tier summary: {tier_summary}")
+            print(f"  Registration summary: {n_accepted} of {n_total} frames accepted into the reconstruction"
                   f" ({n_rejected} rejected -- excluded from fusion).")
             if n_total > 0 and (n_accepted / n_total) < 0.60:
                 print("  Tip: low acceptance ratio (< 60%). Try moving the camera more slowly for higher frame overlap.")
