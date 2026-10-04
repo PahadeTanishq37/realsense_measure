@@ -907,14 +907,21 @@ def build_pose_graph_rgbd(
 
         prev_accepted_idx = accepted_idx[-1]
         prev_accepted_pose = poses[prev_accepted_idx]
-        max_trans_m = getattr(cfg, "max_pose_jump_translation_m", cfg.max_translation_m_per_frame)
-        max_rot_deg = getattr(cfg, "max_pose_jump_rotation_deg", 45.0)
+        frames_since_accepted = max(1, i - prev_accepted_idx)
+        step_cap = getattr(cfg, "max_pose_jump_step_cap", 6)
+        step_multiplier = min(frames_since_accepted, step_cap)
+
+        base_trans_m = getattr(cfg, "max_pose_jump_translation_m", cfg.max_translation_m_per_frame)
+        base_rot_deg = getattr(cfg, "max_pose_jump_rotation_deg", 45.0)
+
+        allowed_translation_m = base_trans_m * step_multiplier
+        allowed_rotation_deg = base_rot_deg * step_multiplier
 
         for j in target_indices:
             res = register_rgbd_pair(frames[i], frames[j], cfg)
             T, fit, rmse, accepted, method, rot, trans, reason = res
 
-            # Post-registration physical-plausibility check
+            # Post-registration physical-plausibility check (scaled by frames elapsed)
             exceeds_jump = False
             jump_trans_m = 0.0
             jump_rot_deg = 0.0
@@ -925,7 +932,7 @@ def build_pose_graph_rgbd(
                 jump_trans_m = float(np.linalg.norm(delta_pose[:3, 3]))
                 jump_rot_deg = float(compute_rotation_deg(delta_pose[:3, :3]))
 
-                if jump_trans_m > max_trans_m or jump_rot_deg > max_rot_deg:
+                if jump_trans_m > allowed_translation_m or jump_rot_deg > allowed_rotation_deg:
                     exceeds_jump = True
                     misleading_candidates.append({
                         "target": j,
@@ -938,6 +945,9 @@ def build_pose_graph_rgbd(
                         "score_str": reason,
                         "jump_trans_m": jump_trans_m,
                         "jump_rot_deg": jump_rot_deg,
+                        "allowed_trans_m": allowed_translation_m,
+                        "allowed_rot_deg": allowed_rotation_deg,
+                        "frames_since_accepted": frames_since_accepted,
                     })
 
             pair_logs.append({
@@ -950,7 +960,7 @@ def build_pose_graph_rgbd(
                 "rotation_deg": rot,
                 "translation_mm": trans,
                 "reason": (
-                    f"pose jump ({jump_trans_m:.2f}m, {jump_rot_deg:.0f}deg) > bounds"
+                    f"pose jump ({jump_trans_m:.2f}m, {jump_rot_deg:.0f}deg) > allowed ({allowed_translation_m:.2f}m, {allowed_rotation_deg:.0f}deg)"
                     if exceeds_jump else reason
                 ),
                 "jump_trans_m": jump_trans_m,
@@ -964,7 +974,7 @@ def build_pose_graph_rgbd(
             elif accepted and exceeds_jump:
                 print(
                     f"    pair {i:02d} -> {j:02d}: tier={method} {reason} REJECTED "
-                    f"(pose jump {jump_trans_m:.2f}m, {jump_rot_deg:.0f}deg > max {max_trans_m:.2f}m, {max_rot_deg:.0f}deg)"
+                    f"(pose jump {jump_trans_m:.2f}m, {jump_rot_deg:.0f}deg > allowed {allowed_translation_m:.2f}m, {allowed_rotation_deg:.0f}deg for {frames_since_accepted} frames)"
                 )
             else:
                 print(f"    pair {i:02d} -> {j:02d}: tier=none REJECTED ({reason})")
@@ -977,9 +987,11 @@ def build_pose_graph_rgbd(
                 best_methods[i] = mis["method"]
                 score_str = mis["score_str"]
                 best_scores[i] = score_str
+                n_skip = mis["frames_since_accepted"]
+                skip_label = f"{n_skip} skipped frames" if n_skip != 1 else "1 skipped frame"
                 rejection_msg = (
-                    f"pose jump ({mis['jump_trans_m']:.2f}m, {mis['jump_rot_deg']:.0f}deg) exceeds plausible motion,\n"
-                    f"              tier score was misleadingly high"
+                    f"pose jump ({mis['jump_trans_m']:.2f}m, {mis['jump_rot_deg']:.0f}deg) exceeds plausible motion\n"
+                    f"              for {skip_label} (allowed: {mis['allowed_trans_m']:.2f}m, {mis['allowed_rot_deg']:.0f}deg)"
                 )
                 rejection_reasons[i] = rejection_msg
                 print(

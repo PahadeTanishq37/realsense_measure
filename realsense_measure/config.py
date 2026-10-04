@@ -180,6 +180,7 @@ class RegistrationConfig:
     max_translation_m_per_frame: float = 0.15  # reject inter-frame translation jumps > 150 mm
     max_pose_jump_translation_m: float = 0.15  # reject pose jump translation > 0.15m from previous accepted frame
     max_pose_jump_rotation_deg: float = 45.0   # reject pose jump rotation > 45deg from previous accepted frame
+    max_pose_jump_step_cap: int = 6            # maximum frame-skip multiplier cap for pose-jump bounds
     min_odometry_fitness: float = 0.35         # minimum inlier correspondence ratio for odometry
     min_colored_icp_fitness: float = 0.45      # minimum inlier ratio for colored ICP
     max_colored_icp_rmse_m: float = 0.008      # maximum allowable inlier RMSE (8 mm)

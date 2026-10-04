@@ -421,8 +421,58 @@ def test_f_pose_jump_rejection():
     assert diagnostics[2][2] is False, "Frame 2 MUST be rejected because pose jump exceeds plausible motion"
     assert 2 in stats.get("rejection_reasons", {}), "Frame 2 must have a rejection reason logged"
     assert "exceeds plausible motion" in stats["rejection_reasons"][2]
-    assert "tier score was misleadingly high" in stats["rejection_reasons"][2]
+    assert "allowed:" in stats["rejection_reasons"][2]
     print("  PASS: Post-registration physical plausibility check rejected frame with excessive pose jump.")
+
+
+# ===========================================================================
+# Test G — Multi-frame skip recovery with scaled pose-jump bounds
+# ===========================================================================
+def test_g_multi_frame_skip_recovery():
+    print("\n--- Test G: Multi-Frame Skip Recovery with Scaled Pose-Jump Bounds ---")
+    mesh = make_synthetic_scene()
+    tmesh = o3d.t.geometry.TriangleMesh.from_legacy(mesh)
+    scene = o3d.t.geometry.RaycastingScene()
+    scene.add_triangles(tmesh)
+
+    intr = o3d.camera.PinholeCameraIntrinsic(640, 480, 500.0, 500.0, 320.0, 240.0)
+    intr_tensor = o3d.core.Tensor(intr.intrinsic_matrix, dtype=o3d.core.Dtype.Float64)
+
+    # Frame 0: origin (accepted)
+    P0 = np.eye(4)
+    f0 = render_synthetic_rgbd_frame(scene, P0, 0, intr, intr_tensor)
+
+    # Frame 1: JUNK FRAME (corrupted/pointed away, rejected)
+    P_junk = np.eye(4)
+    P_junk[0, 3] = 2.50
+    f_junk = render_synthetic_rgbd_frame(scene, P_junk, 1, intr, intr_tensor)
+
+    # Frame 2: legitimate step 30 mm from Frame 0
+    P2 = np.eye(4)
+    P2[0, 3] = 0.030
+    f2 = render_synthetic_rgbd_frame(scene, P2, 2, intr, intr_tensor)
+
+    frames = [f0, f_junk, f2]
+
+    # With single-step max_pose_jump_translation_m = 0.02 m (20 mm):
+    # - Frame 1 is rejected (junk).
+    # - Frame 2 is 2 steps away from last accepted Frame 0 (frames_since_accepted = 2).
+    # - Under the unscaled flat check (20 mm), Frame 2 (30 mm jump) would have been REJECTED.
+    # - Under the scaled check (allowed = 20 mm * 2 = 40 mm), Frame 2 PASSES!
+    cfg = RegistrationConfig()
+    cfg.max_pose_jump_translation_m = 0.02
+    cfg.max_pose_jump_rotation_deg = 45.0
+
+    aligned, diagnostics, poses, stats = register_sequence_rgbd_human(frames, cfg)
+
+    print(f"  Frame 0 accepted: {diagnostics[0][2]}")
+    print(f"  Frame 1 (junk) accepted: {diagnostics[1][2]}")
+    print(f"  Frame 2 (multi-frame step) accepted: {diagnostics[2][2]}")
+
+    assert diagnostics[0][2] is True, "Frame 0 should be accepted"
+    assert diagnostics[1][2] is False, "Frame 1 (junk) MUST be rejected"
+    assert diagnostics[2][2] is True, "Frame 2 MUST be accepted under scaled motion bounds (30 mm < allowed 40 mm)"
+    print("  PASS: Multi-frame skip recovery succeeded with scaled pose-jump bounds.")
 
 
 def main():
@@ -436,9 +486,10 @@ def main():
     test_d_smooth_surface_gating()
     test_e_transformation_convention()
     test_f_pose_jump_rejection()
+    test_g_multi_frame_skip_recovery()
 
     print("\n" + "=" * 65)
-    print("  ALL 6 SYNTHETIC TESTS (A, B, C, D, E, F) PASSED SUCCESSFULLY!")
+    print("  ALL 7 SYNTHETIC TESTS (A, B, C, D, E, F, G) PASSED SUCCESSFULLY!")
     print("=" * 65)
 
 
