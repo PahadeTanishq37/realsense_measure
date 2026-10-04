@@ -375,6 +375,56 @@ def test_e_transformation_convention():
     print("  PASS: Transformation convention (source -> target and pose composition) verified.")
 
 
+# ===========================================================================
+# Test F — Post-registration physical plausibility pose jump check
+# ===========================================================================
+def test_f_pose_jump_rejection():
+    print("\n--- Test F: Post-Registration Physical Plausibility Check ---")
+    mesh = make_synthetic_scene()
+    tmesh = o3d.t.geometry.TriangleMesh.from_legacy(mesh)
+    scene = o3d.t.geometry.RaycastingScene()
+    scene.add_triangles(tmesh)
+
+    intr = o3d.camera.PinholeCameraIntrinsic(640, 480, 500.0, 500.0, 320.0, 240.0)
+    intr_tensor = o3d.core.Tensor(intr.intrinsic_matrix, dtype=o3d.core.Dtype.Float64)
+
+    # Frame 0: origin
+    P0 = np.eye(4)
+    f0 = render_synthetic_rgbd_frame(scene, P0, 0, intr, intr_tensor)
+
+    # Frame 1: small step (10 mm)
+    P1 = np.eye(4)
+    P1[0, 3] = 0.010
+    f1 = render_synthetic_rgbd_frame(scene, P1, 1, intr, intr_tensor)
+
+    # Frame 2: step 25 mm from Frame 1
+    P2 = np.eye(4)
+    P2[0, 3] = 0.035
+    f2 = render_synthetic_rgbd_frame(scene, P2, 2, intr, intr_tensor)
+
+    frames = [f0, f1, f2]
+
+    # With tight bounds (max_pose_jump_translation_m = 0.02 m / 20 mm),
+    # Frame 2 has a 25 mm jump from Frame 1, exceeding plausible motion.
+    cfg = RegistrationConfig()
+    cfg.max_pose_jump_translation_m = 0.02
+    cfg.max_pose_jump_rotation_deg = 45.0
+
+    aligned, diagnostics, poses, stats = register_sequence_rgbd_human(frames, cfg)
+
+    print(f"  Frame 0 accepted: {diagnostics[0][2]}")
+    print(f"  Frame 1 accepted: {diagnostics[1][2]}")
+    print(f"  Frame 2 accepted: {diagnostics[2][2]}")
+
+    assert diagnostics[0][2] is True, "Frame 0 should be accepted"
+    assert diagnostics[1][2] is True, "Frame 1 should be accepted"
+    assert diagnostics[2][2] is False, "Frame 2 MUST be rejected because pose jump exceeds plausible motion"
+    assert 2 in stats.get("rejection_reasons", {}), "Frame 2 must have a rejection reason logged"
+    assert "exceeds plausible motion" in stats["rejection_reasons"][2]
+    assert "tier score was misleadingly high" in stats["rejection_reasons"][2]
+    print("  PASS: Post-registration physical plausibility check rejected frame with excessive pose jump.")
+
+
 def main():
     print("=" * 65)
     print("  HUMAN 180 DEG MULTI-VIEW REGISTRATION SYNTHETIC TEST SUITE")
@@ -385,9 +435,10 @@ def main():
     test_c_bad_frame_rejection()
     test_d_smooth_surface_gating()
     test_e_transformation_convention()
+    test_f_pose_jump_rejection()
 
     print("\n" + "=" * 65)
-    print("  ALL 5 SYNTHETIC TESTS (A, B, C, D, E) PASSED SUCCESSFULLY!")
+    print("  ALL 6 SYNTHETIC TESTS (A, B, C, D, E, F) PASSED SUCCESSFULLY!")
     print("=" * 65)
 
 

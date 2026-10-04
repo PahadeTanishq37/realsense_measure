@@ -887,6 +887,7 @@ def build_pose_graph_rgbd(
     pair_logs: list[dict] = []
     best_methods: dict[int, str] = {0: "reference"}
     best_scores: dict[int, str] = {0: "(origin)"}
+    rejection_reasons: dict[int, str] = {}
     n_odom = 0
     n_loop = 0
 
@@ -902,37 +903,95 @@ def build_pose_graph_rgbd(
             target_indices.append(0)
 
         candidates = []
+        misleading_candidates = []
+
+        prev_accepted_idx = accepted_idx[-1]
+        prev_accepted_pose = poses[prev_accepted_idx]
+        max_trans_m = getattr(cfg, "max_pose_jump_translation_m", cfg.max_translation_m_per_frame)
+        max_rot_deg = getattr(cfg, "max_pose_jump_rotation_deg", 45.0)
 
         for j in target_indices:
             res = register_rgbd_pair(frames[i], frames[j], cfg)
             T, fit, rmse, accepted, method, rot, trans, reason = res
 
+            # Post-registration physical-plausibility check
+            exceeds_jump = False
+            jump_trans_m = 0.0
+            jump_rot_deg = 0.0
+
+            if accepted:
+                cand_pose = poses[j] @ T
+                delta_pose = np.linalg.inv(prev_accepted_pose) @ cand_pose
+                jump_trans_m = float(np.linalg.norm(delta_pose[:3, 3]))
+                jump_rot_deg = float(compute_rotation_deg(delta_pose[:3, :3]))
+
+                if jump_trans_m > max_trans_m or jump_rot_deg > max_rot_deg:
+                    exceeds_jump = True
+                    misleading_candidates.append({
+                        "target": j,
+                        "T": T,
+                        "fitness": fit,
+                        "rmse": rmse,
+                        "rot": rot,
+                        "trans": trans,
+                        "method": method,
+                        "score_str": reason,
+                        "jump_trans_m": jump_trans_m,
+                        "jump_rot_deg": jump_rot_deg,
+                    })
+
             pair_logs.append({
                 "source": i,
                 "target": j,
-                "success": accepted,
+                "success": accepted and not exceeds_jump,
                 "method": method,
                 "fitness": fit,
                 "rmse_mm": rmse * 1000.0 if np.isfinite(rmse) else 999.0,
                 "rotation_deg": rot,
                 "translation_mm": trans,
-                "reason": reason,
+                "reason": (
+                    f"pose jump ({jump_trans_m:.2f}m, {jump_rot_deg:.0f}deg) > bounds"
+                    if exceeds_jump else reason
+                ),
+                "jump_trans_m": jump_trans_m,
+                "jump_rot_deg": jump_rot_deg,
             })
 
             # Print pair log with exact tier and score
-            if accepted:
+            if accepted and not exceeds_jump:
                 print(f"    pair {i:02d} -> {j:02d}: tier={method} {reason} ACCEPTED")
                 candidates.append((j, T, fit, rmse, rot, trans, method, reason))
+            elif accepted and exceeds_jump:
+                print(
+                    f"    pair {i:02d} -> {j:02d}: tier={method} {reason} REJECTED "
+                    f"(pose jump {jump_trans_m:.2f}m, {jump_rot_deg:.0f}deg > max {max_trans_m:.2f}m, {max_rot_deg:.0f}deg)"
+                )
             else:
                 print(f"    pair {i:02d} -> {j:02d}: tier=none REJECTED ({reason})")
 
         if not candidates:
             # All candidates in the window failed
-            best_prev = pair_logs[-1] if pair_logs else {}
-            diagnostics[i] = (best_prev.get("fitness", 0.0), best_prev.get("rmse_mm", float("inf")) / 1000.0, False)
-            best_methods[i] = "none"
-            best_scores[i] = ""
-            print(f"  frame {i:02d}: tier=none REJECTED")
+            if misleading_candidates:
+                mis = max(misleading_candidates, key=lambda m: m["fitness"])
+                diagnostics[i] = (mis["fitness"], mis["rmse"], False)
+                best_methods[i] = mis["method"]
+                score_str = mis["score_str"]
+                best_scores[i] = score_str
+                rejection_msg = (
+                    f"pose jump ({mis['jump_trans_m']:.2f}m, {mis['jump_rot_deg']:.0f}deg) exceeds plausible motion,\n"
+                    f"              tier score was misleadingly high"
+                )
+                rejection_reasons[i] = rejection_msg
+                print(
+                    f"    frame {i:02d}: tier={mis['method']} {score_str}\n"
+                    f"              REJECTED -- {rejection_msg}"
+                )
+            else:
+                best_prev = pair_logs[-1] if pair_logs else {}
+                diagnostics[i] = (best_prev.get("fitness", 0.0), best_prev.get("rmse_mm", float("inf")) / 1000.0, False)
+                best_methods[i] = "none"
+                best_scores[i] = ""
+                print(f"    frame {i:02d}: tier=none REJECTED")
             continue
 
         # Choose best candidate (highest inlier fitness)
@@ -942,7 +1001,7 @@ def build_pose_graph_rgbd(
         best_methods[i] = method_best
         best_scores[i] = reason_best
 
-        print(f"  frame {i:02d}: tier={method_best} {reason_best} ACCEPTED")
+        print(f"    frame {i:02d}: tier={method_best} {reason_best} ACCEPTED")
 
         pose_i = poses[j_best] @ T_best
         node_id = len(pose_graph.nodes)
@@ -965,7 +1024,7 @@ def build_pose_graph_rgbd(
         accepted_idx.append(i)
         diagnostics[i] = (fit_best, rmse_best, True)
 
-    return pose_graph, node_of, diagnostics, n_odom, n_loop, pair_logs, poses, best_methods, best_scores
+    return pose_graph, node_of, diagnostics, n_odom, n_loop, pair_logs, poses, best_methods, best_scores, rejection_reasons
 
 
 def register_sequence_rgbd_human(
@@ -1001,12 +1060,13 @@ def register_sequence_rgbd_human(
             "first_rejected_frame": None,
             "frame_methods": {0: "reference"},
             "frame_scores": {0: "(origin)"},
+            "rejection_reasons": {},
             "tier_counts": {"landmark": 0, "colored_icp": 0, "fpfh_fallback": 0, "rejected": 0},
             "tier_summary_str": "0 landmark, 0 colored_icp, 0 fpfh_fallback, 0 rejected",
         }
 
     print("\n  Running Human RGB-D Pairwise Registration with Landmark Guidance, Colored ICP & Bounded Search...")
-    pose_graph, node_of, diagnostics, n_odom, n_loop, pair_logs, unopt_poses, best_methods, best_scores = build_pose_graph_rgbd(frames, cfg)
+    pose_graph, node_of, diagnostics, n_odom, n_loop, pair_logs, unopt_poses, best_methods, best_scores, rejection_reasons = build_pose_graph_rgbd(frames, cfg)
 
     n_before = len(pose_graph.edges)
     if len(pose_graph.nodes) > 1:
@@ -1053,9 +1113,9 @@ def register_sequence_rgbd_human(
     n_rejected = len(frames) - n_accepted
 
     tier_counts = {
-        "landmark": sum(1 for m in best_methods.values() if m == "landmark"),
-        "colored_icp": sum(1 for m in best_methods.values() if m in ("colored_icp", "rgbd_odometry_colored_icp")),
-        "fpfh_fallback": sum(1 for m in best_methods.values() if m == "fpfh_fallback"),
+        "landmark": sum(1 for i, m in best_methods.items() if m == "landmark" and diagnostics[i] is not None and diagnostics[i][2]),
+        "colored_icp": sum(1 for i, m in best_methods.items() if m in ("colored_icp", "rgbd_odometry_colored_icp") and diagnostics[i] is not None and diagnostics[i][2]),
+        "fpfh_fallback": sum(1 for i, m in best_methods.items() if m == "fpfh_fallback" and diagnostics[i] is not None and diagnostics[i][2]),
         "rejected": n_rejected,
     }
     tier_summary_str = f"{tier_counts['landmark']} landmark, {tier_counts['colored_icp']} colored_icp, {tier_counts['fpfh_fallback']} fpfh_fallback, {tier_counts['rejected']} rejected"
@@ -1074,6 +1134,7 @@ def register_sequence_rgbd_human(
         "n_loop": n_loop,
         "frame_methods": best_methods,
         "frame_scores": best_scores,
+        "rejection_reasons": rejection_reasons,
         "tier_counts": tier_counts,
         "tier_summary_str": tier_summary_str,
     }

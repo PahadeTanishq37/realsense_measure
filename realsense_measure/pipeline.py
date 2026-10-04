@@ -587,20 +587,26 @@ class ScanPipeline:
 
             frame_methods = summary_stats.get("frame_methods", {})
             frame_scores = summary_stats.get("frame_scores", {})
+            rejection_reasons = summary_stats.get("rejection_reasons", {})
             print("\n" + "=" * 60)
             print("HUMAN RGB-D REGISTRATION SUMMARY (Method Diagnostics)")
             print("-----------------------------------------------------")
             for i, diag in enumerate(diagnostics):
                 if i == 0:
-                    print(f"  frame 00: reference frame (origin) [ACCEPTED]")
+                    print(f"    frame 00: reference frame (origin) [ACCEPTED]")
                 elif diag is not None:
                     fit, rmse, acc = diag
                     method = frame_methods.get(i, "none")
                     score_str = frame_scores.get(i, f"fitness={fit:.2f} rmse={rmse * 1000.0:.1f}mm")
                     if acc:
-                        print(f"  frame {i:02d}: tier={method} {score_str} ACCEPTED")
+                        print(f"    frame {i:02d}: tier={method} {score_str} ACCEPTED")
+                    elif i in rejection_reasons:
+                        print(
+                            f"    frame {i:02d}: tier={method} {score_str}\n"
+                            f"              REJECTED -- {rejection_reasons[i]}"
+                        )
                     else:
-                        print(f"  frame {i:02d}: tier=none REJECTED")
+                        print(f"    frame {i:02d}: tier=none REJECTED")
             print("=" * 60)
 
             n_accepted = summary_stats.get("accepted", sum(1 for d in diagnostics if d is not None and d[2]))
