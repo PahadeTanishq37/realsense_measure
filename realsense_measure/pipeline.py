@@ -148,6 +148,24 @@ def _depth_mean_diff(d1: np.ndarray, d2: np.ndarray) -> float:
     return float(np.mean(np.abs(d1[mask] - d2[mask])))
 
 
+def get_next_scan_folder(base_dir: str = "stage_wise_output") -> Path:
+    """
+    Returns a new, empty folder for this scan run, auto-numbered:
+    stage_wise_output/scan_test_1/, scan_test_2/, etc. -- never overwrites
+    a previous scan's folder, so every run's output is permanently kept
+    and reviewable later, independent of whatever scan_output/ currently
+    does.
+    """
+    base = Path(base_dir)
+    base.mkdir(parents=True, exist_ok=True)
+    existing = [p for p in base.iterdir() if p.is_dir() and p.name.startswith("scan_test_")]
+    numbers = [int(p.name.split("_")[-1]) for p in existing if p.name.split("_")[-1].isdigit()]
+    next_num = max(numbers, default=0) + 1
+    new_folder = base / f"scan_test_{next_num}"
+    new_folder.mkdir()
+    return new_folder
+
+
 class ScanPipeline:
     """
     End-to-end orchestration of a multi-view scan (BOX or HUMAN HEAD/BODY).
@@ -167,6 +185,8 @@ class ScanPipeline:
 
         self._clean_output_dir()
         self.target = get_target(cfg.target.name)
+        self.scan_folder = get_next_scan_folder()
+        print(f"  Saving organized stage outputs to: {self.scan_folder}/")
 
     def _clean_output_dir(self) -> None:
         """
