@@ -659,6 +659,7 @@ def register_rgbd_pair(
     source_frame: RGBDFrame,
     target_frame: RGBDFrame,
     cfg: RegistrationConfig,
+    initial_guess: np.ndarray | None = None,
 ) -> tuple[np.ndarray, float, float, bool, str, float, float, str]:
     """
     Register source_frame onto target_frame with Landmark-Guided ICP -> RGB-D Odometry -> Colored ICP -> Quality Gate -> FPFH/RANSAC Fallback.
@@ -733,7 +734,7 @@ def register_rgbd_pair(
             pass
 
     # 2. RGB-D Odometry initial pose estimation
-    init_trans = np.eye(4)
+    init_trans = np.eye(4) if initial_guess is None else initial_guess.copy()
     odo_status = "NOT RUN"
     try:
         rgbd_source = source_frame.to_rgbd_image(depth_trunc=1.5, convert_rgb_to_intensity=True)
@@ -753,7 +754,7 @@ def register_rgbd_pair(
             rgbd_source,
             rgbd_target,
             source_frame.intrinsics,
-            np.eye(4),
+            init_trans,
             jacobian,
             option,
         )
@@ -891,6 +892,8 @@ def build_pose_graph_rgbd(
     n_odom = 0
     n_loop = 0
 
+    last_rel_trans: np.ndarray | None = None
+
     for i in range(1, n):
         # Multi-candidate strategy: check preceding accepted frames in the search window
         # AND frame 0 (the anchor reference) to pick whichever gives higher inlier fitness.
@@ -918,7 +921,14 @@ def build_pose_graph_rgbd(
         allowed_rotation_deg = base_rot_deg * step_multiplier
 
         for j in target_indices:
-            res = register_rgbd_pair(frames[i], frames[j], cfg)
+            init_guess = np.eye(4)
+            if j == prev_accepted_idx and frames_since_accepted == 1 and last_rel_trans is not None:
+                rot_p = compute_rotation_deg(last_rel_trans)
+                trans_p_mm = compute_translation_mm(last_rel_trans)
+                if rot_p <= cfg.max_rotation_deg_per_frame and trans_p_mm <= (cfg.max_translation_m_per_frame * 1000.0):
+                    init_guess = last_rel_trans.copy()
+
+            res = register_rgbd_pair(frames[i], frames[j], cfg, initial_guess=init_guess)
             T, fit, rmse, accepted, method, rot, trans, reason = res
 
             # Post-registration physical-plausibility check (scaled by frames elapsed)
@@ -981,6 +991,7 @@ def build_pose_graph_rgbd(
 
         if not candidates:
             # All candidates in the window failed
+            last_rel_trans = None
             if misleading_candidates:
                 mis = max(misleading_candidates, key=lambda m: m["fitness"])
                 diagnostics[i] = (mis["fitness"], mis["rmse"], False)
@@ -1006,10 +1017,17 @@ def build_pose_graph_rgbd(
                 print(f"    frame {i:02d}: tier=none REJECTED")
             continue
 
-        # Choose best candidate (highest inlier fitness)
-        j_best, T_best, fit_best, rmse_best, rot_best, trans_best, method_best, reason_best = max(
-            candidates, key=lambda c: c[2]
-        )
+        # Prioritize sequential candidate (prev_accepted_idx) if it succeeded and meets quality criteria
+        seq_candidates = [c for c in candidates if c[0] == prev_accepted_idx]
+        if seq_candidates:
+            j_best, T_best, fit_best, rmse_best, rot_best, trans_best, method_best, reason_best = seq_candidates[0]
+            last_rel_trans = T_best.copy() if frames_since_accepted == 1 else None
+        else:
+            j_best, T_best, fit_best, rmse_best, rot_best, trans_best, method_best, reason_best = max(
+                candidates, key=lambda c: c[2]
+            )
+            last_rel_trans = None
+
         best_methods[i] = method_best
         best_scores[i] = reason_best
 
@@ -1021,10 +1039,14 @@ def build_pose_graph_rgbd(
         node_of[i] = node_id
         poses[i] = pose_i
 
-        # Add edges: best candidate is certain (odometry); other candidates in window are uncertain (loop closures)
+        # Add edges: primary sequential candidate is certain (odometry);
+        # other non-consecutive candidates are uncertain (loop closures) and must satisfy min_loop_closure_fitness.
+        min_loop_fit = getattr(cfg, "min_loop_closure_fitness", 0.65)
         for j, T, fit, rmse, rot, trans, method, reason in candidates:
-            info = get_information_matrix(frames[i].pcd, frames[j].pcd, T, cfg)
             certain = (j == j_best)
+            if not certain and fit < min_loop_fit:
+                continue
+            info = get_information_matrix(frames[i].pcd, frames[j].pcd, T, cfg)
             pose_graph.edges.append(
                 PoseGraphEdge(node_id, node_of[j], T, info, uncertain=not certain)
             )

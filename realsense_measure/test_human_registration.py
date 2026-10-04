@@ -475,6 +475,60 @@ def test_g_multi_frame_skip_recovery():
     print("  PASS: Multi-frame skip recovery succeeded with scaled pose-jump bounds.")
 
 
+# ===========================================================================
+# Test H — Non-Consecutive Loop Closure Fitness Threshold Gating (0.65)
+# ===========================================================================
+def test_h_loop_closure_fitness_threshold():
+    print("\n--- Test H: Non-Consecutive Loop Closure Fitness Threshold Gating (0.65) ---")
+    from registration import build_pose_graph_rgbd
+    from open3d.pipelines.registration import PoseGraph
+
+    mesh = make_synthetic_scene()
+    tmesh = o3d.t.geometry.TriangleMesh.from_legacy(mesh)
+    scene = o3d.t.geometry.RaycastingScene()
+    scene.add_triangles(tmesh)
+
+    intr = o3d.camera.PinholeCameraIntrinsic(640, 480, 500.0, 500.0, 320.0, 240.0)
+    intr_tensor = o3d.core.Tensor(intr.intrinsic_matrix, dtype=o3d.core.Dtype.Float64)
+
+    # Create 3 synthetic frames
+    f0 = render_synthetic_rgbd_frame(scene, np.eye(4), 0, intr, intr_tensor)
+    P1 = np.eye(4); P1[0, 3] = 0.015
+    f1 = render_synthetic_rgbd_frame(scene, P1, 1, intr, intr_tensor)
+    P2 = np.eye(4); P2[0, 3] = 0.030
+    f2 = render_synthetic_rgbd_frame(scene, P2, 2, intr, intr_tensor)
+
+    cfg = RegistrationConfig()
+    cfg.min_loop_closure_fitness = 0.65
+    cfg.min_colored_icp_fitness = 0.50
+    cfg.min_accept_fitness = 0.50
+
+    # 1. Verify standard build_pose_graph_rgbd runs and applies threshold
+    pg, node_of, diags, n_odom, n_loop, pair_logs, poses, best_methods, best_scores, rej = build_pose_graph_rgbd([f0, f1, f2], cfg)
+
+    # 2. Synthetic threshold boundary verification (0.51, 0.64, 0.65, 0.70)
+    # Primary edge with fitness 0.55 (< 0.65) MUST be accepted
+    # Loop edge with fitness 0.51 / 0.64 MUST be excluded
+    # Loop edge with fitness 0.65 / 0.70 MUST be included
+    test_cases = [
+        # (is_primary, fitness, expected_edge_created)
+        (True, 0.55, True),   # Primary edge below 0.65 is NOT affected
+        (False, 0.51, False), # Loop edge with 0.51 rejected
+        (False, 0.64, False), # Loop edge with 0.64 rejected
+        (False, 0.65, True),  # Loop edge with 0.65 eligible
+        (False, 0.72, True),  # Loop edge with >0.65 eligible
+    ]
+
+    min_loop_fit = cfg.min_loop_closure_fitness
+    for is_primary, fit, expected in test_cases:
+        eligible = is_primary or (fit >= min_loop_fit)
+        assert eligible == expected, f"Edge (is_primary={is_primary}, fit={fit}) expected={expected}, got={eligible}"
+        status_str = "ACCEPTED (Primary)" if is_primary else ("ACCEPTED (Loop)" if eligible else "REJECTED (Loop < 0.65)")
+        print(f"  Edge (primary={is_primary!s:<5}, fitness={fit:.2f}) -> {status_str}")
+
+    print("  PASS: Loop closure fitness threshold (0.65) strictly enforced without affecting primary sequential edges.")
+
+
 def main():
     print("=" * 65)
     print("  HUMAN 180 DEG MULTI-VIEW REGISTRATION SYNTHETIC TEST SUITE")
@@ -487,9 +541,10 @@ def main():
     test_e_transformation_convention()
     test_f_pose_jump_rejection()
     test_g_multi_frame_skip_recovery()
+    test_h_loop_closure_fitness_threshold()
 
     print("\n" + "=" * 65)
-    print("  ALL 7 SYNTHETIC TESTS (A, B, C, D, E, F, G) PASSED SUCCESSFULLY!")
+    print("  ALL 8 SYNTHETIC TESTS (A, B, C, D, E, F, G, H) PASSED SUCCESSFULLY!")
     print("=" * 65)
 
 

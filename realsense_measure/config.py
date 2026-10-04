@@ -88,7 +88,7 @@ class CameraConfig:
     # Auto-capture settings
     auto_capture: bool = True
     capture_interval_s: float = 3.0   # how often a frame is automatically captured for box scans (s)
-    human_capture_interval_s: float = 3.0  # capture interval for human head/body scans (s)
+    human_capture_interval_s: float = 1.0  # capture interval for human head/body scans (s) for dense consecutive overlap
     skip_near_duplicate_frames: bool = True
     duplicate_depth_diff_threshold_m: float = 0.01   # min mean abs depth diff (m) to avoid duplicate capture
 
@@ -183,6 +183,7 @@ class RegistrationConfig:
     max_pose_jump_step_cap: int = 6            # maximum frame-skip multiplier cap for pose-jump bounds
     min_odometry_fitness: float = 0.35         # minimum inlier correspondence ratio for odometry
     min_colored_icp_fitness: float = 0.45      # minimum inlier ratio for colored ICP
+    min_loop_closure_fitness: float = 0.65     # minimum inlier fitness ratio for non-consecutive loop-closure edges (prevents weak cross-profile tension)
     max_colored_icp_rmse_m: float = 0.008      # maximum allowable inlier RMSE (8 mm)
     search_accepted_window: int = 4            # search up to 4 previously accepted frames when consecutive fails
 

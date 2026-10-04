@@ -73,13 +73,23 @@ class RealSenseCamera:
 
         self._decimation = rs.decimation_filter()
         self._decimation.set_option(
-            rs.option.filter_magnitude, cfg.decimation_magnitude
+            rs.option.filter_magnitude, float(cfg.decimation_magnitude)
         )
         self._to_disparity   = rs.disparity_transform(True)   # depth → disparity
         self._spatial        = rs.spatial_filter()
+        self._spatial.set_option(rs.option.filter_magnitude, 2.0)
+        self._spatial.set_option(rs.option.filter_smooth_alpha, 0.5)
+        self._spatial.set_option(rs.option.filter_smooth_delta, 20.0)
+        self._spatial.set_option(rs.option.holes_fill, 0.0)
+
         self._temporal       = rs.temporal_filter()
+        self._temporal.set_option(rs.option.filter_smooth_alpha, 0.4)
+        self._temporal.set_option(rs.option.filter_smooth_delta, 20.0)
+        self._temporal.set_option(rs.option.holes_fill, 3.0)  # 2/4 persistence mode
+
         self._to_depth       = rs.disparity_transform(False)  # disparity → depth
         self._hole_filling   = rs.hole_filling_filter()
+        self._hole_filling.set_option(rs.option.holes_fill, 1.0)  # 1 = farthest from around
 
         # ---- SDK colorizer (visualization ONLY — never touches raw depth) --
         # Configured properly in start() once we know the DepthVisConfig.

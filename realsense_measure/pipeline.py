@@ -81,6 +81,18 @@ def _draw_hud(
 
     cloud_status = f"{n_pts:,} pts" if n_pts > 0 else "--"
 
+    dist_guide = ""
+    if is_human:
+        if d_median > 0:
+            if d_median < 0.50:
+                dist_guide = "Distance        : TOO CLOSE (<0.50m) -- BACK UP"
+            elif d_median > 0.95:
+                dist_guide = "Distance        : TOO FAR (>0.95m) -- MOVE CLOSER"
+            else:
+                dist_guide = "Distance        : OPTIMAL (0.50m - 0.90m) [OK]"
+        else:
+            dist_guide = "Distance        : NO DEPTH"
+
     if is_human:
         if warning_banner:
             legend = f"[!] {warning_banner}"
@@ -101,12 +113,21 @@ def _draw_hud(
         f"Depth median    : {d_median:.3f} m",
         f"Depth min       : {d_min:.3f} m",
         f"Depth max       : {d_max:.3f} m",
+    ]
+
+    if is_human and dist_guide:
+        lines.extend([
+            "",
+            dist_guide,
+        ])
+
+    lines.extend([
         "",
         f"Vis range  min  : {vis_min_m:.2f} m",
         f"Vis range  max  : {vis_max_m:.2f} m",
         "",
         legend,
-    ]
+    ])
 
     y0, dy = 28, 22
     for i, line in enumerate(lines):
@@ -346,6 +367,15 @@ class ScanPipeline:
                 )
 
                 display_color = color_bgr.copy()
+                if is_human_mode:
+                    h_c, w_c = display_color.shape[:2]
+                    cx_c, cy_c = w_c // 2, h_c // 2
+                    # Subtle center head framing guide
+                    cv2.ellipse(display_color, (cx_c, cy_c), (int(w_c * 0.20), int(h_c * 0.35)), 0, 0, 360, (0, 220, 220), 1, cv2.LINE_AA)
+                    cv2.drawMarker(display_color, (cx_c, cy_c), (0, 220, 220), cv2.MARKER_CROSS, 16, 1, cv2.LINE_AA)
+                    cv2.putText(display_color, "HEAD GUIDE", (cx_c - 45, cy_c - int(h_c * 0.37)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.40, (0, 220, 220), 1, cv2.LINE_AA)
+
                 if manual_roi is not None:
                     rx, ry, rw, rh = manual_roi
                     cv2.rectangle(display_color, (rx, ry), (rx + rw, ry + rh), (0, 255, 0), 2)
