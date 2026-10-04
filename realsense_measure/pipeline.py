@@ -23,6 +23,7 @@ from config import PipelineConfig
 from preprocessing import isolate_object, reject_positional_outliers
 from reconstruction import fuse_point_clouds, fuse_tsdf_volume
 from registration import (
+    compute_rotation_deg,
     register_frame_pair,
     register_sequence,
     register_sequence_multiway,
@@ -67,32 +68,10 @@ def _draw_hud(
     auto_capture: bool = True,
     mode_title: str = "D455f STATUS",
     is_human: bool = False,
+    warning_banner: str | None = None,
 ) -> None:
     """
     Render the D455f status HUD onto the depth panel in-place.
-
-    Parameters
-    ----------
-    panel:
-        The BGR image that will appear on the RIGHT side of the preview
-        window (the SDK-colorized depth image).  Modified in-place.
-    depth_m:
-        The RAW float32 depth array in metres — used only to compute
-        statistics (valid pixel count, median, min, max).  Never displayed
-        as depth values.
-    n_frames:
-        Number of frames captured so far.
-    n_pts:
-        Number of points in the most recently captured point cloud
-        (0 if no frame captured yet).
-    vis_min_m, vis_max_m:
-        Configured visualization range (from DepthVisConfig).
-    auto_capture:
-        Whether continuous automatic capture mode is active.
-    mode_title:
-        Title header displayed at the top of the HUD.
-    is_human:
-        Whether human 180° scan mode is active.
     """
     valid = depth_m[depth_m > 0]
     n_valid   = int(valid.size)
@@ -103,7 +82,10 @@ def _draw_hud(
     cloud_status = f"{n_pts:,} pts" if n_pts > 0 else "--"
 
     if is_human:
-        legend = "HUMAN 180 SWEEP: move slowly, keep subject still -- ENTER: finish"
+        if warning_banner:
+            legend = f"[!] {warning_banner}"
+        else:
+            legend = "HUMAN 180 SWEEP: move slowly, keep subject still -- ENTER: finish"
     elif auto_capture:
         legend = "AUTO-CAPTURING -- move camera around object -- press ENTER when done"
     else:
@@ -133,8 +115,13 @@ def _draw_hud(
         cv2.putText(panel, line, (10, y),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.52,
                     (0, 0, 0), 3, cv2.LINE_AA)
-        # White / yellow text
-        color = (0, 255, 255) if line == mode_title else (255, 255, 255)
+        # White / yellow / orange text
+        if warning_banner and line == legend:
+            color = (0, 165, 255)  # Orange warning alert
+        elif line == mode_title:
+            color = (0, 255, 255)
+        else:
+            color = (255, 255, 255)
         cv2.putText(panel, line, (10, y),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.52,
                     color, 1, cv2.LINE_AA)
@@ -146,6 +133,46 @@ def _depth_mean_diff(d1: np.ndarray, d2: np.ndarray) -> float:
     if not np.any(mask):
         return 0.0
     return float(np.mean(np.abs(d1[mask] - d2[mask])))
+
+
+def _rough_motion_estimate(
+    source_pcd: o3d.geometry.PointCloud,
+    target_pcd: o3d.geometry.PointCloud,
+    max_dist_m: float = 0.05,
+) -> tuple[float, float]:
+    """
+    Lightweight, fast rough motion estimate between consecutive frames during live capture.
+    Returns (estimated_translation_m, estimated_rotation_deg).
+    """
+    if len(source_pcd.points) < 50 or len(target_pcd.points) < 50:
+        return 0.0, 0.0
+
+    try:
+        src = source_pcd.voxel_down_sample(0.015) if len(source_pcd.points) > 500 else source_pcd
+        tgt = target_pcd.voxel_down_sample(0.015) if len(target_pcd.points) > 500 else target_pcd
+
+        reg = o3d.pipelines.registration.registration_icp(
+            src,
+            tgt,
+            max_dist_m,
+            np.eye(4),
+            o3d.pipelines.registration.TransformationEstimationPointToPoint(),
+            o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=15),
+        )
+
+        t_m = float(np.linalg.norm(reg.transformation[:3, 3]))
+        r_deg = float(compute_rotation_deg(reg.transformation[:3, :3]))
+
+        # If ICP correspondence fitness is low (< 20%), also consider centroid separation
+        if reg.fitness < 0.20:
+            c_src = np.mean(np.asarray(src.points), axis=0)
+            c_tgt = np.mean(np.asarray(tgt.points), axis=0)
+            c_dist = float(np.linalg.norm(c_src - c_tgt))
+            t_m = max(t_m, c_dist)
+
+        return t_m, r_deg
+    except Exception:
+        return 0.0, 0.0
 
 
 def get_next_scan_folder(base_dir: str = "stage_wise_output") -> Path:
@@ -265,6 +292,8 @@ class ScanPipeline:
         last_captured_depth: np.ndarray | None = None
         last_skip_warn_time = 0.0
         last_n_pts = 0  # point count of the most recently captured cloud
+        motion_warn_text: str | None = None
+        motion_warn_until = 0.0
 
         manual_roi: tuple[int, int, int, int] | None = None
         if self.cfg.target.use_manual_roi and not is_human_mode:
@@ -302,6 +331,7 @@ class ScanPipeline:
                 # Draw the rich HUD onto the depth panel
                 depth_panel = depth_color.copy()
                 hud_title = "HUMAN 180° SCAN" if is_human_mode else "D455f STATUS"
+                active_warn = motion_warn_text if time.time() < motion_warn_until else None
                 _draw_hud(
                     depth_panel,
                     depth_m,
@@ -312,6 +342,7 @@ class ScanPipeline:
                     auto_capture=self.cfg.camera.auto_capture,
                     mode_title=hud_title,
                     is_human=is_human_mode,
+                    warning_banner=active_warn,
                 )
 
                 display_color = color_bgr.copy()
@@ -350,6 +381,22 @@ class ScanPipeline:
                                     if n_pts < self.cfg.target.min_object_points:
                                         print(f"  Frame discarded: only {n_pts} pts in range -- check distance to subject (0.4m - 1.2m)")
                                     else:
+                                        if raw_frames:
+                                            prev_frame = raw_frames[-1]
+                                            prev_pcd = prev_frame.pcd if isinstance(prev_frame, RGBDFrame) else prev_frame
+                                            est_t_m, est_r_deg = _rough_motion_estimate(rgbd_frame.pcd, prev_pcd)
+                                            max_jump_t = getattr(self.cfg.registration, "max_pose_jump_translation_m", 0.15)
+                                            max_jump_r = getattr(self.cfg.registration, "max_pose_jump_rotation_deg", 45.0)
+                                            if est_t_m > max_jump_t or est_r_deg > max_jump_r:
+                                                print(
+                                                    f"  [!] WARNING: large motion since last frame "
+                                                    f"({est_t_m * 100:.0f}cm, {est_r_deg:.0f}deg) "
+                                                    f"-- consider moving slower through this section, or reduce "
+                                                    f"--interval for denser capture"
+                                                )
+                                                motion_warn_text = f"LARGE MOTION ({est_t_m * 100:.0f}cm, {est_r_deg:.0f}deg) -- MOVE SLOWER"
+                                                motion_warn_until = now + 3.0
+
                                         raw_frames.append(rgbd_frame)
                                         last_n_pts = n_pts
                                         last_capture_time = now
@@ -397,6 +444,22 @@ class ScanPipeline:
                             if n_pts < self.cfg.target.min_object_points:
                                 print(f"  Frame discarded: only {n_pts} pts in range -- check distance to subject")
                             else:
+                                if raw_frames:
+                                    prev_frame = raw_frames[-1]
+                                    prev_pcd = prev_frame.pcd if isinstance(prev_frame, RGBDFrame) else prev_frame
+                                    est_t_m, est_r_deg = _rough_motion_estimate(rgbd_frame.pcd, prev_pcd)
+                                    max_jump_t = getattr(self.cfg.registration, "max_pose_jump_translation_m", 0.15)
+                                    max_jump_r = getattr(self.cfg.registration, "max_pose_jump_rotation_deg", 45.0)
+                                    if est_t_m > max_jump_t or est_r_deg > max_jump_r:
+                                        print(
+                                            f"  [!] WARNING: large motion since last frame "
+                                            f"({est_t_m * 100:.0f}cm, {est_r_deg:.0f}deg) "
+                                            f"-- consider moving slower through this section, or reduce "
+                                            f"--interval for denser capture"
+                                        )
+                                        motion_warn_text = f"LARGE MOTION ({est_t_m * 100:.0f}cm, {est_r_deg:.0f}deg) -- MOVE SLOWER"
+                                        motion_warn_until = time.time() + 3.0
+
                                 raw_frames.append(rgbd_frame)
                                 last_n_pts = n_pts
                                 last_captured_depth = depth_m.copy()
