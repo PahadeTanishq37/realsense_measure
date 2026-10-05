@@ -655,6 +655,27 @@ def compute_translation_mm(T: np.ndarray) -> float:
     return float(np.linalg.norm(T[:3, 3]) * 1000.0)
 
 
+def compute_mutual_fitness(source_fitness: float, n_source: int, n_target: int) -> float:
+    """
+    Compute mutual / minimum-cardinality inlier fitness for asymmetric point clouds.
+
+    In Open3D ICP, fitness = inlier_count / n_source. When registering a larger cloud
+    (e.g., connected head + torso, ~11.5k points) onto a smaller cloud (e.g.,
+    isolated head, ~3.7k points), source-normalized fitness is mathematically
+    bounded by n_target / n_source (~0.32), falsely triggering rejection even when
+    the head surface matches with high physical accuracy.
+
+    Mutual fitness normalizes the inlier count by min(n_source, n_target):
+        mutual_fitness = inlier_count / min(n_source, n_target)
+                       = (source_fitness * n_source) / min(n_source, n_target)
+    """
+    min_n = min(n_source, n_target)
+    if min_n <= 0 or source_fitness <= 0.0:
+        return 0.0
+    inliers = float(source_fitness) * float(n_source)
+    return min(1.0, float(inliers / float(min_n)))
+
+
 def register_rgbd_pair(
     source_frame: RGBDFrame,
     target_frame: RGBDFrame,
@@ -691,6 +712,8 @@ def register_rgbd_pair(
 
     src_pcd = copy.deepcopy(source_frame.pcd)
     tgt_pcd = copy.deepcopy(target_frame.pcd)
+    n_src = len(src_pcd.points)
+    n_tgt = len(tgt_pcd.points)
 
     # 1. Landmark-guided registration
     if (
@@ -701,7 +724,7 @@ def register_rgbd_pair(
         and hasattr(source_frame, "intrinsics") and source_frame.intrinsics is not None
     ):
         try:
-            lm_T, lm_fit, lm_rmse, lm_method, lm_res_mm = register_frame_pair_landmark_guided(
+            lm_T, lm_fit_src, lm_rmse, lm_method, lm_res_mm = register_frame_pair_landmark_guided(
                 source_pcd=src_pcd,
                 source_color=source_frame.color_bgr,
                 source_depth=source_frame.depth_m,
@@ -714,6 +737,7 @@ def register_rgbd_pair(
             if lm_method == "landmark":
                 lm_rot = compute_rotation_deg(lm_T)
                 lm_trans = compute_translation_mm(lm_T)
+                lm_fit = compute_mutual_fitness(lm_fit_src, n_src, n_tgt)
                 if (
                     lm_fit >= cfg.min_accept_fitness
                     and lm_rmse <= cfg.max_colored_icp_rmse_m * 1.5
@@ -728,7 +752,7 @@ def register_rgbd_pair(
                         "landmark",
                         lm_rot,
                         lm_trans,
-                        f"residual={lm_res_mm:.1f}mm",
+                        f"fitness={lm_fit:.2f} (src={lm_fit_src:.2f}) residual={lm_res_mm:.1f}mm",
                     )
         except Exception:
             pass
@@ -793,7 +817,8 @@ def register_rgbd_pair(
             ICPConvergenceCriteria(max_iteration=cfg.colored_icp_max_iterations),
         )
         T_colored = colored_res.transformation
-        fit_colored = float(colored_res.fitness)
+        fit_colored_src = float(colored_res.fitness)
+        fit_colored = compute_mutual_fitness(fit_colored_src, n_src, n_tgt)
         rmse_colored = float(colored_res.inlier_rmse)
         rot_colored = compute_rotation_deg(T_colored)
         trans_colored = compute_translation_mm(T_colored)
@@ -801,7 +826,7 @@ def register_rgbd_pair(
         # Quality gating
         issues = []
         if fit_colored < cfg.min_colored_icp_fitness:
-            issues.append(f"fitness {fit_colored:.3f} < {cfg.min_colored_icp_fitness:.2f}")
+            issues.append(f"fitness {fit_colored:.3f} (src {fit_colored_src:.3f}) < {cfg.min_colored_icp_fitness:.2f}")
         if rmse_colored > cfg.max_colored_icp_rmse_m:
             issues.append(f"rmse {rmse_colored * 1000.0:.2f}mm > {cfg.max_colored_icp_rmse_m * 1000.0:.1f}mm")
         if rot_colored > cfg.max_rotation_deg_per_frame:
@@ -818,7 +843,7 @@ def register_rgbd_pair(
                 "colored_icp",
                 rot_colored,
                 trans_colored,
-                f"fitness={fit_colored:.2f} rmse={rmse_colored * 1000.0:.1f}mm",
+                f"fitness={fit_colored:.2f} (src={fit_colored_src:.2f}) rmse={rmse_colored * 1000.0:.1f}mm",
             )
         colored_status = "FAIL: " + ", ".join(issues)
     except Exception as exc:
@@ -831,7 +856,8 @@ def register_rgbd_pair(
 
     # 4. Geometric Fallback (FPFH + RANSAC -> Point-to-Plane ICP)
     try:
-        fb_T, fb_fit, fb_rmse = register_frame_pair(src_pcd, tgt_pcd, cfg)
+        fb_T, fb_fit_src, fb_rmse = register_frame_pair(src_pcd, tgt_pcd, cfg)
+        fb_fit = compute_mutual_fitness(fb_fit_src, n_src, n_tgt)
         fb_rot = compute_rotation_deg(fb_T)
         fb_trans = compute_translation_mm(fb_T)
 
@@ -849,7 +875,7 @@ def register_rgbd_pair(
                 "fpfh_fallback",
                 fb_rot,
                 fb_trans,
-                f"fitness={fb_fit:.2f} rmse={fb_rmse * 1000.0:.1f}mm",
+                f"fitness={fb_fit:.2f} (src={fb_fit_src:.2f}) rmse={fb_rmse * 1000.0:.1f}mm",
             )
     except Exception as exc:
         pass

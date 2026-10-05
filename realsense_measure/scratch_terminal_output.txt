@@ -1,0 +1,97 @@
+<USER_REQUEST>
+We have a physical head scan (scan_test_35) where the final reconstruction is missing a large portion of one side of the face/head.
+
+DO NOT MODIFY ANY CODE.
+This is a forensic diagnosis only.
+
+Analyze the existing scan_test_35 data and determine exactly where the missing-side geometry is being lost.
+
+Focus ONLY on the existing pipeline:
+Stage 2 isolated per-frame clouds
+→ Stage 3 registration/transforms
+→ Stage 4 point-cloud fusion.
+
+Tasks:
+
+1. Identify the 29 frames that actually entered Stage 3 registration/fusion.
+   Note that the original capture had 31 frames:
+   - frame 02 was discarded at Stage 2 with only 118 isolated points.
+   - frame 00 was later discarded by the centroid consistency check.
+   Confirm the exact accepted frame indices from the saved outputs/logs.
+
+2. For every accepted isolated frame:
+   - report point count
+   - centroid XYZ
+   - XYZ bounding-box extents
+   - identify whether the frame is likely frontal, left 3/4, left profile, right 3/4, right profile, or rear based ONLY on available scan/registration evidence.
+   Do not guess if the evidence is insufficient.
+
+3. Determine which accepted frames contain visible geometry from the currently missing side of the head.
+   In particular, inspect the isolated point clouds for the side/profile frames near the middle/end of the 180-degree sweep.
+
+4. For those frames, compare:
+   A. their isolated local point cloud
+   B. their registered/transformed point cloud
+   C. their contribution to stage4_output.ply
+
+   Determine whether the side geometry:
+   - disappears during Stage 2,
+   - exists in Stage 2 but is misplaced during Stage 3,
+   - or exists correctly after Stage 3 but is somehow lost during Stage 4.
+
+5. Pay special attention to the registration tier.
+   The terminal shows:
+   - 24 frames accepted with landmark/Kabsch registration
+   - 4 with Colored ICP
+   - several extreme-profile landmark Kabsch solutions producing residuals around 276–515 mm.
+   Determine whether the frames responsible for the missing side were registered using landmark/Kabsch or Colored ICP.
+
+6. For the relevant frames, report the actual transform/pose diagnostics:
+   - rotation magnitude
+   - translation magnitude
+   - registration tier
+   - fitness/RMSE or landmark residual
+   - whether the edge is primary or loop closure.
+
+7. Inspect whether a side/profile frame is geometrically present but transformed onto an already-covered surface or displaced away from the head.
+
+8. Do NOT change:
+   - registration thresholds
+   - landmark logic
+   - Stage 2 isolation
+   - Stage 4 fusion
+   - measurement
+   - TSDF
+   - camera capture
+
+9. Do NOT propose a fix yet.
+
+Final output must contain:
+
+A. EXACT POINT OF FAILURE:
+   Stage 2 / Stage 3 / Stage 4
+
+B. EVIDENCE:
+   specific frame indices and numerical diagnostics.
+
+C. SIDE-COVERAGE TABLE:
+   frame | isolated points | viewpoint evidence | registration tier | residual/RMSE | likely side coverage | final contribution
+
+D. CONCLUSION:
+   explain why the missing side of the head is absent.
+
+This is a diagnosis-only task. No code changes.
+</USER_REQUEST>
+<ADDITIONAL_METADATA>
+The current local time is: 2026-10-05T09:24:41+05:30.
+
+The user's current state is as follows:
+Active Document: c:\Users\pahad\Downloads\realsense_measure\realsense_measure-main\realsense_measure\test_rgbd.py (LANGUAGE_PYTHON)
+Cursor is on line: 171
+Other open documents:
+- c:\Users\pahad\Downloads\realsense_measure\realsense_measure-main\realsense_measure\test_tsdf_bounds_regression.py (LANGUAGE_PYTHON)
+- c:\Users\pahad\Downloads\realsense_measure\realsense_measure-main\realsense_measure\camera\realsense_capture.py (LANGUAGE_PYTHON)
+- c:\Users\pahad\Downloads\realsense_measure\realsense_measure-main\realsense_measure\test_rgbd.py (LANGUAGE_PYTHON)
+- c:\Users\pahad\Downloads\realsense_measure\realsense_measure-main\realsense_measure\config.py (LANGUAGE_PYTHON)
+- c:\Users\pahad\Downloads\realsense_measure\realsense_measure-main\realsense_measure\test_human_registration.py (LANGUAGE_PYTHON)
+</ADDITIONAL_METADATA>

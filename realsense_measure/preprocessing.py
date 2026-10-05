@@ -212,6 +212,56 @@ def extract_plausible_cluster(
         # picking an implausible cluster; the caller will flag this
         return o3d.geometry.PointCloud()
 
+    # Special handling for "head" target:
+    # When jaw/chin shadows split the subject into separate head and torso clusters,
+    # the head is anatomically the superior/upper structure (smaller Y in camera frame:
+    # +X right, +Y down, +Z forward). We must not let a larger torso cluster or an
+    # older downward-drifting centroid lock the selection onto the torso.
+    if target_cfg is not None and getattr(target_cfg, "name", None) == "head":
+        if len(candidates) == 1:
+            return pcd.select_by_index(candidates[0][0])
+
+        max_pts = max(len(c[0]) for c in candidates)
+        # Determine the reference upper level from substantive clusters
+        # (at least 20% of the largest cluster or min_object_points) to prevent
+        # small noise blobs above the head from defining the upper bound.
+        substantive_thresh = max(int(0.20 * max_pts), getattr(target_cfg, "min_object_points", 150))
+        substantive = [c for c in candidates if len(c[0]) >= substantive_thresh]
+        if not substantive:
+            substantive = candidates
+
+        cluster_y = [float(np.asarray(c[1].points).mean(axis=0)[1]) for c in substantive]
+        y_top = min(cluster_y)
+
+        # Upper band: within 10 cm of the highest substantive cluster.
+        # This isolates the cranial/head region from inferior torso/chest clusters (~15-25 cm lower).
+        vertical_band_m = 0.10
+        upper_candidates = [
+            candidates[i] for i in range(len(candidates))
+            if float(np.asarray(candidates[i][1].points).mean(axis=0)[1]) <= y_top + vertical_band_m
+        ]
+        if not upper_candidates:
+            upper_candidates = candidates
+
+        # Among upper candidates, select the head cluster:
+        # Prefer higher point count, using horizontal (X, Z) proximity to last_centroid
+        # as a secondary tie-breaker (ignoring vertical Y offset so previous torso
+        # centroids cannot pull selection downward).
+        if last_centroid is not None:
+            def _head_score(cand):
+                idx, cluster = cand
+                pts = np.asarray(cluster.points)
+                c = pts.mean(axis=0)
+                dist_xz = float(np.linalg.norm(c[[0, 2]] - last_centroid[[0, 2]]))
+                return (len(idx), -dist_xz)
+
+            best_idx, _ = max(upper_candidates, key=_head_score)
+            return pcd.select_by_index(best_idx)
+
+        best_idx, _ = max(upper_candidates, key=lambda c: len(c[0]))
+        return pcd.select_by_index(best_idx)
+
+    # General / box target handling (unchanged):
     if last_centroid is not None:
         # Prefer the plausible cluster closest to last_centroid
         best_idx, _ = min(

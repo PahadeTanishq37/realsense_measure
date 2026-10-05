@@ -20,6 +20,8 @@ def fuse_point_clouds(
     aligned_frames: list[o3d.geometry.PointCloud],
     cfg: PreprocessConfig,
     skip_final_clustering: bool = False,
+    skip_outlier_removal: bool = False,
+    voxel_size: float | None = None,
 ) -> o3d.geometry.PointCloud:
     """
     Merge a list of registered, per-frame object clouds into one clean cloud.
@@ -27,9 +29,12 @@ def fuse_point_clouds(
     Steps
     -----
     1. Concatenate all frames into a single cloud.
-    2. Voxel-downsample + statistical-outlier-removal via
-       :func:`~preprocessing.downsample_and_denoise`.
-    3. (BOX only) Retain only the largest DBSCAN cluster via
+    2. Statistical-outlier-removal via :func:`~open3d.geometry.PointCloud.remove_statistical_outlier`.
+       This step is SKIPPED for human reconstructions (``skip_outlier_removal=True``)
+       because global SOR penalizes single-view profile sweeps, stripping sparse
+       lateral profile and ear geometry.
+    3. Light voxel downsample to merge near-duplicate points from overlapping angles.
+    4. (BOX only) Retain only the largest DBSCAN cluster via
        :func:`~preprocessing.extract_largest_cluster`.
 
        This step is SKIPPED for human reconstructions (``skip_final_clustering=True``)
@@ -47,6 +52,9 @@ def fuse_point_clouds(
     skip_final_clustering:
         When True, skip the DBSCAN largest-cluster pass.  Use for human scans
         where the body has complex topology.
+    skip_outlier_removal:
+        When True, skip statistical outlier removal. Use for human scans
+        to avoid stripping sparse lateral/profile facial features.
 
     Returns
     -------
@@ -63,15 +71,24 @@ def fuse_point_clouds(
         fused += frame
 
     # 1. Statistical outlier removal to kill genuine noise/speckle from across frames
-    if fused.has_points():
+    # Bypassed for human scans to preserve fine lateral/profile geometry
+    if not skip_outlier_removal and fused.has_points():
         fused, _ = fused.remove_statistical_outlier(
             nb_neighbors=cfg.outlier_neighbors,
             std_ratio=cfg.outlier_std_ratio,
         )
 
     # 2. Light voxel downsample to merge near-duplicate points from overlapping angles
-    if cfg.voxel_size_m > 0 and fused.has_points():
-        fused = fused.voxel_down_sample(voxel_size=cfg.voxel_size_m)
+    # Human scans use 2.0 mm (0.002 m) resolution; box/general scans preserve cfg.voxel_size_m (4.0 mm).
+    if voxel_size is not None:
+        eff_voxel_size = voxel_size
+    elif skip_outlier_removal:
+        eff_voxel_size = 0.002
+    else:
+        eff_voxel_size = cfg.voxel_size_m
+
+    if eff_voxel_size > 0 and fused.has_points():
+        fused = fused.voxel_down_sample(voxel_size=eff_voxel_size)
 
     # 3. Final cluster pass: drop any small stray blobs from imperfect per-frame
     # isolation that only became visible once all views were merged together.
@@ -120,11 +137,16 @@ def fuse_tsdf_volume(
     if not frames:
         return o3d.geometry.PointCloud()
 
-    # Determine volume origin and extents from initial frames
+    # Determine volume origin and extents in WORLD coordinates across all accepted frames
     all_pts = []
-    for f in frames[:min(5, len(frames))]:
+    for f, pose in zip(frames, poses):
         if hasattr(f, "pcd") and len(f.pcd.points) > 0:
-            all_pts.append(np.asarray(f.pcd.points))
+            pts_cam = np.asarray(f.pcd.points)
+            # Transform local camera points into world coordinates: p_world = pose @ p_camera
+            R = pose[:3, :3]
+            t = pose[:3, 3]
+            pts_world = (R @ pts_cam.T).T + t
+            all_pts.append(pts_world)
 
     if all_pts:
         pts_concat = np.vstack(all_pts)
@@ -171,5 +193,10 @@ def fuse_tsdf_volume(
     # Graceful fallback: point-cloud concatenation
     print("  [TSDF fallback] Volumetric extraction yielded sparse points; using point-cloud fusion.")
     pcds = [copy.deepcopy(f.pcd).transform(p) for f, p in zip(frames, poses) if hasattr(f, "pcd")]
-    return fuse_point_clouds(pcds, cfg, skip_final_clustering=skip_final_clustering)
+    return fuse_point_clouds(
+        pcds,
+        cfg,
+        skip_final_clustering=skip_final_clustering,
+        skip_outlier_removal=skip_final_clustering,
+    )
 

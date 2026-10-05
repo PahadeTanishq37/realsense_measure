@@ -334,10 +334,20 @@ class ScanPipeline:
                 else:
                     print("  [!] Manual ROI selection cancelled -- falling back to full-frame.\n")
 
+        window_name = "Stage 1: Human 180 deg Capture" if is_human_mode else "Stage 1: D455f Capture (RGB | Depth)"
+        cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+        window_initialized = False
+
         try:
             while True:
                 color_bgr, depth_m, depth_color = cam.read_with_colorized()
                 if color_bgr is None or depth_m is None:
+                    # Pump GUI messages and check abort so window never freezes during frame drop
+                    k = cv2.waitKey(1) & 0xFF
+                    if k == 27:
+                        print("  Capture aborted by user.")
+                        raise KeyboardInterrupt
+                    time.sleep(0.005)
                     continue  # dropped frame — just retry
 
                 # depth_color is the SDK-colorized BGR image (VISUALIZATION ONLY).
@@ -383,7 +393,12 @@ class ScanPipeline:
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1, cv2.LINE_AA)
 
                 preview = np.hstack([display_color, depth_panel])
-                window_name = "Stage 1: Human 180° Capture" if is_human_mode else "Stage 1: D455f Capture (RGB | Depth)"
+                if not window_initialized:
+                    disp_w = min(1280, preview.shape[1])
+                    disp_h = int(preview.shape[0] * (disp_w / preview.shape[1]))
+                    cv2.resizeWindow(window_name, disp_w, disp_h)
+                    window_initialized = True
+
                 cv2.imshow(window_name, preview)
                 key = cv2.waitKey(1) & 0xFF
 
@@ -405,33 +420,37 @@ class ScanPipeline:
                                 last_skip_warn_time = now
                         else:
                             if is_human_mode:
-                                rgbd_frame, _ = cam.capture_rgbd_frame(frame_id=len(raw_frames))
-                                if rgbd_frame is not None:
-                                    n_pts = len(rgbd_frame.pcd.points)
-                                    if n_pts < self.cfg.target.min_object_points:
-                                        print(f"  Frame discarded: only {n_pts} pts in range -- check distance to subject (0.4m - 1.2m)")
-                                    else:
-                                        if raw_frames:
-                                            prev_frame = raw_frames[-1]
-                                            prev_pcd = prev_frame.pcd if isinstance(prev_frame, RGBDFrame) else prev_frame
-                                            est_t_m, est_r_deg = _rough_motion_estimate(rgbd_frame.pcd, prev_pcd)
-                                            max_jump_t = getattr(self.cfg.registration, "max_pose_jump_translation_m", 0.15)
-                                            max_jump_r = getattr(self.cfg.registration, "max_pose_jump_rotation_deg", 45.0)
-                                            if est_t_m > max_jump_t or est_r_deg > max_jump_r:
-                                                print(
-                                                    f"  [!] WARNING: large motion since last frame "
-                                                    f"({est_t_m * 100:.0f}cm, {est_r_deg:.0f}deg) "
-                                                    f"-- consider moving slower through this section, or reduce "
-                                                    f"--interval for denser capture"
-                                                )
-                                                motion_warn_text = f"LARGE MOTION ({est_t_m * 100:.0f}cm, {est_r_deg:.0f}deg) -- MOVE SLOWER"
-                                                motion_warn_until = now + 3.0
+                                rgbd_frame = cam.create_rgbd_frame(
+                                    color_bgr=color_bgr,
+                                    depth_m=depth_m,
+                                    frame_id=len(raw_frames),
+                                    timestamp=now,
+                                )
+                                n_pts = len(rgbd_frame.pcd.points)
+                                if n_pts < self.cfg.target.min_object_points:
+                                    print(f"  Frame discarded: only {n_pts} pts in range -- check distance to subject (0.4m - 1.2m)")
+                                else:
+                                    if raw_frames:
+                                        prev_frame = raw_frames[-1]
+                                        prev_pcd = prev_frame.pcd if isinstance(prev_frame, RGBDFrame) else prev_frame
+                                        est_t_m, est_r_deg = _rough_motion_estimate(rgbd_frame.pcd, prev_pcd)
+                                        max_jump_t = getattr(self.cfg.registration, "max_pose_jump_translation_m", 0.15)
+                                        max_jump_r = getattr(self.cfg.registration, "max_pose_jump_rotation_deg", 45.0)
+                                        if est_t_m > max_jump_t or est_r_deg > max_jump_r:
+                                            print(
+                                                f"  [!] WARNING: large motion since last frame "
+                                                f"({est_t_m * 100:.0f}cm, {est_r_deg:.0f}deg) "
+                                                f"-- consider moving slower through this section, or reduce "
+                                                f"--interval for denser capture"
+                                            )
+                                            motion_warn_text = f"LARGE MOTION ({est_t_m * 100:.0f}cm, {est_r_deg:.0f}deg) -- MOVE SLOWER"
+                                            motion_warn_until = now + 3.0
 
-                                        raw_frames.append(rgbd_frame)
-                                        last_n_pts = n_pts
-                                        last_capture_time = now
-                                        last_captured_depth = depth_m.copy()
-                                        print(f"  Captured human frame {len(raw_frames):2d}: {n_pts:>6} pts with RGB-D [OK]")
+                                    raw_frames.append(rgbd_frame)
+                                    last_n_pts = n_pts
+                                    last_capture_time = now
+                                    last_captured_depth = depth_m.copy()
+                                    print(f"  Captured human frame {len(raw_frames):2d}: {n_pts:>6} pts with RGB-D [OK]")
                             else:
                                 pcd = cam.to_point_cloud(color_bgr, depth_m, roi=manual_roi)
                                 iso_test = isolate_object(pcd, self.cfg.preprocess, self.cfg.target, last_centroid=last_centroid)
@@ -468,32 +487,36 @@ class ScanPipeline:
                 # ---- Manual capture handling ---------------------------
                 elif key == 32:  # SPACE — manual capture
                     if is_human_mode:
-                        rgbd_frame, _ = cam.capture_rgbd_frame(frame_id=len(raw_frames))
-                        if rgbd_frame is not None:
-                            n_pts = len(rgbd_frame.pcd.points)
-                            if n_pts < self.cfg.target.min_object_points:
-                                print(f"  Frame discarded: only {n_pts} pts in range -- check distance to subject")
-                            else:
-                                if raw_frames:
-                                    prev_frame = raw_frames[-1]
-                                    prev_pcd = prev_frame.pcd if isinstance(prev_frame, RGBDFrame) else prev_frame
-                                    est_t_m, est_r_deg = _rough_motion_estimate(rgbd_frame.pcd, prev_pcd)
-                                    max_jump_t = getattr(self.cfg.registration, "max_pose_jump_translation_m", 0.15)
-                                    max_jump_r = getattr(self.cfg.registration, "max_pose_jump_rotation_deg", 45.0)
-                                    if est_t_m > max_jump_t or est_r_deg > max_jump_r:
-                                        print(
-                                            f"  [!] WARNING: large motion since last frame "
-                                            f"({est_t_m * 100:.0f}cm, {est_r_deg:.0f}deg) "
-                                            f"-- consider moving slower through this section, or reduce "
-                                            f"--interval for denser capture"
-                                        )
-                                        motion_warn_text = f"LARGE MOTION ({est_t_m * 100:.0f}cm, {est_r_deg:.0f}deg) -- MOVE SLOWER"
-                                        motion_warn_until = time.time() + 3.0
+                        rgbd_frame = cam.create_rgbd_frame(
+                            color_bgr=color_bgr,
+                            depth_m=depth_m,
+                            frame_id=len(raw_frames),
+                            timestamp=time.time(),
+                        )
+                        n_pts = len(rgbd_frame.pcd.points)
+                        if n_pts < self.cfg.target.min_object_points:
+                            print(f"  Frame discarded: only {n_pts} pts in range -- check distance to subject")
+                        else:
+                            if raw_frames:
+                                prev_frame = raw_frames[-1]
+                                prev_pcd = prev_frame.pcd if isinstance(prev_frame, RGBDFrame) else prev_frame
+                                est_t_m, est_r_deg = _rough_motion_estimate(rgbd_frame.pcd, prev_pcd)
+                                max_jump_t = getattr(self.cfg.registration, "max_pose_jump_translation_m", 0.15)
+                                max_jump_r = getattr(self.cfg.registration, "max_pose_jump_rotation_deg", 45.0)
+                                if est_t_m > max_jump_t or est_r_deg > max_jump_r:
+                                    print(
+                                        f"  [!] WARNING: large motion since last frame "
+                                        f"({est_t_m * 100:.0f}cm, {est_r_deg:.0f}deg) "
+                                        f"-- consider moving slower through this section, or reduce "
+                                        f"--interval for denser capture"
+                                    )
+                                    motion_warn_text = f"LARGE MOTION ({est_t_m * 100:.0f}cm, {est_r_deg:.0f}deg) -- MOVE SLOWER"
+                                    motion_warn_until = time.time() + 3.0
 
-                                raw_frames.append(rgbd_frame)
-                                last_n_pts = n_pts
-                                last_captured_depth = depth_m.copy()
-                                print(f"  Captured human frame {len(raw_frames):2d}: {n_pts:>6} pts with RGB-D [OK]")
+                            raw_frames.append(rgbd_frame)
+                            last_n_pts = n_pts
+                            last_captured_depth = depth_m.copy()
+                            print(f"  Captured human frame {len(raw_frames):2d}: {n_pts:>6} pts with RGB-D [OK]")
                     else:
                         pcd = cam.to_point_cloud(color_bgr, depth_m, roi=manual_roi)
                         iso_test = isolate_object(pcd, self.cfg.preprocess, self.cfg.target, last_centroid=last_centroid)
@@ -927,7 +950,14 @@ class ScanPipeline:
         else:
             print("  Reconstruction mode: Point Cloud Concatenation")
             is_human_mode = (self.cfg.registration.registration_mode == "rgbd_human") or (self.cfg.target.name in ("head", "body"))
-            fused = fuse_point_clouds(accepted_frames, self.cfg.preprocess, skip_final_clustering=is_human_mode)
+            human_voxel_size = 0.002 if is_human_mode else None
+            fused = fuse_point_clouds(
+                accepted_frames,
+                self.cfg.preprocess,
+                skip_final_clustering=is_human_mode,
+                skip_outlier_removal=is_human_mode,
+                voxel_size=human_voxel_size,
+            )
             fusion_name = "POINT CLOUD"
 
         print(f"  Reconstruction:\n    method: {fusion_name}\n    points: {len(fused.points):,}")
