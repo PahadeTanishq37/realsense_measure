@@ -99,6 +99,63 @@ def fuse_point_clouds(
     return fused
 
 
+def _build_isolated_depth_mask(
+    pcd: o3d.geometry.PointCloud,
+    intrinsics: o3d.camera.PinholeCameraIntrinsic,
+    depth_shape: tuple[int, int],
+    dilate_pixels: int = 1,
+) -> np.ndarray:
+    """
+    Project isolated 3D points from pcd back into 2D camera coordinates
+    to produce a boolean mask marking object pixels versus background.
+    """
+    h, w = depth_shape
+    mask = np.zeros((h, w), dtype=bool)
+    if not hasattr(pcd, "points") or len(pcd.points) == 0:
+        return mask
+
+    pts = np.asarray(pcd.points)
+    x = pts[:, 0]
+    y = pts[:, 1]
+    z = pts[:, 2]
+
+    valid_z = z > 1e-4
+    x = x[valid_z]
+    y = y[valid_z]
+    z = z[valid_z]
+
+    fx = intrinsics.intrinsic_matrix[0, 0]
+    fy = intrinsics.intrinsic_matrix[1, 1]
+    cx = intrinsics.intrinsic_matrix[0, 2]
+    cy = intrinsics.intrinsic_matrix[1, 2]
+
+    u = np.rint(fx * (x / z) + cx).astype(np.int32)
+    v = np.rint(fy * (y / z) + cy).astype(np.int32)
+
+    in_bounds = (u >= 0) & (u < w) & (v >= 0) & (v < h)
+    u = u[in_bounds]
+    v = v[in_bounds]
+
+    mask[v, u] = True
+
+    if dilate_pixels > 0:
+        try:
+            from scipy.ndimage import binary_dilation
+            mask = binary_dilation(mask, iterations=dilate_pixels)
+        except Exception:
+            d_mask = mask.copy()
+            for dy in range(-dilate_pixels, dilate_pixels + 1):
+                for dx in range(-dilate_pixels, dilate_pixels + 1):
+                    if dx == 0 and dy == 0:
+                        continue
+                    v_shifted = np.clip(v + dy, 0, h - 1)
+                    u_shifted = np.clip(u + dx, 0, w - 1)
+                    d_mask[v_shifted, u_shifted] = True
+            mask = d_mask
+
+    return mask
+
+
 def fuse_tsdf_volume(
     frames: list,
     poses: list[np.ndarray],
@@ -175,7 +232,32 @@ def fuse_tsdf_volume(
         try:
             # Extrinsic transforms world to camera: inv(pose)
             extrinsic = np.linalg.inv(pose)
-            rgbd = frame.to_rgbd_image(depth_trunc=1.5, convert_rgb_to_intensity=False)
+
+            # Mask depth to integrate ONLY isolated object geometry (Stage 2 output in frame.pcd)
+            if (
+                hasattr(frame, "depth_m")
+                and frame.depth_m is not None
+                and hasattr(frame, "pcd")
+                and len(frame.pcd.points) > 0
+                and hasattr(frame, "intrinsics")
+                and frame.intrinsics is not None
+            ):
+                mask = _build_isolated_depth_mask(
+                    frame.pcd,
+                    frame.intrinsics,
+                    frame.depth_m.shape[:2],
+                    dilate_pixels=1,
+                )
+                masked_depth = frame.depth_m.copy()
+                masked_depth[~mask] = 0.0
+                rgbd = frame.to_rgbd_image(
+                    depth_trunc=1.5,
+                    convert_rgb_to_intensity=False,
+                    depth_override=masked_depth,
+                )
+            else:
+                rgbd = frame.to_rgbd_image(depth_trunc=1.5, convert_rgb_to_intensity=False)
+
             volume.integrate(rgbd, frame.intrinsics, extrinsic)
             integrated_count += 1
         except Exception as exc:

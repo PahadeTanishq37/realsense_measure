@@ -291,6 +291,7 @@ class PipelineConfig:
 
         # Human head/body mode: apply stricter registration quality gates (min_accept_fitness = 0.50)
         # to ensure distorted or poorly aligned fallback frames get rejected rather than warping the result.
+        # Human targets also default to TSDF volumetric integration to eliminate multi-layer stacking.
         if self.target.name in ("head", "body") or self.registration.registration_mode == "rgbd_human":
             if self.registration.min_accept_fitness == 0.35:
                 self.registration.min_accept_fitness = 0.50
@@ -298,3 +299,6 @@ class PipelineConfig:
                 self.registration.min_colored_icp_fitness = 0.50
             if self.registration.registration_mode == "pointcloud":
                 self.registration.registration_mode = "rgbd_human"
+            if self.fusion_method == "pointcloud":
+                self.fusion_method = "tsdf"
+
