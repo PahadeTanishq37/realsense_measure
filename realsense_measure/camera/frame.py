@@ -47,7 +47,6 @@ class RGBDFrame:
         depth_scale: float = 1.0,
         depth_trunc: float = 1.5,
         convert_rgb_to_intensity: bool = False,
-        depth_override: np.ndarray | None = None,
     ) -> o3d.geometry.RGBDImage:
         """
         Convert to an Open3D RGBDImage for RGB-D odometry and volumetric integration.
@@ -61,16 +60,13 @@ class RGBDFrame:
         convert_rgb_to_intensity:
             Whether to convert RGB to single-channel luminance intensity.
             Typically True for RGBDOdometry, False for colored TSDF integration.
-        depth_override:
-            Optional pre-masked depth array in metres. If provided, replaces self.depth_m.
 
         Returns
         -------
         o3d.geometry.RGBDImage
         """
         color_rgb = np.ascontiguousarray(self.color_bgr[:, :, ::-1])
-        depth_src = self.depth_m if depth_override is None else depth_override
-        depth_clipped = depth_src.copy()
+        depth_clipped = self.depth_m.copy()
         depth_clipped[depth_clipped < 0.10] = 0.0
         depth_clipped[depth_clipped > depth_trunc] = 0.0
 

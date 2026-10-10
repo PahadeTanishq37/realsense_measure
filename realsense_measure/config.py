@@ -88,7 +88,7 @@ class CameraConfig:
     # Auto-capture settings
     auto_capture: bool = True
     capture_interval_s: float = 3.0   # how often a frame is automatically captured for box scans (s)
-    human_capture_interval_s: float = 1.0 # capture interval for human head/body scans (s)
+    human_capture_interval_s: float = 2.0 # capture interval for human head/body scans (s)
     skip_near_duplicate_frames: bool = True
     duplicate_depth_diff_threshold_m: float = 0.01   # min mean abs depth diff (m) to avoid duplicate capture
 
@@ -291,7 +291,6 @@ class PipelineConfig:
 
         # Human head/body mode: apply stricter registration quality gates (min_accept_fitness = 0.50)
         # to ensure distorted or poorly aligned fallback frames get rejected rather than warping the result.
-        # Human targets also default to TSDF volumetric integration to eliminate multi-layer stacking.
         if self.target.name in ("head", "body") or self.registration.registration_mode == "rgbd_human":
             if self.registration.min_accept_fitness == 0.35:
                 self.registration.min_accept_fitness = 0.50
@@ -299,6 +298,3 @@ class PipelineConfig:
                 self.registration.min_colored_icp_fitness = 0.50
             if self.registration.registration_mode == "pointcloud":
                 self.registration.registration_mode = "rgbd_human"
-            if self.fusion_method == "pointcloud":
-                self.fusion_method = "tsdf"
-

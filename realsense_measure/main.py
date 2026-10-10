@@ -62,7 +62,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--fusion",
-        default=None,
+        default="pointcloud",
         choices=["pointcloud", "tsdf"],
         help="reconstruction fusion method: pointcloud (concatenation) or tsdf (volumetric integration)",
     )
@@ -162,10 +162,7 @@ def main() -> None:
     elif args.target in ("head", "body"):
         cfg.registration.registration_mode = "rgbd_human"
 
-    if args.fusion is not None:
-        cfg.fusion_method = args.fusion
-    elif args.target in ("head", "body"):
-        cfg.fusion_method = "tsdf"
+    cfg.fusion_method = args.fusion
     if args.show_pairs:
         cfg.registration.show_registration_pairs = True
     if args.show_trajectory:
