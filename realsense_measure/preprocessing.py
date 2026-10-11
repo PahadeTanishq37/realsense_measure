@@ -182,21 +182,29 @@ def extract_plausible_cluster(
     if not pcd.has_points():
         return pcd
 
+    is_human = target_cfg is not None and getattr(target_cfg, "name", None) in ("head", "body")
+    dbscan_eps = max(cfg.cluster_eps_m, 0.035) if is_human else cfg.cluster_eps_m
+    dbscan_min_points = min(cfg.cluster_min_points, 30) if is_human else cfg.cluster_min_points
+
     labels = np.array(
         pcd.cluster_dbscan(
-            eps=cfg.cluster_eps_m,
-            min_points=cfg.cluster_min_points,
+            eps=dbscan_eps,
+            min_points=dbscan_min_points,
             print_progress=False,
         )
     )
     if labels.size == 0 or labels.max() < 0:
         return pcd
 
+    unique_labels = np.unique(labels[labels >= 0])
+    cluster_sizes = [int(np.sum(labels == lbl)) for lbl in unique_labels]
+    print(f"[preprocessing] found {len(unique_labels)} clusters (sizes: {cluster_sizes})")
+
     min_size = target_cfg.expected_min_size_m if target_cfg else 0.0
     max_size = target_cfg.expected_max_size_m if target_cfg else float("inf")
 
     candidates: list[tuple[np.ndarray, o3d.geometry.PointCloud]] = []
-    for label in np.unique(labels[labels >= 0]):
+    for label in unique_labels:
         idx = np.where(labels == label)[0]
         cluster = pcd.select_by_index(idx)
         extent = cluster.get_axis_aligned_bounding_box().get_extent()
@@ -207,59 +215,88 @@ def extract_plausible_cluster(
             continue
         candidates.append((idx, cluster))
 
-    if not candidates:
-        # Nothing plausible found — return empty rather than silently
-        # picking an implausible cluster; the caller will flag this
+    if not candidates and not is_human:
+        # Nothing plausible found for box/general target
         return o3d.geometry.PointCloud()
 
-    # Special handling for "head" target:
-    # When jaw/chin shadows split the subject into separate head and torso clusters,
+    # Special handling for "head" and "body" targets:
+    # When jaw/chin shadows split the subject into separate head and torso/neck clusters,
     # the head is anatomically the superior/upper structure (smaller Y in camera frame:
-    # +X right, +Y down, +Z forward). We must not let a larger torso cluster or an
-    # older downward-drifting centroid lock the selection onto the torso.
-    if target_cfg is not None and getattr(target_cfg, "name", None) == "head":
-        if len(candidates) == 1:
-            return pcd.select_by_index(candidates[0][0])
+    # +X right, +Y down, +Z forward). We identify the primary cranial/head cluster, and then
+    # merge adjacent clusters (neck, chin, shoulders) within anatomical proximity to prevent gaps.
+    if is_human:
+        if candidates:
+            if getattr(target_cfg, "name", None) == "head":
+                if len(candidates) == 1:
+                    best_idx = candidates[0][0]
+                else:
+                    max_pts = max(len(c[0]) for c in candidates)
+                    substantive_thresh = max(int(0.20 * max_pts), getattr(target_cfg, "min_object_points", 150))
+                    substantive = [c for c in candidates if len(c[0]) >= substantive_thresh]
+                    if not substantive:
+                        substantive = candidates
 
-        max_pts = max(len(c[0]) for c in candidates)
-        # Determine the reference upper level from substantive clusters
-        # (at least 20% of the largest cluster or min_object_points) to prevent
-        # small noise blobs above the head from defining the upper bound.
-        substantive_thresh = max(int(0.20 * max_pts), getattr(target_cfg, "min_object_points", 150))
-        substantive = [c for c in candidates if len(c[0]) >= substantive_thresh]
-        if not substantive:
-            substantive = candidates
+                    cluster_y = [float(np.asarray(c[1].points).mean(axis=0)[1]) for c in substantive]
+                    y_top = min(cluster_y)
 
-        cluster_y = [float(np.asarray(c[1].points).mean(axis=0)[1]) for c in substantive]
-        y_top = min(cluster_y)
+                    vertical_band_m = 0.12
+                    upper_candidates = [
+                        candidates[i] for i in range(len(candidates))
+                        if float(np.asarray(candidates[i][1].points).mean(axis=0)[1]) <= y_top + vertical_band_m
+                    ]
+                    if not upper_candidates:
+                        upper_candidates = candidates
 
-        # Upper band: within 10 cm of the highest substantive cluster.
-        # This isolates the cranial/head region from inferior torso/chest clusters (~15-25 cm lower).
-        vertical_band_m = 0.10
-        upper_candidates = [
-            candidates[i] for i in range(len(candidates))
-            if float(np.asarray(candidates[i][1].points).mean(axis=0)[1]) <= y_top + vertical_band_m
-        ]
-        if not upper_candidates:
-            upper_candidates = candidates
+                    if last_centroid is not None:
+                        def _head_score(cand):
+                            idx, cluster = cand
+                            pts = np.asarray(cluster.points)
+                            c = pts.mean(axis=0)
+                            dist_xz = float(np.linalg.norm(c[[0, 2]] - last_centroid[[0, 2]]))
+                            return (len(idx), -dist_xz)
 
-        # Among upper candidates, select the head cluster:
-        # Prefer higher point count, using horizontal (X, Z) proximity to last_centroid
-        # as a secondary tie-breaker (ignoring vertical Y offset so previous torso
-        # centroids cannot pull selection downward).
-        if last_centroid is not None:
-            def _head_score(cand):
-                idx, cluster = cand
-                pts = np.asarray(cluster.points)
-                c = pts.mean(axis=0)
-                dist_xz = float(np.linalg.norm(c[[0, 2]] - last_centroid[[0, 2]]))
-                return (len(idx), -dist_xz)
+                        best_idx, _ = max(upper_candidates, key=_head_score)
+                    else:
+                        best_idx, _ = max(upper_candidates, key=lambda c: len(c[0]))
+            else:
+                # Body target
+                if last_centroid is not None:
+                    best_idx, _ = min(
+                        candidates,
+                        key=lambda c: (
+                            np.linalg.norm(np.asarray(c[1].points).mean(axis=0) - last_centroid),
+                            -len(c[0]),
+                        ),
+                    )
+                else:
+                    best_idx, _ = max(candidates, key=lambda c: len(c[0]))
+        else:
+            largest_label = int(np.bincount(labels[labels >= 0]).argmax())
+            best_idx = np.where(labels == largest_label)[0]
 
-            best_idx, _ = max(upper_candidates, key=_head_score)
-            return pcd.select_by_index(best_idx)
+        # Merge adjacent / nearby clusters (neck, jaw, shoulders) within anatomical distance of main centroid
+        main_cluster = pcd.select_by_index(best_idx)
+        main_centroid = np.asarray(main_cluster.points).mean(axis=0)
+        merged_indices = [best_idx]
 
-        best_idx, _ = max(upper_candidates, key=lambda c: len(c[0]))
-        return pcd.select_by_index(best_idx)
+        proximity_limit_m = 0.35 if getattr(target_cfg, "name", None) == "body" else 0.28
+        for label in unique_labels:
+            other_idx = np.where(labels == label)[0]
+            if np.array_equal(other_idx, best_idx):
+                continue
+            other_cluster = pcd.select_by_index(other_idx)
+            other_centroid = np.asarray(other_cluster.points).mean(axis=0)
+            dist_to_main = float(np.linalg.norm(other_centroid - main_centroid))
+
+            if dist_to_main <= proximity_limit_m:
+                merged_indices.append(other_idx)
+                print(
+                    f"[preprocessing] merged adjacent neck/body cluster "
+                    f"(size: {len(other_idx)}, dist: {dist_to_main:.2f}m) into main head cluster"
+                )
+
+        final_indices = np.concatenate(merged_indices)
+        return pcd.select_by_index(final_indices)
 
     # General / box target handling (unchanged):
     if last_centroid is not None:
@@ -327,23 +364,61 @@ def isolate_object(
 def reject_positional_outliers(
     frames: list[o3d.geometry.PointCloud],
     max_dev_m: float,
+    target_name: str | None = None,
 ) -> tuple[list[int], list[tuple[int, float]]]:
     """
-    Drop frames whose object centroid is far from the median centroid.
+    Drop frames whose object centroid jumps away from the expected object trajectory.
 
-    A size-plausibility check cannot tell a background blob from the object
-    when both are object-sized.  But if the camera is roughly fixed on the
-    object, the object's centroid should stay put from frame to frame while a
-    wrongly-picked background cluster jumps to a very different place.
+    For human head/body mode:
+      The subject remains static while the camera sweeps in an arc. The camera-relative
+      object centroid shifts legitimately across the orbit. An EMA-smoothed running centroid
+      tolerates gradual arc motion and only rejects sudden jumps (> 1.5x step and > max_dev_m).
+
+    For box/object mode:
+      Compares each frame's centroid against the global median position (unchanged).
 
     Returns
     -------
     keep:      indices of frames to keep
-    rejected:  list of (index, distance_from_median_m) for dropped frames
+    rejected:  list of (index, distance_from_reference_m) for dropped frames
     """
     if len(frames) < 3:
         return list(range(len(frames))), []
+
     cents = np.array([np.asarray(f.points).mean(axis=0) for f in frames])
+
+    # Human head/body orbit tracking
+    if target_name in ("head", "body"):
+        keep: list[int] = [0]
+        rejected: list[tuple[int, float]] = []
+
+        running_centroid = cents[0].copy()
+        alpha = 0.35          # EMA smoothing factor for orbital arc
+        typical_step = 0.08   # baseline nominal step delta (80 mm)
+
+        print(f"  [positional-filter] frame #00: reference origin centroid -- KEPT")
+        for i in range(1, len(frames)):
+            c_i = cents[i]
+            dev = float(np.linalg.norm(c_i - running_centroid))
+            last_kept_c = cents[keep[-1]]
+            step_dist = float(np.linalg.norm(c_i - last_kept_c))
+
+            # Dynamic threshold tolerating orbital sweep:
+            # Tolerates gradual arc sweep, only flags sudden jumps exceeding 1.5x typical step / threshold
+            allowed_threshold = max(max_dev_m * 1.5, 1.5 * typical_step, 0.25)
+
+            if dev <= allowed_threshold:
+                keep.append(i)
+                typical_step = 0.7 * typical_step + 0.3 * step_dist
+                running_centroid = alpha * c_i + (1.0 - alpha) * running_centroid
+                print(f"  [positional-filter] frame #{i:02d}: centroid deviation {dev:.2f}m <= {allowed_threshold:.2f}m (gradual arc) -- KEPT")
+            else:
+                rejected.append((i, dev))
+                print(f"  [positional-filter] frame #{i:02d}: sudden centroid jump {dev:.2f}m > {allowed_threshold:.2f}m -- DISCARDED")
+
+        return keep, rejected
+
+    # Box / standard mode (exact original global median comparison):
     median = np.median(cents, axis=0)
     dists = np.linalg.norm(cents - median, axis=1)
     keep = [i for i, d in enumerate(dists) if d <= max_dev_m]

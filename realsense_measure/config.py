@@ -62,6 +62,23 @@ class DepthVisConfig:
 
 
 @dataclass
+class LandmarkConfig:
+    """Settings for facial landmark depth sampling and quality scoring."""
+    max_depth_variance_m2: float = 1e-5        # ~3mm std depth variance threshold (m^2)
+    min_valid_ratio: float = 0.5               # minimum non-zero depth pixel ratio in patch
+
+
+@dataclass
+class HeadCaptureConfig:
+    """Real-time feedback thresholds during human/head capture."""
+    enabled: bool = True                       # enable real-time landmark tracking during capture
+    min_landmarks_for_lock: int = 4            # minimum landmarks detected to consider tracking locked
+    min_frames_for_low_lock: int = 3           # frames without good lock before yellow warning
+    max_frames_without_lock: int = 8           # hard cap frames without lock before red coverage gap warning
+    max_landmark_px_motion: float = 40.0       # max average pixel displacement between frames before red too-fast warning
+
+
+@dataclass
 class CameraConfig:
     """RealSense D455(f) stream and post-processing filter settings."""
 
@@ -94,6 +111,9 @@ class CameraConfig:
 
     # Depth visualisation settings (preview window only — no effect on data).
     depth_vis: DepthVisConfig = field(default_factory=DepthVisConfig)
+
+    # Real-time feedback settings for human/head capture
+    head_capture: HeadCaptureConfig = field(default_factory=HeadCaptureConfig)
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +181,12 @@ class RegistrationConfig:
     # "rgbd_human" : calibrated RGB-D odometry -> colored ICP -> quality gate -> pose graph (optimal for human face/head/body)
     registration_mode: str = "pointcloud"
 
+    # Facial landmark guidance (for "rgbd_human" mode)
+    use_landmarks: bool = True                 # seed pairwise registration with 3D facial landmarks when available
+    min_seed_dense_fitness: float = 0.30       # minimum dense-surface fitness required to accept landmark Kabsch seed
+    max_depth_variance_m2: float = 1e-5        # max depth variance threshold (m^2)
+    landmark_cfg: LandmarkConfig = field(default_factory=LandmarkConfig)
+
     # Multiway pose-graph registration settings
     use_multiway: bool = False  # sequential is the safer default; set True to use the (corrected, gated) pose graph
     loop_closure_search_window: int = 4   # how many frames back, beyond the immediate previous frame, to also test for a good registration — catches cases where frame i overlaps with frame i-3 or i-4 even though it wasn't captured immediately after it
@@ -185,7 +211,12 @@ class RegistrationConfig:
     min_colored_icp_fitness: float = 0.45      # minimum inlier ratio for colored ICP
     min_loop_closure_fitness: float = 0.65     # minimum inlier fitness ratio for non-consecutive loop-closure edges (prevents weak cross-profile tension)
     max_colored_icp_rmse_m: float = 0.008      # maximum allowable inlier RMSE (8 mm)
+    max_pair_centroid_dist_m: float = 0.50     # maximum centroid distance between candidate source and target frames to attempt Colored ICP
     search_accepted_window: int = 4            # search up to 4 previously accepted frames when consecutive fails
+
+    # Fusion eligibility thresholds (stricter secondary gate for Stage 4 fusion)
+    min_fitness_for_fusion: float = 0.60                  # frames with fitness < 0.60 keep pose in graph but are excluded from dense Stage 4 fusion
+    max_landmark_residual_for_fusion_mm: float = 5.0      # landmark frames with residual > 5.0mm excluded from dense Stage 4 fusion
 
     # Visualisation toggles
     show_registration_pairs: bool = False      # display before/after pairwise alignment window
@@ -269,6 +300,7 @@ class PipelineConfig:
     preprocess: PreprocessConfig = field(default_factory=PreprocessConfig)
     registration: RegistrationConfig = field(default_factory=RegistrationConfig)
     target: TargetConfig = field(default_factory=TargetConfig)
+    head_capture: HeadCaptureConfig = field(default_factory=HeadCaptureConfig)
 
     # Developer / debug toggles
     show_stage_windows: bool = True   # pop up an Open3D window after each stage
@@ -298,3 +330,9 @@ class PipelineConfig:
                 self.registration.min_colored_icp_fitness = 0.50
             if self.registration.registration_mode == "pointcloud":
                 self.registration.registration_mode = "rgbd_human"
+            # Finer TSDF voxel resolution for head/body fusion (1.5 - 2.0 mm) and tight truncation
+            if self.tsdf_voxel_length_m >= 0.003:
+                self.tsdf_voxel_length_m = 0.002
+            self.tsdf_trunc_m = 4.0 * self.tsdf_voxel_length_m
+
+        self.camera.head_capture = self.head_capture

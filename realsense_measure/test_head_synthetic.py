@@ -197,6 +197,7 @@ def run_all_tests() -> bool:
     ))
 
     # 8. Ambiguous Orientation (Pure Featureless Sphere)
+    np.random.seed(42)
     sphere_mesh = o3d.geometry.TriangleMesh.create_sphere(radius=0.10)
     pcd_8 = sphere_mesh.sample_points_poisson_disk(number_of_points=3000)
     res_8 = target.measure(target.segment(pcd_8))
@@ -244,10 +245,106 @@ def run_all_tests() -> bool:
     return all_passed
 
 
+def test_neck_region_preservation_isolate_register_fuse() -> bool:
+    print("\n" + "=" * 115)
+    print("  Testing Neck-to-Head Preservation through Isolate -> Register -> Fuse Pipeline")
+    print("=" * 115)
+    import copy
+    from config import PreprocessConfig, RegistrationConfig, TargetConfig
+    from preprocessing import isolate_object
+    from registration import register_frame_pair
+    from reconstruction import fuse_point_clouds
+
+    np.random.seed(42)
+    # 1. Build head+neck+shoulders mesh with intentionally sparse/noisy neck band
+    # to simulate sensor dropouts at the chin-to-neck transition.
+    pcd_full = create_head_with_neck_shoulders(n_pts=8000)
+    pts = np.asarray(pcd_full.points)
+
+    # Induce an intentionally sparse/noisy neck dropout zone (y in [-0.17, -0.13])
+    neck_mask = (pts[:, 1] >= -0.17) & (pts[:, 1] <= -0.13)
+    drop_indices = np.where(neck_mask)[0]
+    # Keep 70% of points in this weak-spot band and add noise, simulating real sensor dropout
+    keep_drop = np.random.choice(drop_indices, size=int(0.70 * len(drop_indices)), replace=False)
+    remove_mask = np.zeros(len(pts), dtype=bool)
+    remove_mask[drop_indices] = True
+    remove_mask[keep_drop] = False
+    retained_indices = np.where(~remove_mask)[0]
+
+    pcd_f0 = pcd_full.select_by_index(retained_indices)
+    # Add subtle sensor noise in the neck transition
+    f0_pts = np.asarray(pcd_f0.points)
+    f0_neck_mask = (f0_pts[:, 1] >= -0.17) & (f0_pts[:, 1] <= -0.13)
+    f0_pts[f0_neck_mask] += np.random.normal(0, 0.002, size=(np.sum(f0_neck_mask), 3))
+    pcd_f0.points = o3d.utility.Vector3dVector(f0_pts)
+
+    # Create a second frame slightly rotated (3 degrees around Y) to test registration
+    R_step = o3d.geometry.get_rotation_matrix_from_xyz((0, np.deg2rad(3.0), 0))
+    pcd_f1 = copy.deepcopy(pcd_f0).rotate(R_step, center=(0, 0, 0))
+
+    cfg_prep = PreprocessConfig()
+    cfg_reg = RegistrationConfig()
+    target_cfg = TargetConfig(name="head")
+
+    # Step 1: Preprocessing (isolate_object)
+    iso_f0 = isolate_object(pcd_f0, cfg_prep, target_cfg=target_cfg)
+    iso_f1 = isolate_object(pcd_f1, cfg_prep, target_cfg=target_cfg)
+
+    assert iso_f0.has_points(), "Frame 0 failed object isolation"
+    assert iso_f1.has_points(), "Frame 1 failed object isolation"
+
+    # Step 2: Registration
+    T_10, fit, rmse = register_frame_pair(iso_f1, iso_f0, cfg_reg)
+    assert fit >= cfg_reg.min_accept_fitness, f"Registration failed (fitness={fit:.2f})"
+    iso_f1_trans = copy.deepcopy(iso_f1).transform(T_10)
+
+    # Step 3: Fusion
+    fused = fuse_point_clouds([iso_f0, iso_f1_trans], cfg_prep, skip_final_clustering=True, skip_outlier_removal=True)
+    fused_pts = np.asarray(fused.points)
+    assert len(fused_pts) > 0, "Fused point cloud is empty"
+
+    # Evaluate point density across bands
+    # Head region (inferior cranium): y in [-0.10, -0.04]
+    # Neck region: y in [-0.18, -0.12]
+    # Shoulder region: y in [-0.26, -0.20]
+    head_band = (fused_pts[:, 1] >= -0.10) & (fused_pts[:, 1] <= -0.04)
+    neck_band = (fused_pts[:, 1] >= -0.18) & (fused_pts[:, 1] <= -0.12)
+    shoulder_band = (fused_pts[:, 1] >= -0.26) & (fused_pts[:, 1] <= -0.20)
+
+    n_head = int(np.sum(head_band))
+    n_neck = int(np.sum(neck_band))
+    n_shoulders = int(np.sum(shoulder_band))
+
+    # Cross-sectional surface area estimates:
+    # Neck cylinder radius ~0.045, height 0.06 -> surface ~ 0.017 m^2
+    # Head band radius ~0.09, height 0.06 -> surface ~ 0.034 m^2 (~2x larger area)
+    density_head = n_head / 0.034
+    density_neck = n_neck / 0.017
+    density_shoulder = n_shoulders / 0.045
+
+    print(f"  Head band points:      {n_head} (area-density: {density_head:.0f} pts/m^2)")
+    print(f"  Neck band points:      {n_neck} (area-density: {density_neck:.0f} pts/m^2)")
+    print(f"  Shoulder band points:  {n_shoulders} (area-density: {density_shoulder:.0f} pts/m^2)")
+
+    # Assertions:
+    # 1. Neck and shoulders must NOT be zero/stripped
+    assert n_neck > 50, f"Neck region was clipped! Only {n_neck} points found in neck band."
+    assert n_shoulders > 50, f"Shoulder region was clipped! Only {n_shoulders} points found in shoulder band."
+
+    # 2. Reasonable density: neck density should be at least 50% of the adjacent head density
+    density_ratio = density_neck / density_head
+    print(f"  Neck-to-head density ratio: {density_ratio:.2f} (threshold: >= 0.50)")
+    assert density_ratio >= 0.50, f"Neck region too sparse: density ratio {density_ratio:.2f} < 0.50"
+
+    print("  PASS: Neck-to-head bridge preserved with healthy point density throughout.")
+    return True
+
+
 if __name__ == "__main__":
-    success = run_all_tests()
-    if success:
-        print("\nALL 8 HEAD SYNTHETIC TESTS PASSED SUCCESSFULLY.")
+    success_envelope = run_all_tests()
+    success_neck = test_neck_region_preservation_isolate_register_fuse()
+    if success_envelope and success_neck:
+        print("\nALL HEAD SYNTHETIC TESTS (ENVELOPE SUITE + NECK PRESERVATION) PASSED SUCCESSFULLY.")
     else:
         print("\nSOME HEAD SYNTHETIC TESTS FAILED.")
         exit(1)

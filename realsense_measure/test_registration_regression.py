@@ -99,9 +99,97 @@ def main() -> int:
         if not ok:
             failures.append(f"junk frame / {name}")
 
+    # 3) pose-jump bounds scaling for human pose-graph (TASK 3)
+    from camera.frame import RGBDFrame
+
+    cfg_jump = RegistrationConfig()
+    cfg_jump.max_pose_jump_translation_m = 0.15
+    cfg_jump.max_pose_jump_rotation_deg = 45.0
+
+    flat_bound_t = cfg_jump.max_pose_jump_translation_m
+    flat_bound_r = cfg_jump.max_pose_jump_rotation_deg
+
+    # Frame N occurs 5 frames after the last accepted frame (frame 0), i.e. 4 intermediate rejected frames
+    frames_since_accepted_step = 4
+    eff_bound_t = min(
+        cfg_jump.max_pose_jump_translation_m * (1 + frames_since_accepted_step),
+        cfg_jump.max_pose_jump_translation_m * 6.0
+    )
+    eff_bound_r = min(
+        cfg_jump.max_pose_jump_rotation_deg * (1 + frames_since_accepted_step),
+        cfg_jump.max_pose_jump_rotation_deg * 6.0
+    )
+
+    jump_t = 0.40  # 0.4m
+    jump_r = 50.0  # 50 deg
+
+    # Assert scaled_bound > flat_bound
+    assert eff_bound_t > flat_bound_t, f"eff_bound_t ({eff_bound_t}) must be > flat_bound_t ({flat_bound_t})"
+    assert eff_bound_r > flat_bound_r, f"eff_bound_r ({eff_bound_r}) must be > flat_bound_r ({flat_bound_r})"
+
+    # Assert it would have been REJECTED under flat bounds
+    flat_passed = (jump_t <= flat_bound_t) and (jump_r <= flat_bound_r)
+    assert not flat_passed, "0.4m / 50deg jump must fail flat bounds"
+
+    # Assert it is ACCEPTED under scaled bounds
+    scaled_passed = (jump_t <= eff_bound_t) and (jump_r <= eff_bound_r)
+    assert scaled_passed, "0.4m / 50deg jump must pass scaled bounds"
+
+    # Assert truly implausible jump (2m) is still REJECTED even with maximum scaling (6x cap)
+    eff_bound_t_max = min(
+        cfg_jump.max_pose_jump_translation_m * (1 + 10),
+        cfg_jump.max_pose_jump_translation_m * 6.0
+    )
+    implausible_jump_t = 2.0
+    cap_passed = (implausible_jump_t <= eff_bound_t_max)
+    assert not cap_passed, "2.0m translation must be rejected under 6x max cap"
+
+    # End-to-end simulation through build_pose_graph_rgbd
+    intr = o3d.camera.PinholeCameraIntrinsic(640, 480, 600, 600, 320, 240)
+    dummy_pcd = o3d.geometry.PointCloud()
+    dummy_pcd.points = o3d.utility.Vector3dVector(np.random.uniform(-0.1, 0.1, size=(50, 3)))
+    sim_frames = [
+        RGBDFrame(i, np.zeros((10, 10, 3), dtype=np.uint8), np.ones((10, 10), dtype=np.float32), dummy_pcd, float(i), intr)
+        for i in range(7)
+    ]
+
+    R_50 = o3d.geometry.get_rotation_matrix_from_axis_angle(np.array([0, 1, 0]) * np.deg2rad(50.0))
+    T_large = np.eye(4)
+    T_large[:3, :3] = R_50
+    T_large[:3, 3] = [0.40, 0.0, 0.0]
+
+    T_implausible = np.eye(4)
+    T_implausible[0, 3] = 2.0
+
+    def mock_register_pair(src, dst, c, initial_guess=None):
+        if src.frame_id in (1, 2, 3, 4):
+            return np.eye(4), 0.1, 0.1, False, "none", 0.0, 0.0, "low fitness"
+        elif src.frame_id == 5:
+            return T_large, 0.95, 0.001, True, "colored_icp", 50.0, 400.0, "fitness=0.95"
+        elif src.frame_id == 6:
+            return T_implausible, 0.95, 0.001, True, "colored_icp", 0.0, 2000.0, "fitness=0.95"
+        return np.eye(4), 0.95, 0.001, True, "colored_icp", 0.0, 0.0, "fitness=0.95"
+
+    orig_pair = reg.register_rgbd_pair
+    reg.register_rgbd_pair = mock_register_pair
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            pg, node_of, diag, n_odom, n_loop, pair_logs, poses, best_methods, best_scores, rej = reg.build_pose_graph_rgbd(sim_frames, cfg_jump)
+    finally:
+        reg.register_rgbd_pair = orig_pair
+
+    f5_ok = diag[5] is not None and diag[5][2] is True
+    f6_rejected = diag[6] is None or diag[6][2] is False
+
+    ok_jump = (eff_bound_t > flat_bound_t) and not flat_passed and scaled_passed and not cap_passed and f5_ok and f6_rejected
+    print(f"[pose jump   ] scaled bound {eff_bound_t:.2f}m > flat {flat_bound_t:.2f}m  frame5 accepted={f5_ok} (flat would reject={not flat_passed})  frame6(2m) rejected={f6_rejected}  {'PASS' if ok_jump else 'FAIL'}")
+    if not ok_jump:
+        failures.append("pose jump scaling")
+
     print("\nRESULT:", "PASS" if not failures else f"FAIL -> {failures}")
     return 0 if not failures else 1
 
 
 if __name__ == "__main__":
     sys.exit(main())
+

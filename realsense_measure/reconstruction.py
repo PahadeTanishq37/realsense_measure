@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 
+import cv2
 import numpy as np
 import open3d as o3d
 
@@ -158,7 +159,14 @@ def fuse_tsdf_volume(
         origin = np.array([-0.6, -0.6, 0.2])
         length = 1.6
 
-    resolution = int(np.clip(length / voxel_length, 128, 512))
+    # For head/body target, ensure fine 1.5 - 2.0 mm voxel resolution and tight truncation margin (roughly 4x voxel_length)
+    if skip_final_clustering:
+        if voxel_length >= 0.003:
+            voxel_length = 0.002
+        if sdf_trunc > 5.0 * voxel_length:
+            sdf_trunc = 4.0 * voxel_length
+
+    resolution = int(np.clip(length / voxel_length, 128, 1024))
 
     volume = o3d.pipelines.integration.UniformTSDFVolume(
         length=length,
@@ -175,7 +183,47 @@ def fuse_tsdf_volume(
         try:
             # Extrinsic transforms world to camera: inv(pose)
             extrinsic = np.linalg.inv(pose)
-            rgbd = frame.to_rgbd_image(depth_trunc=1.5, convert_rgb_to_intensity=False)
+
+            # TASK 4: Depth pre-smoothing & isolated geometry masking for head/body mode
+            depth_override = None
+            if hasattr(frame, "depth_m") and frame.depth_m is not None:
+                depth_clean = frame.depth_m.copy()
+                if skip_final_clustering:  # Head/body mode
+                    # 1. Depth pre-smoothing via morphological closing (cv2.morphologyEx)
+                    # Closes sensor dropout holes and smooths noise on facial contours
+                    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+                    depth_clean = cv2.morphologyEx(depth_clean, cv2.MORPH_CLOSE, kernel)
+
+                    # 2. Fix TSDF masking: retain only isolated geometry from Stage 2 if present
+                    if hasattr(frame, "pcd") and len(frame.pcd.points) > 0 and hasattr(frame, "intrinsics") and frame.intrinsics is not None:
+                        h, w = depth_clean.shape[:2]
+                        fx, fy = frame.intrinsics.get_focal_length()
+                        cx, cy = frame.intrinsics.get_principal_point()
+                        pts_cam = np.asarray(frame.pcd.points)
+                        z = pts_cam[:, 2]
+                        valid = z > 0.05
+                        pts_valid = pts_cam[valid]
+                        z_valid = z[valid]
+                        u = np.round((pts_valid[:, 0] * fx / z_valid) + cx).astype(int)
+                        v = np.round((pts_valid[:, 1] * fy / z_valid) + cy).astype(int)
+                        in_img = (u >= 0) & (u < w) & (v >= 0) & (v < h)
+                        if np.sum(in_img) > 50:
+                            obj_mask = np.zeros((h, w), dtype=np.uint8)
+                            obj_mask[v[in_img], u[in_img]] = 255
+                            obj_mask = cv2.dilate(obj_mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)), iterations=2)
+                            depth_clean[obj_mask == 0] = 0.0
+
+                    depth_override = depth_clean
+
+            try:
+                rgbd = frame.to_rgbd_image(
+                    depth_trunc=1.5,
+                    convert_rgb_to_intensity=False,
+                    depth_override=depth_override,
+                )
+            except TypeError:
+                rgbd = frame.to_rgbd_image(depth_trunc=1.5, convert_rgb_to_intensity=False)
+
             volume.integrate(rgbd, frame.intrinsics, extrinsic)
             integrated_count += 1
         except Exception as exc:

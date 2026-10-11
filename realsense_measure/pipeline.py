@@ -19,7 +19,8 @@ import open3d as o3d
 
 from camera.frame import RGBDFrame
 from camera.realsense_capture import RealSenseCamera
-from config import PipelineConfig
+from config import HeadCaptureConfig, PipelineConfig
+from landmarks import detect_face_landmarks_3d, project_landmarks_3d_to_pixel
 from preprocessing import isolate_object, reject_positional_outliers
 from reconstruction import fuse_point_clouds, fuse_tsdf_volume
 from registration import (
@@ -58,6 +59,77 @@ def select_roi_on_frame(
     return (x, y, w, h)
 
 
+class HeadCaptureTracker:
+    """
+    Lightweight real-time feedback tracker for human/head capture.
+
+    Tracks landmark lock quality and frame-to-frame pixel motion without
+    costly 3D registration or ICP.
+    """
+
+    def __init__(self, cfg: HeadCaptureConfig | None = None) -> None:
+        self.cfg = cfg or HeadCaptureConfig()
+        self.frames_since_good_lock: int = 0
+        self.prev_landmarks_px: dict[str, np.ndarray] | None = None
+
+    def update(
+        self,
+        landmarks_px: dict[str, np.ndarray] | None,
+    ) -> tuple[str | None, str | None, float, int]:
+        """
+        Update tracker with current frame landmarks.
+
+        Parameters
+        ----------
+        landmarks_px:
+            Dict mapping landmark name to (x, y) pixel coordinates, or None.
+
+        Returns
+        -------
+        warning_banner:
+            Warning message to display on HUD, or None if nominal.
+        warning_color:
+            'yellow', 'red', or None.
+        avg_motion_px:
+            Average pixel displacement between matched landmarks and previous frame.
+        frames_since_good_lock:
+            Rolling count of frames since >= min_landmarks_for_lock were detected.
+        """
+        num_landmarks = len(landmarks_px) if landmarks_px is not None else 0
+        if num_landmarks >= self.cfg.min_landmarks_for_lock:
+            self.frames_since_good_lock = 0
+        else:
+            self.frames_since_good_lock += 1
+
+        avg_motion_px = 0.0
+        if landmarks_px is not None and self.prev_landmarks_px is not None:
+            matched = set(landmarks_px.keys()) & set(self.prev_landmarks_px.keys())
+            if matched:
+                displacements = [
+                    float(np.linalg.norm(np.asarray(landmarks_px[k]) - np.asarray(self.prev_landmarks_px[k])))
+                    for k in matched
+                ]
+                avg_motion_px = float(np.mean(displacements))
+
+        if landmarks_px is not None and len(landmarks_px) > 0:
+            self.prev_landmarks_px = landmarks_px
+
+        warning_banner: str | None = None
+        warning_color: str | None = None
+
+        if self.frames_since_good_lock >= self.cfg.max_frames_without_lock:
+            warning_banner = "COVERAGE GAP LIKELY -- CONSIDER RE-CAPTURING THIS ANGLE"
+            warning_color = "red"
+        elif avg_motion_px > self.cfg.max_landmark_px_motion:
+            warning_banner = "TOO FAST -- SLOW DOWN ROTATION"
+            warning_color = "red"
+        elif self.frames_since_good_lock >= self.cfg.min_frames_for_low_lock:
+            warning_banner = "LOW LANDMARK LOCK -- FACE CAMERA MORE DIRECTLY"
+            warning_color = "yellow"
+
+        return warning_banner, warning_color, avg_motion_px, self.frames_since_good_lock
+
+
 def _draw_hud(
     panel: np.ndarray,
     depth_m: np.ndarray,
@@ -69,6 +141,8 @@ def _draw_hud(
     mode_title: str = "D455f STATUS",
     is_human: bool = False,
     warning_banner: str | None = None,
+    warning_color: str | tuple[int, int, int] | None = None,
+    lock_status: str | None = None,
 ) -> None:
     """
     Render the D455f status HUD onto the depth panel in-place.
@@ -115,6 +189,9 @@ def _draw_hud(
         f"Depth max       : {d_max:.3f} m",
     ]
 
+    if is_human and lock_status:
+        lines.append(f"Landmark lock   : {lock_status}")
+
     if is_human and dist_guide:
         lines.extend([
             "",
@@ -136,9 +213,16 @@ def _draw_hud(
         cv2.putText(panel, line, (10, y),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.52,
                     (0, 0, 0), 3, cv2.LINE_AA)
-        # White / yellow / orange text
+        # White / yellow / orange / red text
         if warning_banner and line == legend:
-            color = (0, 165, 255)  # Orange warning alert
+            if warning_color == "yellow":
+                color = (0, 255, 255)  # Yellow
+            elif warning_color == "red":
+                color = (0, 0, 255)    # Red
+            elif isinstance(warning_color, tuple):
+                color = warning_color
+            else:
+                color = (0, 165, 255)  # Orange warning alert
         elif line == mode_title:
             color = (0, 255, 255)
         else:
@@ -315,6 +399,9 @@ class ScanPipeline:
         last_n_pts = 0  # point count of the most recently captured cloud
         motion_warn_text: str | None = None
         motion_warn_until = 0.0
+        head_tracker_cfg = getattr(self.cfg.camera, "head_capture", getattr(self.cfg, "head_capture", HeadCaptureConfig()))
+        use_landmarks_capture = getattr(self.cfg.registration, "use_landmarks", True) and getattr(head_tracker_cfg, "enabled", True)
+        head_tracker = HeadCaptureTracker(head_tracker_cfg) if (is_human_mode and use_landmarks_capture) else None
 
         manual_roi: tuple[int, int, int, int] | None = None
         if self.cfg.target.use_manual_roi and not is_human_mode:
@@ -362,7 +449,44 @@ class ScanPipeline:
                 # Draw the rich HUD onto the depth panel
                 depth_panel = depth_color.copy()
                 hud_title = "HUMAN 180° SCAN" if is_human_mode else "D455f STATUS"
-                active_warn = motion_warn_text if time.time() < motion_warn_until else None
+
+                # Real-time feedback for human mode
+                head_warn_text: str | None = None
+                head_warn_color: str | None = None
+                lock_status_str: str | None = None
+                live_landmarks_px: dict[str, np.ndarray] | None = None
+
+                if head_tracker is not None:
+                    intr = getattr(cam, "intrinsics_o3d", None)
+                    if intr is None:
+                        h_f, w_f = color_bgr.shape[:2]
+                        intr = o3d.camera.PinholeCameraIntrinsic(w_f, h_f, w_f * 0.8, w_f * 0.8, w_f / 2.0, h_f / 2.0)
+                    try:
+                        lm_3d = detect_face_landmarks_3d(color_bgr, depth_m, intr, quiet=True)
+                        if lm_3d:
+                            live_landmarks_px = project_landmarks_3d_to_pixel(lm_3d, intr)
+                    except Exception:
+                        pass
+
+                    head_warn_text, head_warn_color, avg_disp, lock_gap = head_tracker.update(live_landmarks_px)
+                    n_lm = len(live_landmarks_px) if live_landmarks_px else 0
+                    if n_lm >= head_tracker.cfg.min_landmarks_for_lock:
+                        lock_status_str = f"LOCKED ({n_lm} pts)"
+                    elif lock_gap < head_tracker.cfg.max_frames_without_lock:
+                        lock_status_str = f"LOW LOCK ({n_lm} pts, gap={lock_gap})"
+                    else:
+                        lock_status_str = f"NO LOCK (gap={lock_gap})"
+
+                if is_human_mode and head_warn_text:
+                    active_warn = head_warn_text
+                    active_warn_color = head_warn_color
+                elif time.time() < motion_warn_until:
+                    active_warn = motion_warn_text
+                    active_warn_color = "red"
+                else:
+                    active_warn = None
+                    active_warn_color = None
+
                 _draw_hud(
                     depth_panel,
                     depth_m,
@@ -374,6 +498,8 @@ class ScanPipeline:
                     mode_title=hud_title,
                     is_human=is_human_mode,
                     warning_banner=active_warn,
+                    warning_color=active_warn_color,
+                    lock_status=lock_status_str,
                 )
 
                 display_color = color_bgr.copy()
@@ -385,6 +511,9 @@ class ScanPipeline:
                     cv2.drawMarker(display_color, (cx_c, cy_c), (0, 220, 220), cv2.MARKER_CROSS, 16, 1, cv2.LINE_AA)
                     cv2.putText(display_color, "HEAD GUIDE", (cx_c - 45, cy_c - int(h_c * 0.37)),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.40, (0, 220, 220), 1, cv2.LINE_AA)
+                    if live_landmarks_px:
+                        for pt in live_landmarks_px.values():
+                            cv2.circle(display_color, (int(pt[0]), int(pt[1])), 2, (0, 255, 255), -1, cv2.LINE_AA)
 
                 if manual_roi is not None:
                     rx, ry, rw, rh = manual_roi
@@ -621,10 +750,12 @@ class ScanPipeline:
 
             # Positional consistency: drop frames whose centroid jumps away
             keep, rejected_pos = reject_positional_outliers(
-                [f.pcd for f in isolated_rgbd], target_cfg.max_centroid_dev_m
+                [f.pcd for f in isolated_rgbd],
+                target_cfg.max_centroid_dev_m,
+                target_name=target_cfg.name,
             )
             for idx, dist in rejected_pos:
-                print(f"  isolated #{idx:02d}: centroid {dist:.2f} m from median position -- "
+                print(f"  isolated #{idx:02d}: centroid {dist:.2f} m deviation -- "
                       f"DISCARDED (likely background, not the object)")
             isolated_rgbd = [isolated_rgbd[i] for i in keep]
 
@@ -665,7 +796,11 @@ class ScanPipeline:
 
         # Positional consistency: a background blob can be object-sized, so size
         # checks alone let it through.  Drop frames whose centroid jumps away.
-        keep, rejected_pos = reject_positional_outliers(isolated, target_cfg.max_centroid_dev_m)
+        keep, rejected_pos = reject_positional_outliers(
+            isolated,
+            target_cfg.max_centroid_dev_m,
+            target_name=target_cfg.name,
+        )
         for idx, dist in rejected_pos:
             print(f"  isolated #{idx:02d}: centroid {dist:.2f} m from median position -- "
                   f"DISCARDED (likely background, not the object)")
@@ -712,7 +847,9 @@ class ScanPipeline:
             List of 4x4 camera poses (or None in sequential pointcloud mode).
         """
         print("\n" + "=" * 60)
-        is_human_mode = (self.cfg.registration.registration_mode == "rgbd_human") or (self.cfg.target.name in ("head", "body"))
+        is_human_mode = (self.cfg.registration.registration_mode == "rgbd_human") or (
+            self.cfg.target.name in ("head", "body") and self.cfg.registration.registration_mode != "pointcloud"
+        )
 
         if is_human_mode:
             print("  Stage 3: Registering human frames (RGB-D Odometry + Colored ICP + Pose Graph) ...")
@@ -720,10 +857,13 @@ class ScanPipeline:
             aligned, diagnostics, poses, summary_stats = register_sequence_rgbd_human(
                 isolated_frames, self.cfg.registration
             )
+            self.last_registration_stats = summary_stats
 
             frame_methods = summary_stats.get("frame_methods", {})
             frame_scores = summary_stats.get("frame_scores", {})
             rejection_reasons = summary_stats.get("rejection_reasons", {})
+            fusion_eligible = summary_stats.get("fusion_eligible", {})
+            fusion_reasons = summary_stats.get("fusion_reasons", {})
             print("\n" + "=" * 60)
             print("HUMAN RGB-D REGISTRATION SUMMARY (Method Diagnostics)")
             print("-----------------------------------------------------")
@@ -735,7 +875,11 @@ class ScanPipeline:
                     method = frame_methods.get(i, "none")
                     score_str = frame_scores.get(i, f"fitness={fit:.2f} rmse={rmse * 1000.0:.1f}mm")
                     if acc:
-                        print(f"    frame {i:02d}: tier={method} {score_str} ACCEPTED")
+                        if not fusion_eligible.get(i, True):
+                            reason_ex = fusion_reasons.get(i, "")
+                            print(f"    frame {i:02d}: pose accepted, EXCLUDED from fusion ({reason_ex})")
+                        else:
+                            print(f"    frame {i:02d}: tier={method} {score_str} ACCEPTED")
                     elif i in rejection_reasons:
                         print(
                             f"    frame {i:02d}: tier={method} {score_str}\n"
@@ -909,10 +1053,44 @@ class ScanPipeline:
 
         if diagnostics is not None:
             # diagnostics entries can be None for frames rejected before pose-graph assignment
-            accepted_indices = [
-                i for i, d in enumerate(diagnostics)
-                if d is not None and d[2]
-            ]
+            is_human_mode = (
+                (getattr(self.cfg.registration, "registration_mode", "") == "rgbd_human")
+                or (getattr(self.cfg.target, "name", "") in ("head", "body"))
+            )
+            min_fit_fusion = getattr(self.cfg.registration, "min_fitness_for_fusion", 0.60)
+            max_lm_res_fusion = getattr(self.cfg.registration, "max_landmark_residual_for_fusion_mm", 5.0)
+
+            frame_scores = {}
+            if hasattr(self, "last_registration_stats") and self.last_registration_stats:
+                frame_scores = self.last_registration_stats.get("frame_scores", {})
+
+            accepted_indices = []
+            for i, d in enumerate(diagnostics):
+                if d is None or not d[2]:
+                    continue
+                if i == 0:
+                    accepted_indices.append(0)
+                    continue
+
+                if is_human_mode:
+                    fit = d[0]
+                    score_str = frame_scores.get(i, "")
+                    lm_res = None
+                    if "residual=" in score_str:
+                        try:
+                            lm_res = float(score_str.split("residual=")[1].split("mm")[0])
+                        except Exception:
+                            pass
+
+                    if fit < min_fit_fusion:
+                        print(f"  frame {i}: pose accepted, EXCLUDED from fusion (fitness {fit:.2f} < {min_fit_fusion:.2f} fusion threshold)")
+                        continue
+                    if lm_res is not None and lm_res > max_lm_res_fusion:
+                        print(f"  frame {i}: pose accepted, EXCLUDED from fusion (landmark residual {lm_res:.1f}mm > {max_lm_res_fusion:.1f}mm fusion threshold)")
+                        continue
+
+                accepted_indices.append(i)
+
             accepted_frames = [aligned_frames[i] for i in accepted_indices]
             if not accepted_frames:
                 print("  [!] Warning: No frames met acceptance criteria; falling back to frame 0.")

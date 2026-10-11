@@ -108,7 +108,93 @@ def test_pipeline_fuse_human_vs_box_scoping():
     assert cfg_box.preprocess.voxel_size_m == 0.004, "Box PreprocessConfig.voxel_size_m default must remain 0.004 m"
 
 
+def test_stage4_marginal_frame_exclusion_from_fusion():
+    """
+    Verifies that:
+    1. Frames accepted into the pose graph with marginal fitness (0.45 <= fitness < 0.60)
+       or high landmark residual (> 5.0 mm) maintain connectivity in the pose graph (accepted=True in diagnostics).
+    2. Stage 4 human fusion excludes these marginal frames from dense point cloud concatenation.
+    3. High-quality frames (fitness >= 0.60) and frame 0 are retained in the fused reconstruction.
+    """
+    # 3 frames placed at distinct spatial offsets along X:
+    # Frame 0: origin [-0.05, 0.05]
+    # Frame 1: shifted to [0.15, 0.25] (marginal frame)
+    # Frame 2: shifted to [0.35, 0.45] (high quality frame)
+    np.random.seed(42)
+    def make_cloud(center_x: float, n: int = 500) -> o3d.geometry.PointCloud:
+        pts = np.column_stack([
+            np.random.uniform(center_x - 0.05, center_x + 0.05, n),
+            np.random.uniform(-0.05, 0.05, n),
+            np.random.uniform(-0.05, 0.05, n),
+        ])
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(pts)
+        return pcd
+
+    f0 = make_cloud(0.0)
+    f1 = make_cloud(0.20)
+    f2 = make_cloud(0.40)
+    frames = [f0, f1, f2]
+
+    # Diagnostics: all 3 frames accepted into the pose graph
+    # Frame 0: reference (1.0)
+    # Frame 1: marginal fitness (0.52) - passes 0.45 gate, fails 0.60 fusion gate
+    # Frame 2: high quality (0.78) - passes both gates
+    diagnostics = [
+        (1.0, 0.0, True),
+        (0.52, 0.004, True),
+        (0.78, 0.002, True),
+    ]
+
+    # Assert pose graph acceptance is preserved (all 3 accepted for connectivity)
+    pose_graph_accepted_count = sum(1 for d in diagnostics if d[2])
+    assert pose_graph_accepted_count == 3, "All 3 frames must be accepted in pose graph for connectivity"
+
+    # 1. Human / Head mode pipeline
+    cfg_head = PipelineConfig(
+        target=TargetConfig(name="head"),
+        show_stage_windows=False,
+        save_intermediate=False,
+    )
+    pipeline_head = ScanPipeline(cfg_head)
+    fused_head = pipeline_head.fuse(frames, diagnostics)
+    pts_fused = np.asarray(fused_head.points)
+
+    # Frame 0 is in [-0.06, 0.06]
+    pts_f0 = np.sum((pts_fused[:, 0] >= -0.06) & (pts_fused[:, 0] <= 0.06))
+    # Frame 1 is in [0.14, 0.26] -> MUST BE EXCLUDED (0 points)
+    pts_f1 = np.sum((pts_fused[:, 0] >= 0.14) & (pts_fused[:, 0] <= 0.26))
+    # Frame 2 is in [0.34, 0.46] -> MUST BE INCLUDED (> 0 points)
+    pts_f2 = np.sum((pts_fused[:, 0] >= 0.34) & (pts_fused[:, 0] <= 0.46))
+
+    assert pts_f0 > 0, "Reference frame 0 must be included in fused cloud"
+    assert pts_f1 == 0, f"Marginal frame 1 (fitness 0.52 < 0.60) must be EXCLUDED from fusion, found {pts_f1} pts"
+    assert pts_f2 > 0, "High-quality frame 2 (fitness 0.78 >= 0.60) must be INCLUDED in fusion"
+
+    # 2. Test landmark residual exclusion
+    # Frame 1 has fitness 0.65 (passes fitness gate) but landmark residual 7.5mm (> 5.0mm gate)
+    diagnostics_lm = [
+        (1.0, 0.0, True),
+        (0.65, 0.003, True),
+        (0.80, 0.002, True),
+    ]
+    pipeline_head.last_registration_stats = {
+        "frame_scores": {
+            1: "fitness=0.65 (src=0.65) residual=7.5mm",
+            2: "fitness=0.80 (src=0.80) residual=2.1mm",
+        }
+    }
+    fused_lm = pipeline_head.fuse(frames, diagnostics_lm)
+    pts_fused_lm = np.asarray(fused_lm.points)
+    pts_f1_lm = np.sum((pts_fused_lm[:, 0] >= 0.14) & (pts_fused_lm[:, 0] <= 0.26))
+    pts_f2_lm = np.sum((pts_fused_lm[:, 0] >= 0.34) & (pts_fused_lm[:, 0] <= 0.46))
+
+    assert pts_f1_lm == 0, f"Frame with landmark residual 7.5mm (> 5.0mm) must be EXCLUDED from fusion, found {pts_f1_lm} pts"
+    assert pts_f2_lm > 0, "Frame with landmark residual 2.1mm (<= 5.0mm) must be INCLUDED in fusion"
+
+
 if __name__ == "__main__":
     test_fuse_point_clouds_human_bypasses_sor_and_uses_2mm()
     test_pipeline_fuse_human_vs_box_scoping()
+    test_stage4_marginal_frame_exclusion_from_fusion()
     print("ALL STAGE 4 HUMAN 2.0 MM FUSION REGRESSION TESTS PASSED.")

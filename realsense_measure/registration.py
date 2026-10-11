@@ -75,30 +75,50 @@ from config import RegistrationConfig
 def rigid_transform_from_correspondences(
     src_pts: np.ndarray,
     dst_pts: np.ndarray,
+    weights: np.ndarray | None = None,
 ) -> tuple[np.ndarray, float]:
     """
-    Kabsch algorithm: finds the rigid transform (R, t) that best maps
-    src_pts onto dst_pts in a least-squares sense.
+    Weighted Kabsch algorithm: finds the rigid transform (R, t) that best maps
+    src_pts onto dst_pts in a weighted least-squares sense.
 
     Needs at least 3 non-collinear corresponding points to be well-defined;
     works best with 4 or more (see LANDMARK_INDICES in landmarks.py, which
-    provides up to 8).
+    provides up to 8/13).
+
+    Parameters
+    ----------
+    src_pts:
+        (N, 3) array of source points.
+    dst_pts:
+        (N, 3) array of destination points.
+    weights:
+        Optional (N,) array of non-negative quality weights per correspondence.
 
     Returns
     -------
     T:
         4x4 homogeneous transform mapping src_pts onto dst_pts.
     residual_mm:
-        Mean per-point distance (in mm) between dst_pts and src_pts after
+        Weighted mean per-point distance (in mm) between dst_pts and src_pts after
         applying T. Use this as a quality gate — a high residual means the
-        landmark correspondences themselves were unreliable (e.g. a bad
-        detection on one of the two frames), and the caller should fall
-        back to a different registration method rather than trust this
-        transform.
+        landmark correspondences themselves were unreliable.
     """
-    src_c = src_pts.mean(axis=0)
-    dst_c = dst_pts.mean(axis=0)
-    H = (src_pts - src_c).T @ (dst_pts - dst_c)
+    n_pts = len(src_pts)
+    if weights is None:
+        w = np.ones(n_pts, dtype=np.float64)
+    else:
+        w = np.asarray(weights, dtype=np.float64).flatten()
+        if w.size != n_pts or float(np.sum(w)) <= 1e-9:
+            w = np.ones(n_pts, dtype=np.float64)
+
+    W = float(np.sum(w))
+    src_c = np.sum(src_pts * w[:, None], axis=0) / W
+    dst_c = np.sum(dst_pts * w[:, None], axis=0) / W
+
+    src_centered = src_pts - src_c
+    dst_centered = dst_pts - dst_c
+
+    H = (src_centered * w[:, None]).T @ dst_centered
     U, S, Vt = np.linalg.svd(H)
     R = Vt.T @ U.T
     if np.linalg.det(R) < 0:
@@ -111,7 +131,8 @@ def rigid_transform_from_correspondences(
     T[:3, 3] = t
 
     recovered = (R @ src_pts.T).T + t
-    residual_mm = float(np.linalg.norm(recovered - dst_pts, axis=1).mean() * 1000)
+    dists = np.linalg.norm(recovered - dst_pts, axis=1)
+    residual_mm = float(np.sum(dists * w) / W * 1000.0)
     return T, residual_mm
 
 
@@ -373,17 +394,108 @@ def register_frame_pair_landmark_guided(
     """
     from landmarks import detect_face_landmarks_3d
 
-    src_lm = detect_face_landmarks_3d(source_color, source_depth, intrinsics_o3d)
-    dst_lm = detect_face_landmarks_3d(target_color, target_depth, intrinsics_o3d)
+    lm_cfg = getattr(cfg, "landmark_cfg", None)
+    src_lm = detect_face_landmarks_3d(source_color, source_depth, intrinsics_o3d, cfg=lm_cfg)
+    dst_lm = detect_face_landmarks_3d(target_color, target_depth, intrinsics_o3d, cfg=lm_cfg)
 
     if src_lm is not None and dst_lm is not None:
         common = sorted(set(src_lm) & set(dst_lm))
         if len(common) >= 4:
-            src_pts = np.array([src_lm[k] for k in common])
-            dst_pts = np.array([dst_lm[k] for k in common])
-            init_T, residual_mm = rigid_transform_from_correspondences(src_pts, dst_pts)
+            src_pts_list = []
+            dst_pts_list = []
+            weights_list = []
+            max_var_thresh = getattr(cfg, "max_depth_variance_m2", 1e-5)
+
+            for k in common:
+                s_item = src_lm[k]
+                d_item = dst_lm[k]
+                if isinstance(s_item, dict):
+                    s_pos = s_item["position"]
+                    s_vr = s_item.get("valid_ratio", 1.0)
+                    s_var = s_item.get("variance", 0.0)
+                else:
+                    s_pos = s_item
+                    s_vr = 1.0
+                    s_var = 0.0
+
+                if isinstance(d_item, dict):
+                    d_pos = d_item["position"]
+                    d_vr = d_item.get("valid_ratio", 1.0)
+                    d_var = d_item.get("variance", 0.0)
+                else:
+                    d_pos = d_item
+                    d_vr = 1.0
+                    d_var = 0.0
+
+                src_pts_list.append(s_pos)
+                dst_pts_list.append(d_pos)
+
+                # Weight: min(1.0, valid_ratio_src * valid_ratio_dst) / (1.0 + variance_src + variance_dst)
+                v_src_norm = s_var / max_var_thresh if (0.0 < s_var < 0.01 and max_var_thresh > 0) else s_var
+                v_dst_norm = d_var / max_var_thresh if (0.0 < d_var < 0.01 and max_var_thresh > 0) else d_var
+                w = float(min(1.0, s_vr * d_vr) / (1.0 + v_src_norm + v_dst_norm))
+                weights_list.append(w)
+
+            src_pts = np.array(src_pts_list)
+            dst_pts = np.array(dst_pts_list)
+            weights = np.array(weights_list)
+
+            init_T, residual_mm = rigid_transform_from_correspondences(src_pts, dst_pts, weights=weights)
             if residual_mm <= residual_accept_mm:
-                icp_result = _icp_refine(source_pcd, target_pcd, init_T, cfg)
+                # Post-seed dense-surface sanity check (single pass evaluation)
+                min_dense_fit = getattr(cfg, "min_seed_dense_fitness", 0.30)
+                eval_voxel = max(getattr(cfg, "voxel_size_m", 0.003) * 2.0, 0.006)
+                src_down = source_pcd.voxel_down_sample(eval_voxel) if len(source_pcd.points) > 50 else source_pcd
+                tgt_down = target_pcd.voxel_down_sample(eval_voxel) if len(target_pcd.points) > 50 else target_pcd
+
+                if not tgt_down.has_normals():
+                    tgt_down.estimate_normals(
+                        o3d.geometry.KDTreeSearchParamHybrid(radius=cfg.colored_icp_max_dist_m * 2.0, max_nn=30)
+                    )
+
+                eval_res = o3d.pipelines.registration.evaluate_registration(
+                    src_down,
+                    tgt_down,
+                    cfg.colored_icp_max_dist_m,
+                    init_T,
+                )
+                seed_dense_fitness = float(eval_res.fitness)
+
+                if seed_dense_fitness < min_dense_fit:
+                    print(
+                        f"      [landmarks] Kabsch seed rejected: dense-surface fitness "
+                        f"{seed_dense_fitness:.2f} < {min_dense_fit:.2f} threshold (residual was {residual_mm:.1f}mm) "
+                        f"-- falling through to Tier 2"
+                    )
+                    return np.eye(4), 0.0, float("inf"), "dense_sanity_failed", float(residual_mm)
+
+                # Tightened Colored ICP refinement specifically for landmark seed
+                src_temp = copy.deepcopy(source_pcd)
+                tgt_temp = copy.deepcopy(target_pcd)
+                if not src_temp.has_normals():
+                    src_temp.estimate_normals(
+                        o3d.geometry.KDTreeSearchParamHybrid(radius=cfg.colored_icp_max_dist_m * 2.0, max_nn=30)
+                    )
+                if not tgt_temp.has_normals():
+                    tgt_temp.estimate_normals(
+                        o3d.geometry.KDTreeSearchParamHybrid(radius=cfg.colored_icp_max_dist_m * 2.0, max_nn=30)
+                    )
+                try:
+                    colored_criteria = ICPConvergenceCriteria(
+                        max_iteration=50,
+                        relative_fitness=1e-7,
+                        relative_rmse=1e-7,
+                    )
+                    icp_result = registration_colored_icp(
+                        src_temp,
+                        tgt_temp,
+                        cfg.colored_icp_max_dist_m,
+                        init_T,
+                        TransformationEstimationForColoredICP(lambda_geometric=cfg.colored_icp_lambda_geom),
+                        colored_criteria,
+                    )
+                except Exception:
+                    icp_result = _icp_refine(source_pcd, target_pcd, init_T, cfg)
                 return (
                     icp_result.transformation,
                     float(icp_result.fitness),
@@ -715,9 +827,38 @@ def register_rgbd_pair(
     n_src = len(src_pcd.points)
     n_tgt = len(tgt_pcd.points)
 
+    src_id = getattr(source_frame, "frame_id", "src")
+    tgt_id = getattr(target_frame, "frame_id", "tgt")
+    pair_str = f"{src_id}->{tgt_id}"
+
+    # Overlap pre-check: AABB intersection and Centroid-to-Centroid distance
+    src_min = np.asarray(src_pcd.get_min_bound())
+    src_max = np.asarray(src_pcd.get_max_bound())
+    tgt_min = np.asarray(tgt_pcd.get_min_bound())
+    tgt_max = np.asarray(tgt_pcd.get_max_bound())
+    aabb_intersects = bool(np.all(src_min <= tgt_max) and np.all(tgt_min <= src_max))
+
+    src_centroid = np.asarray(src_pcd.get_center())
+    tgt_centroid = np.asarray(tgt_pcd.get_center())
+    centroid_dist = float(np.linalg.norm(src_centroid - tgt_centroid))
+    max_centroid_dist = float(getattr(cfg, "max_pair_centroid_dist_m", 0.50))
+    centroid_ok = centroid_dist <= max_centroid_dist
+    overlap_ok = aabb_intersects and centroid_ok
+
+    if not aabb_intersects and not centroid_ok:
+        overlap_skip_reason = f"AABB non-overlap, centroid dist {centroid_dist:.2f}m > {max_centroid_dist:.2f}m"
+    elif not aabb_intersects:
+        overlap_skip_reason = "AABB non-overlap"
+    else:
+        overlap_skip_reason = f"centroid dist {centroid_dist:.2f}m > {max_centroid_dist:.2f}m"
+
+    init_trans = np.eye(4) if initial_guess is None else initial_guess.copy()
+
     # 1. Landmark-guided registration
+    is_landmark_seeded = False
     if (
-        hasattr(source_frame, "color_bgr") and source_frame.color_bgr is not None
+        getattr(cfg, "use_landmarks", True)
+        and hasattr(source_frame, "color_bgr") and source_frame.color_bgr is not None
         and hasattr(source_frame, "depth_m") and source_frame.depth_m is not None
         and hasattr(target_frame, "color_bgr") and target_frame.color_bgr is not None
         and hasattr(target_frame, "depth_m") and target_frame.depth_m is not None
@@ -735,6 +876,7 @@ def register_rgbd_pair(
                 cfg=cfg,
             )
             if lm_method == "landmark":
+                is_landmark_seeded = True
                 lm_rot = compute_rotation_deg(lm_T)
                 lm_trans = compute_translation_mm(lm_T)
                 lm_fit = compute_mutual_fitness(lm_fit_src, n_src, n_tgt)
@@ -754,105 +896,131 @@ def register_rgbd_pair(
                         lm_trans,
                         f"fitness={lm_fit:.2f} (src={lm_fit_src:.2f}) residual={lm_res_mm:.1f}mm",
                     )
+                # Seed downstream refinement with coarse landmark transform if not immediately accepted
+                if lm_rot <= cfg.max_rotation_deg_per_frame and lm_trans <= (cfg.max_translation_m_per_frame * 1000.0):
+                    init_trans = lm_T
         except Exception:
             pass
 
-    # 2. RGB-D Odometry initial pose estimation
-    init_trans = np.eye(4) if initial_guess is None else initial_guess.copy()
-    odo_status = "NOT RUN"
-    try:
-        rgbd_source = source_frame.to_rgbd_image(depth_trunc=1.5, convert_rgb_to_intensity=True)
-        rgbd_target = target_frame.to_rgbd_image(depth_trunc=1.5, convert_rgb_to_intensity=True)
-
-        if cfg.rgbd_odometry_method == "hybrid":
-            jacobian = RGBDOdometryJacobianFromHybridTerm()
-        else:
-            jacobian = RGBDOdometryJacobianFromColorTerm()
-
-        option = OdometryOption()
-        option.depth_diff_max = cfg.colored_icp_max_dist_m * 1.5
-        option.depth_min = 0.20
-        option.depth_max = 1.50
-
-        odo_success, odo_trans, odo_info = compute_rgbd_odometry(
-            rgbd_source,
-            rgbd_target,
-            source_frame.intrinsics,
-            init_trans,
-            jacobian,
-            option,
-        )
-
-        if odo_success:
-            odo_rot = compute_rotation_deg(odo_trans)
-            odo_trans_mm = compute_translation_mm(odo_trans)
-            if odo_rot <= cfg.max_rotation_deg_per_frame and odo_trans_mm <= (cfg.max_translation_m_per_frame * 1000.0):
-                init_trans = odo_trans
-                odo_status = "PASS"
-            else:
-                odo_status = f"MOTION_EXCESSIVE (rot={odo_rot:.1f}deg, trans={odo_trans_mm:.0f}mm)"
-        else:
-            odo_status = "FAIL"
-    except Exception as exc:
-        odo_status = f"ERROR ({exc})"
-
-    # 3. Colored ICP Refinement
-    if not src_pcd.has_normals():
-        src_pcd.estimate_normals(
-            o3d.geometry.KDTreeSearchParamHybrid(radius=cfg.colored_icp_max_dist_m * 2.0, max_nn=30)
-        )
-    if not tgt_pcd.has_normals():
-        tgt_pcd.estimate_normals(
-            o3d.geometry.KDTreeSearchParamHybrid(radius=cfg.colored_icp_max_dist_m * 2.0, max_nn=30)
-        )
-
-    colored_status = "NOT RUN"
-    try:
-        colored_res = registration_colored_icp(
-            src_pcd,
-            tgt_pcd,
-            cfg.colored_icp_max_dist_m,
-            init_trans,
-            TransformationEstimationForColoredICP(lambda_geometric=cfg.colored_icp_lambda_geom),
-            ICPConvergenceCriteria(max_iteration=cfg.colored_icp_max_iterations),
-        )
-        T_colored = colored_res.transformation
-        fit_colored_src = float(colored_res.fitness)
-        fit_colored = compute_mutual_fitness(fit_colored_src, n_src, n_tgt)
-        rmse_colored = float(colored_res.inlier_rmse)
-        rot_colored = compute_rotation_deg(T_colored)
-        trans_colored = compute_translation_mm(T_colored)
-
-        # Quality gating
-        issues = []
-        if fit_colored < cfg.min_colored_icp_fitness:
-            issues.append(f"fitness {fit_colored:.3f} (src {fit_colored_src:.3f}) < {cfg.min_colored_icp_fitness:.2f}")
-        if rmse_colored > cfg.max_colored_icp_rmse_m:
-            issues.append(f"rmse {rmse_colored * 1000.0:.2f}mm > {cfg.max_colored_icp_rmse_m * 1000.0:.1f}mm")
-        if rot_colored > cfg.max_rotation_deg_per_frame:
-            issues.append(f"rotation {rot_colored:.1f}deg > {cfg.max_rotation_deg_per_frame:.0f}deg")
-        if trans_colored > (cfg.max_translation_m_per_frame * 1000.0):
-            issues.append(f"translation {trans_colored:.1f}mm > {cfg.max_translation_m_per_frame * 1000.0:.0f}mm")
-
-        if not issues:
-            return (
-                T_colored,
-                fit_colored,
-                rmse_colored,
-                True,
-                "colored_icp",
-                rot_colored,
-                trans_colored,
-                f"fitness={fit_colored:.2f} (src={fit_colored_src:.2f}) rmse={rmse_colored * 1000.0:.1f}mm",
-            )
-        colored_status = "FAIL: " + ", ".join(issues)
-    except Exception as exc:
-        colored_status = f"ERROR ({exc})"
+    # Check overlap before invoking RGB-D odometry or Colored ICP
+    if not overlap_ok:
+        print(f"[overlap-check] pair {pair_str} SKIPPED colored-icp ({overlap_skip_reason}) -- trying FPFH fallback")
+        colored_status = f"SKIPPED ({overlap_skip_reason})"
         T_colored = init_trans
         fit_colored = 0.0
         rmse_colored = float("inf")
         rot_colored = 0.0
         trans_colored = 0.0
+    else:
+        # 2. RGB-D Odometry initial pose estimation
+        odo_status = "NOT RUN"
+        try:
+            rgbd_source = source_frame.to_rgbd_image(depth_trunc=1.5, convert_rgb_to_intensity=True)
+            rgbd_target = target_frame.to_rgbd_image(depth_trunc=1.5, convert_rgb_to_intensity=True)
+
+            if cfg.rgbd_odometry_method == "hybrid":
+                jacobian = RGBDOdometryJacobianFromHybridTerm()
+            else:
+                jacobian = RGBDOdometryJacobianFromColorTerm()
+
+            option = OdometryOption()
+            option.depth_diff_max = cfg.colored_icp_max_dist_m * 1.5
+            option.depth_min = 0.20
+            option.depth_max = 1.50
+
+            odo_success, odo_trans, odo_info = compute_rgbd_odometry(
+                rgbd_source,
+                rgbd_target,
+                source_frame.intrinsics,
+                init_trans,
+                jacobian,
+                option,
+            )
+
+            if odo_success:
+                odo_rot = compute_rotation_deg(odo_trans)
+                odo_trans_mm = compute_translation_mm(odo_trans)
+                if odo_rot <= cfg.max_rotation_deg_per_frame and odo_trans_mm <= (cfg.max_translation_m_per_frame * 1000.0):
+                    init_trans = odo_trans
+                    odo_status = "PASS"
+                else:
+                    odo_status = f"MOTION_EXCESSIVE (rot={odo_rot:.1f}deg, trans={odo_trans_mm:.0f}mm)"
+            else:
+                odo_status = "FAIL"
+        except Exception as exc:
+            odo_status = f"ERROR ({exc})"
+
+        # 3. Colored ICP Refinement
+        if not src_pcd.has_normals():
+            src_pcd.estimate_normals(
+                o3d.geometry.KDTreeSearchParamHybrid(radius=cfg.colored_icp_max_dist_m * 2.0, max_nn=30)
+            )
+        if not tgt_pcd.has_normals():
+            tgt_pcd.estimate_normals(
+                o3d.geometry.KDTreeSearchParamHybrid(radius=cfg.colored_icp_max_dist_m * 2.0, max_nn=30)
+            )
+
+        colored_status = "NOT RUN"
+        try:
+            # Tightened convergence criteria specifically for landmark-seeded refinement
+            colored_criteria = (
+                ICPConvergenceCriteria(max_iteration=50, relative_fitness=1e-7, relative_rmse=1e-7)
+                if is_landmark_seeded
+                else ICPConvergenceCriteria(max_iteration=cfg.colored_icp_max_iterations)
+            )
+            colored_res = registration_colored_icp(
+                src_pcd,
+                tgt_pcd,
+                cfg.colored_icp_max_dist_m,
+                init_trans,
+                TransformationEstimationForColoredICP(lambda_geometric=cfg.colored_icp_lambda_geom),
+                colored_criteria,
+            )
+            T_colored = colored_res.transformation
+            fit_colored_src = float(colored_res.fitness)
+            fit_colored = compute_mutual_fitness(fit_colored_src, n_src, n_tgt)
+            rmse_colored = float(colored_res.inlier_rmse)
+            rot_colored = compute_rotation_deg(T_colored)
+            trans_colored = compute_translation_mm(T_colored)
+
+            # Quality gating
+            issues = []
+            if fit_colored < cfg.min_colored_icp_fitness:
+                issues.append(f"fitness {fit_colored:.3f} (src {fit_colored_src:.3f}) < {cfg.min_colored_icp_fitness:.2f}")
+            if rmse_colored > cfg.max_colored_icp_rmse_m:
+                issues.append(f"rmse {rmse_colored * 1000.0:.2f}mm > {cfg.max_colored_icp_rmse_m * 1000.0:.1f}mm")
+            if rot_colored > cfg.max_rotation_deg_per_frame:
+                issues.append(f"rotation {rot_colored:.1f}deg > {cfg.max_rotation_deg_per_frame:.0f}deg")
+            if trans_colored > (cfg.max_translation_m_per_frame * 1000.0):
+                issues.append(f"translation {trans_colored:.1f}mm > {cfg.max_translation_m_per_frame * 1000.0:.0f}mm")
+
+            if not issues:
+                return (
+                    T_colored,
+                    fit_colored,
+                    rmse_colored,
+                    True,
+                    "colored_icp",
+                    rot_colored,
+                    trans_colored,
+                    f"fitness={fit_colored:.2f} (src={fit_colored_src:.2f}) rmse={rmse_colored * 1000.0:.1f}mm",
+                )
+            colored_status = "FAIL: " + ", ".join(issues)
+        except RuntimeError as exc:
+            print(f"[colored-icp] no correspondences for pair {pair_str}, falling through to FPFH tier")
+            colored_status = f"ERROR ({exc})"
+            T_colored = init_trans
+            fit_colored = 0.0
+            rmse_colored = float("inf")
+            rot_colored = 0.0
+            trans_colored = 0.0
+        except Exception as exc:
+            colored_status = f"ERROR ({exc})"
+            T_colored = init_trans
+            fit_colored = 0.0
+            rmse_colored = float("inf")
+            rot_colored = 0.0
+            trans_colored = 0.0
 
     # 4. Geometric Fallback (FPFH + RANSAC -> Point-to-Plane ICP)
     try:
@@ -867,6 +1035,9 @@ def register_rgbd_pair(
             and fb_rot <= cfg.max_rotation_deg_per_frame
             and fb_trans <= (cfg.max_translation_m_per_frame * 1000.0)
         ):
+            src_center_y = float(src_pcd.get_axis_aligned_bounding_box().get_center()[1])
+            region_str = "lower (neck/shoulder)" if src_center_y > 0.0 else "upper (face/head)"
+            print(f"[registration-diagnostic] pair {pair_str} FPFH fallback SUCCEEDED (region: {region_str}, bbox_center_y={src_center_y:+.3f}m)")
             return (
                 fb_T,
                 fb_fit,
@@ -880,7 +1051,13 @@ def register_rgbd_pair(
     except Exception as exc:
         pass
 
+    src_center_y = float(src_pcd.get_axis_aligned_bounding_box().get_center()[1])
+    region_str = "lower (neck/shoulder)" if src_center_y > 0.0 else "upper (face/head)"
     fail_reason = f"Colored ICP failed ({colored_status}); Fallback also failed"
+    print(
+        f"[registration-diagnostic] pair {pair_str} REJECTED / LOW-FITNESS "
+        f"(region: {region_str}, bbox_center_y={src_center_y:+.3f}m) -- {fail_reason}"
+    )
     return (
         T_colored,
         fit_colored,
@@ -919,6 +1096,7 @@ def build_pose_graph_rgbd(
     n_loop = 0
 
     last_rel_trans: np.ndarray | None = None
+    frames_since_accepted: int = 0
 
     for i in range(1, n):
         # Multi-candidate strategy: check preceding accepted frames in the search window
@@ -936,19 +1114,19 @@ def build_pose_graph_rgbd(
 
         prev_accepted_idx = accepted_idx[-1]
         prev_accepted_pose = poses[prev_accepted_idx]
-        frames_since_accepted = max(1, i - prev_accepted_idx)
-        step_cap = getattr(cfg, "max_pose_jump_step_cap", 6)
-        step_multiplier = min(frames_since_accepted, step_cap)
 
-        base_trans_m = getattr(cfg, "max_pose_jump_translation_m", cfg.max_translation_m_per_frame)
-        base_rot_deg = getattr(cfg, "max_pose_jump_rotation_deg", 45.0)
-
-        allowed_translation_m = base_trans_m * step_multiplier
-        allowed_rotation_deg = base_rot_deg * step_multiplier
+        effective_translation_bound = min(
+            cfg.max_pose_jump_translation_m * (1 + frames_since_accepted),
+            cfg.max_pose_jump_translation_m * 6.0
+        )
+        effective_rotation_bound = min(
+            cfg.max_pose_jump_rotation_deg * (1 + frames_since_accepted),
+            cfg.max_pose_jump_rotation_deg * 6.0
+        )
 
         for j in target_indices:
             init_guess = np.eye(4)
-            if j == prev_accepted_idx and frames_since_accepted == 1 and last_rel_trans is not None:
+            if j == prev_accepted_idx and frames_since_accepted == 0 and last_rel_trans is not None:
                 rot_p = compute_rotation_deg(last_rel_trans)
                 trans_p_mm = compute_translation_mm(last_rel_trans)
                 if rot_p <= cfg.max_rotation_deg_per_frame and trans_p_mm <= (cfg.max_translation_m_per_frame * 1000.0):
@@ -968,7 +1146,7 @@ def build_pose_graph_rgbd(
                 jump_trans_m = float(np.linalg.norm(delta_pose[:3, 3]))
                 jump_rot_deg = float(compute_rotation_deg(delta_pose[:3, :3]))
 
-                if jump_trans_m > allowed_translation_m or jump_rot_deg > allowed_rotation_deg:
+                if jump_trans_m > effective_translation_bound or jump_rot_deg > effective_rotation_bound:
                     exceeds_jump = True
                     misleading_candidates.append({
                         "target": j,
@@ -981,8 +1159,8 @@ def build_pose_graph_rgbd(
                         "score_str": reason,
                         "jump_trans_m": jump_trans_m,
                         "jump_rot_deg": jump_rot_deg,
-                        "allowed_trans_m": allowed_translation_m,
-                        "allowed_rot_deg": allowed_rotation_deg,
+                        "allowed_trans_m": effective_translation_bound,
+                        "allowed_rot_deg": effective_rotation_bound,
                         "frames_since_accepted": frames_since_accepted,
                     })
 
@@ -996,7 +1174,7 @@ def build_pose_graph_rgbd(
                 "rotation_deg": rot,
                 "translation_mm": trans,
                 "reason": (
-                    f"pose jump ({jump_trans_m:.2f}m, {jump_rot_deg:.0f}deg) > allowed ({allowed_translation_m:.2f}m, {allowed_rotation_deg:.0f}deg)"
+                    f"pose jump ({jump_trans_m:.2f}m/{jump_rot_deg:.1f}deg) > allowed ({effective_translation_bound:.2f}m/{effective_rotation_bound:.1f}deg)"
                     if exceeds_jump else reason
                 ),
                 "jump_trans_m": jump_trans_m,
@@ -1009,14 +1187,17 @@ def build_pose_graph_rgbd(
                 candidates.append((j, T, fit, rmse, rot, trans, method, reason))
             elif accepted and exceeds_jump:
                 print(
-                    f"    pair {i:02d} -> {j:02d}: tier={method} {reason} REJECTED "
-                    f"(pose jump {jump_trans_m:.2f}m, {jump_rot_deg:.0f}deg > allowed {allowed_translation_m:.2f}m, {allowed_rotation_deg:.0f}deg for {frames_since_accepted} frames)"
+                    f"    pair {i:02d} -> {j:02d}: tier={method} {reason} "
+                    f"REJECTED -- pose jump ({jump_trans_m:.2f}m/{jump_rot_deg:.1f}deg) exceeds plausible motion "
+                    f"(bound {effective_translation_bound:.2f}m/{effective_rotation_bound:.1f}deg, scaled for {frames_since_accepted} "
+                    f"frames since last accept)"
                 )
             else:
                 print(f"    pair {i:02d} -> {j:02d}: tier=none REJECTED ({reason})")
 
         if not candidates:
-            # All candidates in the window failed
+            # All candidates in the window failed: increment counter of unaccepted frames
+            frames_since_accepted += 1
             last_rel_trans = None
             if misleading_candidates:
                 mis = max(misleading_candidates, key=lambda m: m["fitness"])
@@ -1025,15 +1206,15 @@ def build_pose_graph_rgbd(
                 score_str = mis["score_str"]
                 best_scores[i] = score_str
                 n_skip = mis["frames_since_accepted"]
-                skip_label = f"{n_skip} skipped frames" if n_skip != 1 else "1 skipped frame"
                 rejection_msg = (
-                    f"pose jump ({mis['jump_trans_m']:.2f}m, {mis['jump_rot_deg']:.0f}deg) exceeds plausible motion\n"
-                    f"              for {skip_label} (allowed: {mis['allowed_trans_m']:.2f}m, {mis['allowed_rot_deg']:.0f}deg)"
+                    f"REJECTED -- pose jump ({mis['jump_trans_m']:.2f}m/{mis['jump_rot_deg']:.1f}deg) exceeds plausible motion "
+                    f"(bound/allowed: {mis['allowed_trans_m']:.2f}m/{mis['allowed_rot_deg']:.1f}deg, scaled for {n_skip} "
+                    f"frames since last accept)"
                 )
                 rejection_reasons[i] = rejection_msg
                 print(
                     f"    frame {i:02d}: tier={mis['method']} {score_str}\n"
-                    f"              REJECTED -- {rejection_msg}"
+                    f"              {rejection_msg}"
                 )
             else:
                 best_prev = pair_logs[-1] if pair_logs else {}
@@ -1047,17 +1228,33 @@ def build_pose_graph_rgbd(
         seq_candidates = [c for c in candidates if c[0] == prev_accepted_idx]
         if seq_candidates:
             j_best, T_best, fit_best, rmse_best, rot_best, trans_best, method_best, reason_best = seq_candidates[0]
-            last_rel_trans = T_best.copy() if frames_since_accepted == 1 else None
+            last_rel_trans = T_best.copy() if frames_since_accepted == 0 else None
         else:
             j_best, T_best, fit_best, rmse_best, rot_best, trans_best, method_best, reason_best = max(
                 candidates, key=lambda c: c[2]
             )
             last_rel_trans = None
 
+        frames_since_accepted = 0
         best_methods[i] = method_best
         best_scores[i] = reason_best
 
-        print(f"    frame {i:02d}: tier={method_best} {reason_best} ACCEPTED")
+        # Fusion eligibility check (secondary stricter gate for Stage 4 fusion)
+        min_fit_fusion = getattr(cfg, "min_fitness_for_fusion", 0.60)
+        max_res_fusion = getattr(cfg, "max_landmark_residual_for_fusion_mm", 5.0)
+        lm_res_val = None
+        if "residual=" in reason_best:
+            try:
+                lm_res_val = float(reason_best.split("residual=")[1].split("mm")[0])
+            except Exception:
+                pass
+
+        if fit_best < min_fit_fusion:
+            print(f"    frame {i:02d}: pose accepted, EXCLUDED from fusion (fitness {fit_best:.2f} < {min_fit_fusion:.2f} fusion threshold)")
+        elif lm_res_val is not None and lm_res_val > max_res_fusion:
+            print(f"    frame {i:02d}: pose accepted, EXCLUDED from fusion (landmark residual {lm_res_val:.1f}mm > {max_res_fusion:.1f}mm fusion threshold)")
+        else:
+            print(f"    frame {i:02d}: tier={method_best} {reason_best} ACCEPTED")
 
         pose_i = poses[j_best] @ T_best
         node_id = len(pose_graph.nodes)
@@ -1180,6 +1377,38 @@ def register_sequence_rgbd_human(
     }
     tier_summary_str = f"{tier_counts['landmark']} landmark, {tier_counts['colored_icp']} colored_icp, {tier_counts['fpfh_fallback']} fpfh_fallback, {tier_counts['rejected']} rejected"
 
+    # Compute fusion eligibility for accepted frames
+    fusion_eligible_map: dict[int, bool] = {}
+    fusion_reasons_map: dict[int, str] = {}
+    min_fit_fusion = getattr(cfg, "min_fitness_for_fusion", 0.60)
+    max_res_fusion = getattr(cfg, "max_landmark_residual_for_fusion_mm", 5.0)
+
+    for i, d in enumerate(diagnostics):
+        if i == 0:
+            fusion_eligible_map[0] = True
+            continue
+        if d is not None and d[2]:
+            fit_val = d[0]
+            score_str = best_scores.get(i, "")
+            res_val = None
+            if "residual=" in score_str:
+                try:
+                    res_val = float(score_str.split("residual=")[1].split("mm")[0])
+                except Exception:
+                    pass
+            if fit_val < min_fit_fusion:
+                fusion_eligible_map[i] = False
+                fusion_reasons_map[i] = f"fitness {fit_val:.2f} < {min_fit_fusion:.2f} fusion threshold"
+            elif res_val is not None and res_val > max_res_fusion:
+                fusion_eligible_map[i] = False
+                fusion_reasons_map[i] = f"landmark residual {res_val:.1f}mm > {max_res_fusion:.1f}mm fusion threshold"
+            else:
+                fusion_eligible_map[i] = True
+        else:
+            fusion_eligible_map[i] = False
+
+    fusion_eligible_indices = [i for i, ok in fusion_eligible_map.items() if ok]
+
     summary_stats = {
         "captured": len(frames),
         "accepted": n_accepted,
@@ -1197,9 +1426,15 @@ def register_sequence_rgbd_human(
         "rejection_reasons": rejection_reasons,
         "tier_counts": tier_counts,
         "tier_summary_str": tier_summary_str,
+        "fusion_eligible": fusion_eligible_map,
+        "fusion_reasons": fusion_reasons_map,
+        "fusion_eligible_indices": fusion_eligible_indices,
+        "n_fusion_eligible": len(fusion_eligible_indices),
     }
 
     return aligned, diagnostics, poses, summary_stats
+
+
 
 
 

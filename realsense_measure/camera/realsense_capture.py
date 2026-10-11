@@ -19,11 +19,8 @@ import open3d as o3d
 
 try:
     import pyrealsense2 as rs
-except ImportError as exc:
-    raise ImportError(
-        "pyrealsense2 is not installed. "
-        "On the machine with the D455f plugged in, run:  pip install pyrealsense2"
-    ) from exc
+except ImportError:
+    rs = None
 
 from config import CameraConfig, DepthVisConfig
 
@@ -49,6 +46,11 @@ class RealSenseCamera:
     """
 
     def __init__(self, cfg: CameraConfig) -> None:
+        if rs is None:
+            raise ImportError(
+                "pyrealsense2 is not installed or blocked by system policy. "
+                "On the machine with the D455f plugged in, run:  pip install pyrealsense2"
+            )
         self.cfg = cfg
 
         # ---- pipeline & stream configuration ----------------------------
@@ -508,4 +510,5 @@ class RealSenseCamera:
 
         frame = self.create_rgbd_frame(color_bgr, depth_m, frame_id=frame_id)
         return frame, preview_colorized_bgr
+
 

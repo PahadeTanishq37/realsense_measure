@@ -130,6 +130,11 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="interactively select a 2D bounding box ROI on the first frame to focus isolation",
     )
+    parser.add_argument(
+        "--no-landmarks",
+        action="store_true",
+        help="disable MediaPipe face landmark detection during capture HUD tracking and registration",
+    )
 
     return parser
 
@@ -157,8 +162,15 @@ def main() -> None:
         except Exception as err:
             parser.error(f"Invalid value for --reference-dims '{args.reference_dims}': {err}")
 
+    if args.no_landmarks:
+        cfg.registration.use_landmarks = False
+        cfg.camera.head_capture.enabled = False
+
     if args.mode is not None:
         cfg.registration.registration_mode = args.mode
+        if args.mode == "pointcloud":
+            cfg.registration.use_landmarks = False
+            cfg.camera.head_capture.enabled = False
     elif args.target in ("head", "body"):
         cfg.registration.registration_mode = "rgbd_human"
 

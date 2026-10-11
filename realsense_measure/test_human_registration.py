@@ -529,6 +529,225 @@ def test_h_loop_closure_fitness_threshold():
     print("  PASS: Loop closure fitness threshold (0.65) strictly enforced without affecting primary sequential edges.")
 
 
+# ===========================================================================
+# Test I — Non-Overlapping Pair Colored ICP Skip & Graceful Fallback
+# ===========================================================================
+def test_i_non_overlapping_pair_colored_icp_skip():
+    print("\n--- Test I: Non-Overlapping Pair Colored ICP Skip & Graceful Fallback ---")
+    import io
+    import contextlib
+
+    mesh = make_synthetic_scene()
+    tmesh = o3d.t.geometry.TriangleMesh.from_legacy(mesh)
+    scene = o3d.t.geometry.RaycastingScene()
+    scene.add_triangles(tmesh)
+
+    intr = o3d.camera.PinholeCameraIntrinsic(640, 480, 500.0, 500.0, 320.0, 240.0)
+    intr_tensor = o3d.core.Tensor(intr.intrinsic_matrix, dtype=o3d.core.Dtype.Float64)
+
+    # Base frame f0
+    f0 = render_synthetic_rgbd_frame(scene, np.eye(4), 0, intr, intr_tensor)
+
+    # Frame f1 constructed with point cloud translated far away (no AABB overlap, large centroid dist)
+    f1 = render_synthetic_rgbd_frame(scene, np.eye(4), 1, intr, intr_tensor)
+    f1_pts = np.asarray(f1.pcd.points) + np.array([2.0, 2.0, 3.0])
+    f1.pcd.points = o3d.utility.Vector3dVector(f1_pts)
+
+    cfg = RegistrationConfig()
+    cfg.max_pair_centroid_dist_m = 0.50
+
+    # 1. Verify pre-check skips Colored ICP and logs the overlap failure without raising
+    log_stream = io.StringIO()
+    with contextlib.redirect_stdout(log_stream):
+        T_est, fit, rmse, accepted, method, rot, trans, reason = register_rgbd_pair(f1, f0, cfg)
+    log_output = log_stream.getvalue()
+
+    print(f"  Return method: {method}")
+    print(f"  Accepted: {accepted}")
+    print(f"  Reason: {reason}")
+    print(f"  Captured log snippet: {log_output.strip()[:100]}...")
+
+    # (a) No exception raised (execution reached here)
+    assert True
+    # (b) Colored ICP branch was skipped
+    assert method != "colored_icp", f"Expected colored_icp to be skipped, got {method}"
+    assert "SKIPPED" in reason, f"Expected 'SKIPPED' in reason, got {reason}"
+    assert "[overlap-check] pair 1->0 SKIPPED colored-icp" in log_output, (
+        f"Expected '[overlap-check] pair 1->0 SKIPPED colored-icp' in log, got:\n{log_output}"
+    )
+    # (c) Returns clean REJECT (accepted == False, method == 'none')
+    assert accepted is False, "Non-overlapping pair must be rejected"
+    assert method == "none", f"Expected method 'none' for rejected pair, got {method}"
+
+    # 2. Verify defensive RuntimeError handling inside Colored ICP
+    # Construct a frame pair where overlap check passes, but Colored ICP raises RuntimeError
+    f2 = render_synthetic_rgbd_frame(scene, np.eye(4), 2, intr, intr_tensor)
+    f3 = render_synthetic_rgbd_frame(scene, np.eye(4), 3, intr, intr_tensor)
+    
+    import registration
+    orig_colored_icp = registration.registration_colored_icp
+
+    def mock_colored_icp_raise(*args, **kwargs):
+        raise RuntimeError("[Open3D Error] No correspondences found between source and target pointcloud")
+
+    registration.registration_colored_icp = mock_colored_icp_raise
+    try:
+        log_stream_err = io.StringIO()
+        with contextlib.redirect_stdout(log_stream_err):
+            T_est2, fit2, rmse2, accepted2, method2, rot2, trans2, reason2 = register_rgbd_pair(f3, f2, cfg)
+        log_output_err = log_stream_err.getvalue()
+
+        print(f"  Defensive error catch test: method={method2}, accepted={accepted2}")
+        print(f"  Captured error log: {log_output_err.strip()}")
+
+        assert "[colored-icp] no correspondences for pair 3->2, falling through to FPFH tier" in log_output_err, (
+            f"Expected defensive catch message in log, got:\n{log_output_err}"
+        )
+    finally:
+        registration.registration_colored_icp = orig_colored_icp
+
+    print("  PASS: Overlap pre-check and defensive RuntimeError handling validated.")
+
+
+def test_j_glasses_weighted_kabsch_and_dense_sanity():
+    """
+    Test J: Subject Wearing Glasses (Noisy Eye-Region Depth).
+    Asserts:
+      (a) Weighted Kabsch recovers rotation and translation strictly closer to ground truth
+          than unweighted Kabsch when eye-region landmarks have injected glasses depth error.
+      (b) If landmark error is severe enough that dense surface fitness fails (< 0.30),
+          the pipeline rejects the landmark seed and falls through to Tier 2 (Colored ICP)
+          rather than accepting a corrupted seed.
+    """
+    print("\n--- Test J: Subject with Glasses (Weighted Kabsch & Dense Sanity) ---")
+    from registration import rigid_transform_from_correspondences, register_rgbd_pair
+    from landmarks import LANDMARK_INDICES
+
+    # Ground truth transform
+    R_gt = o3d.geometry.get_rotation_matrix_from_xyz((np.radians(6.0), np.radians(-4.0), np.radians(5.0)))
+    t_gt = np.array([0.015, -0.010, 0.020])
+
+    # Realistic facial landmark locations (target frame)
+    base_landmarks = {
+        "left_eye_outer": np.array([-0.045, 0.025, 0.60]),
+        "right_eye_outer": np.array([0.045, 0.025, 0.60]),
+        "left_eye_inner": np.array([-0.018, 0.025, 0.58]),
+        "right_eye_inner": np.array([0.018, 0.025, 0.58]),
+        "nose_tip": np.array([0.0, 0.0, 0.55]),
+        "nose_bridge": np.array([0.0, 0.020, 0.57]),
+        "left_mouth_corner": np.array([-0.025, -0.035, 0.57]),
+        "right_mouth_corner": np.array([0.025, -0.035, 0.57]),
+        "chin": np.array([0.0, -0.075, 0.59]),
+        "left_nostril": np.array([-0.012, -0.010, 0.56]),
+        "right_nostril": np.array([0.012, -0.010, 0.56]),
+        "upper_lip_center": np.array([0.0, -0.025, 0.56]),
+        "lower_lip_center": np.array([0.0, -0.042, 0.57]),
+    }
+
+    eye_keys = {"left_eye_outer", "right_eye_outer", "left_eye_inner", "right_eye_inner"}
+
+    dst_lm_dict = {}
+    src_lm_dict = {}
+    src_pts_list = []
+    dst_pts_list = []
+    weights_list = []
+
+    for name in sorted(base_landmarks.keys()):
+        p_dst = base_landmarks[name]
+        p_src_true = R_gt.T @ (p_dst - t_gt)
+
+        if name in eye_keys:
+            # 18 mm glasses IR reflection error in source depth
+            p_src_noisy = p_src_true + np.array([0.0, 0.0, 0.018])
+            s_vr = 0.25
+            s_var = 1.5e-4
+            d_vr = 1.0
+            d_var = 1e-6
+        else:
+            p_src_noisy = p_src_true.copy()
+            s_vr = 1.0
+            s_var = 1e-6
+            d_vr = 1.0
+            d_var = 1e-6
+
+        w = float(min(1.0, s_vr * d_vr) / (1.0 + (s_var / 1e-5) + (d_var / 1e-5)))
+
+        src_pts_list.append(p_src_noisy)
+        dst_pts_list.append(p_dst)
+        weights_list.append(w)
+
+        src_lm_dict[name] = {"position": p_src_noisy, "valid_ratio": s_vr, "variance": s_var, "low_confidence": (name in eye_keys)}
+        dst_lm_dict[name] = {"position": p_dst, "valid_ratio": d_vr, "variance": d_var, "low_confidence": False}
+
+    src_pts = np.array(src_pts_list)
+    dst_pts = np.array(dst_pts_list)
+    weights = np.array(weights_list)
+
+    # 1. Compare weighted vs unweighted Kabsch
+    T_weighted, res_w = rigid_transform_from_correspondences(src_pts, dst_pts, weights=weights)
+    T_unweighted, res_u = rigid_transform_from_correspondences(src_pts, dst_pts, weights=None)
+
+    rot_err_w = compute_rotation_deg(T_weighted[:3, :3] @ R_gt.T)
+    trans_err_w = float(np.linalg.norm(T_weighted[:3, 3] - t_gt) * 1000.0)
+    rot_err_u = compute_rotation_deg(T_unweighted[:3, :3] @ R_gt.T)
+    trans_err_u = float(np.linalg.norm(T_unweighted[:3, 3] - t_gt) * 1000.0)
+
+    print(f"  Weighted Kabsch:   rot_err={rot_err_w:.2f} deg, trans_err={trans_err_w:.2f} mm (residual={res_w:.1f} mm)")
+    print(f"  Unweighted Kabsch: rot_err={rot_err_u:.2f} deg, trans_err={trans_err_u:.2f} mm (residual={res_u:.1f} mm)")
+
+    assert rot_err_w < rot_err_u, f"Weighted rotation error ({rot_err_w:.2f} deg) must be < unweighted ({rot_err_u:.2f} deg)"
+    assert trans_err_w < trans_err_u, f"Weighted translation error ({trans_err_w:.2f} mm) must be < unweighted ({trans_err_u:.2f} mm)"
+    print("  [PASS] Part (a): Weighted Kabsch significantly reduces glasses-induced parameter error.")
+
+    # 2. Test Part (b): Dense-surface sanity check forces fallthrough to Tier 2 (Colored ICP)
+    scene = o3d.t.geometry.RaycastingScene()
+    mesh = make_synthetic_scene()
+    scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(mesh))
+
+    intr = o3d.camera.PinholeCameraIntrinsic(640, 480, 525.0, 525.0, 320.0, 240.0)
+    intr_tensor = o3d.core.Tensor([
+        [525.0, 0.0, 320.0],
+        [0.0, 525.0, 240.0],
+        [0.0, 0.0, 1.0],
+    ], dtype=o3d.core.Dtype.Float64)
+
+    P0 = np.eye(4)
+    P1 = np.eye(4)
+    P1[:3, :3] = o3d.geometry.get_rotation_matrix_from_xyz((np.radians(5.0), 0, 0))
+    P1[:3, 3] = [0.01, 0.0, 0.015]
+
+    f0 = render_synthetic_rgbd_frame(scene, P0, 0, intr, intr_tensor)
+    f1 = render_synthetic_rgbd_frame(scene, P1, 1, intr, intr_tensor)
+
+    # Mock detect_face_landmarks_3d to return landmarks that disagree with surface (e.g. 25 deg pitch)
+    bogus_R = o3d.geometry.get_rotation_matrix_from_xyz((np.radians(25.0), 0, 0))
+    bogus_src_lm = {}
+    for name, d_val in dst_lm_dict.items():
+        p_b = bogus_R.T @ d_val["position"]
+        bogus_src_lm[name] = {"position": p_b, "valid_ratio": 1.0, "variance": 1e-6, "low_confidence": False}
+
+    import landmarks
+    orig_detect = landmarks.detect_face_landmarks_3d
+
+    def mock_detect(color, depth, intrinsics, **kwargs):
+        if getattr(color, "shape", None) is not None and np.array_equal(color, f0.color_bgr):
+            return dst_lm_dict
+        return bogus_src_lm
+
+    landmarks.detect_face_landmarks_3d = mock_detect
+    cfg = RegistrationConfig(min_seed_dense_fitness=0.30)
+
+    try:
+        T_est, fit, rmse, accepted, method, rot, trans, reason = register_rgbd_pair(f1, f0, cfg)
+        print(f"  Corrupted landmark pair registered via tier: '{method}', accepted={accepted}")
+        assert method in ("colored_icp", "rgbd_odometry_colored_icp"), f"Expected Tier 2 fallthrough, got method: {method}"
+        assert accepted is True, "Tier 2 should successfully align the frame pair"
+    finally:
+        landmarks.detect_face_landmarks_3d = orig_detect
+
+    print("  [PASS] Part (b): Dense-surface sanity check successfully rejected corrupted landmark seed and fell through to Tier 2.")
+
+
 def main():
     print("=" * 65)
     print("  HUMAN 180 DEG MULTI-VIEW REGISTRATION SYNTHETIC TEST SUITE")
@@ -542,11 +761,14 @@ def main():
     test_f_pose_jump_rejection()
     test_g_multi_frame_skip_recovery()
     test_h_loop_closure_fitness_threshold()
+    test_i_non_overlapping_pair_colored_icp_skip()
+    test_j_glasses_weighted_kabsch_and_dense_sanity()
 
     print("\n" + "=" * 65)
-    print("  ALL 8 SYNTHETIC TESTS (A, B, C, D, E, F, G, H) PASSED SUCCESSFULLY!")
+    print("  ALL 10 SYNTHETIC TESTS (A, B, C, D, E, F, G, H, I, J) PASSED SUCCESSFULLY!")
     print("=" * 65)
 
 
 if __name__ == "__main__":
     main()
+
