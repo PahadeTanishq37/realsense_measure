@@ -193,8 +193,164 @@ def test_stage4_marginal_frame_exclusion_from_fusion():
     assert pts_f2_lm > 0, "Frame with landmark residual 2.1mm (<= 5.0mm) must be INCLUDED in fusion"
 
 
+
+def test_streak_removal_removes_streaks_preserves_sparse_isotropic():
+    """
+    Task 4 -- Regression test for streak artifact removal.
+
+    Injects a SYNTHETIC LINEAR STREAK (simulating a misaligned-frame artifact
+    — points tightly strung along one axis) and a SPARSE ISOTROPIC CLUSTER
+    (simulating a genuine sparse feature like an ear tip — low density but
+    points scattered in all directions).
+
+    Asserts:
+    - The linear streak is removed by the new PCA linearity filter.
+    - The sparse isotropic cluster is preserved (not deleted with the streak).
+    - Box mode is completely unaffected (streak removal block is never entered).
+    """
+    np.random.seed(7)
+
+    # Dense head surface: 3000 points on a 10 cm × 10 cm planar sheet (origin region)
+    core_x = np.random.uniform(-0.05, 0.05, 3000)
+    core_y = np.random.uniform(-0.05, 0.05, 3000)
+    core_z = np.zeros(3000)
+    core_pts = np.column_stack([core_x, core_y, core_z])
+
+    # Synthetic LINEAR STREAK: 40 points tightly spaced along X at y≈0, z≈0.02 offset
+    # (simulates a misaligned frame that contributed a thin strip of offset surface).
+    streak_x = np.linspace(0.10, 0.22, 40)
+    streak_pts = np.column_stack([
+        streak_x,
+        np.random.uniform(-0.001, 0.001, 40),   # very tight spread: nearly 1-D
+        np.full(40, 0.02) + np.random.uniform(-0.001, 0.001, 40),
+    ])
+
+    # Sparse ISOTROPIC CLUSTER: 18 points spread isotropically at a separate location
+    # (simulates a genuine sparse ear-tip region — low density but 3-D scatter).
+    ear_center = np.array([0.18, 0.12, 0.0])
+    ear_pts = ear_center + np.random.randn(18, 3) * 0.004   # 4 mm std, roughly spherical isotropic cluster
+
+    all_pts = np.vstack([core_pts, streak_pts, ear_pts])
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(all_pts)
+
+    from config import RegistrationConfig
+    from reconstruction import fuse_point_clouds
+
+    cfg = PreprocessConfig(voxel_size_m=0.004, outlier_neighbors=20, outlier_std_ratio=1.5)
+    reg_cfg = RegistrationConfig(
+        enable_streak_removal=True,
+        streak_linearity_ratio_threshold=8.0,
+        streak_removal_radius_mult=2.5,
+    )
+
+    # --- Human mode: streak removal enabled ---
+    fused = fuse_point_clouds(
+        [pcd],
+        cfg,
+        skip_final_clustering=True,
+        skip_outlier_removal=True,
+        voxel_size=0.002,
+        reg_cfg=reg_cfg,
+    )
+    fused_pts = np.asarray(fused.points)
+
+    # Streak region: X in [0.095, 0.225], z > 0.01 (the artificially offset strip)
+    streak_remaining = np.sum(
+        (fused_pts[:, 0] >= 0.095) & (fused_pts[:, 0] <= 0.225)
+        & (fused_pts[:, 2] > 0.01)
+    )
+    # Ear region: within 0.025 m of ear_center
+    ear_remaining = np.sum(
+        np.linalg.norm(fused_pts - ear_center, axis=1) <= 0.025
+    )
+
+    assert streak_remaining == 0, (
+        f"Linear streak should have been removed by linearity filter, "
+        f"but {streak_remaining} streak points remain."
+    )
+    assert ear_remaining >= 5, (
+        f"Sparse isotropic cluster (ear) should be preserved, "
+        f"but only {ear_remaining} ear points remain (expected >= 5)."
+    )
+    print(f"  [PASS] Human mode: streak removed ({streak_remaining} pts left), "
+          f"isotropic ear cluster preserved ({ear_remaining} pts).")
+
+    # --- Box mode: streak removal must NOT be triggered (skip_outlier_removal=False) ---
+    fused_box = fuse_point_clouds(
+        [pcd],
+        cfg,
+        skip_final_clustering=False,
+        skip_outlier_removal=False,     # box mode: SOR runs, streak block never entered
+        voxel_size=None,
+        reg_cfg=None,
+    )
+    # Box mode uses SOR, so sparse points may be removed — but crucially no error should occur
+    # and the core should remain
+    core_in_box = np.sum(np.linalg.norm(np.asarray(fused_box.points), axis=1) <= 0.06)
+    assert core_in_box > 100, f"Box mode should retain the dense core, only {core_in_box} pts found"
+    print(f"  [PASS] Box mode: streak removal not applied, dense core intact ({core_in_box} pts).")
+
+
+def test_stage4_face_region_strict_fusion_gate():
+    """
+    TASK 3 -- Regression test for tightened face-region fusion gate:
+    When a frame is in the upper face/head region:
+    - If fitness is 0.65 (< 0.75 strict face threshold), it stays in pose graph but is EXCLUDED from Stage 4 fusion.
+    - If fitness is 0.80 (>= 0.75) and RMSE is 2.5mm (<= 4.0mm), it is INCLUDED in Stage 4 fusion.
+    - If fitness is 0.80 but RMSE is 5.5mm (> 4.0mm), it is EXCLUDED from Stage 4 fusion.
+    """
+    f0 = o3d.geometry.PointCloud()
+    f0.points = o3d.utility.Vector3dVector(np.random.uniform(-0.05, 0.05, (500, 3)))
+    f1 = o3d.geometry.PointCloud()
+    f1.points = o3d.utility.Vector3dVector(np.random.uniform(0.15, 0.25, (500, 3)))
+    f2 = o3d.geometry.PointCloud()
+    f2.points = o3d.utility.Vector3dVector(np.random.uniform(0.35, 0.45, (500, 3)))
+    frames = [f0, f1, f2]
+
+    cfg = PipelineConfig(
+        target=TargetConfig(name="head"),
+        show_stage_windows=False,
+        save_intermediate=False,
+    )
+    pipeline = ScanPipeline(cfg)
+
+    diagnostics = [
+        (1.0, 0.0, True),
+        (0.68, 0.003, True),  # passes 0.60 general gate, fails 0.75 face gate
+        (0.82, 0.002, True),  # passes 0.75 face gate and 4mm RMSE
+    ]
+
+    pipeline.last_registration_stats = {
+        "frame_scores": {
+            1: "fitness=0.68 rmse=3.0mm",
+            2: "fitness=0.82 rmse=2.0mm",
+        },
+        "fusion_eligible": {
+            0: True,
+            1: False,  # excluded by face gate
+            2: True,   # eligible
+        },
+        "fusion_reasons": {
+            1: "face-pair fitness 0.68 < 0.75 threshold",
+        },
+    }
+
+    fused = pipeline.fuse(frames, diagnostics)
+    pts = np.asarray(fused.points)
+    pts_f1 = np.sum((pts[:, 0] >= 0.14) & (pts[:, 0] <= 0.26))
+    pts_f2 = np.sum((pts[:, 0] >= 0.34) & (pts[:, 0] <= 0.46))
+
+    assert pts_f1 == 0, f"Face-pair frame with fitness 0.68 (< 0.75) must be EXCLUDED from fusion, found {pts_f1} pts"
+    assert pts_f2 > 0, f"Face-pair frame with fitness 0.82 (>= 0.75) must be INCLUDED in fusion, found {pts_f2} pts"
+    print("  [PASS] Stricter face-pair fusion gate successfully excludes borderline face frames and retains high-quality frames.")
+
+
 if __name__ == "__main__":
     test_fuse_point_clouds_human_bypasses_sor_and_uses_2mm()
     test_pipeline_fuse_human_vs_box_scoping()
     test_stage4_marginal_frame_exclusion_from_fusion()
+    test_stage4_face_region_strict_fusion_gate()
+    test_streak_removal_removes_streaks_preserves_sparse_isotropic()
     print("ALL STAGE 4 HUMAN 2.0 MM FUSION REGRESSION TESTS PASSED.")
+

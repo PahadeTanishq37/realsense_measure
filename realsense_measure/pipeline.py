@@ -37,6 +37,7 @@ from visualizer import (
     color_frames_distinctly,
     draw_camera_trajectory,
     obb_lineset,
+    prepare_display_geometry,
     show,
     visualize_registration_pair,
 )
@@ -940,8 +941,13 @@ class ScanPipeline:
                     print(f"\n  [!] Note: Stage 3 visualization displays all frames including rejected frame(s) {rejected_indices}.")
                     print("      Rejected frames are excluded from Stage 4 fusion.")
                 screenshot_path = (self.scan_folder / "stage3_output.png") if (hasattr(self, "scan_folder") and self.scan_folder is not None) else None
-                show(
+                # TASK 3: Display-only downsampled copy: saved stage3_output.ply stays full resolution
+                display_frames = prepare_display_geometry(
                     colored_aligned_frames,
+                    voxel_size_m=self.cfg.stage3_4_display_voxel_size_m,
+                )
+                show(
+                    display_frames,
                     window_name="Stage 3: registered/aligned human clouds",
                     screenshot_path=screenshot_path,
                 )
@@ -1006,8 +1012,13 @@ class ScanPipeline:
             if rejected_indices:
                 print(f"\n  [!] Note: Visualizing all frames including rejected frame(s) {rejected_indices}.")
             screenshot_path = (self.scan_folder / "stage3_output.png") if (hasattr(self, "scan_folder") and self.scan_folder is not None) else None
-            show(
+            # TASK 3: Display-only downsampled copy: saved stage3_output.ply stays full resolution
+            display_frames = prepare_display_geometry(
                 colored_aligned_frames,
+                voxel_size_m=self.cfg.stage3_4_display_voxel_size_m,
+            )
+            show(
+                display_frames,
                 window_name="Stage 3: registered/aligned clouds",
                 screenshot_path=screenshot_path,
             )
@@ -1061,8 +1072,12 @@ class ScanPipeline:
             max_lm_res_fusion = getattr(self.cfg.registration, "max_landmark_residual_for_fusion_mm", 5.0)
 
             frame_scores = {}
+            fusion_eligible = {}
+            fusion_reasons = {}
             if hasattr(self, "last_registration_stats") and self.last_registration_stats:
                 frame_scores = self.last_registration_stats.get("frame_scores", {})
+                fusion_eligible = self.last_registration_stats.get("fusion_eligible", {})
+                fusion_reasons = self.last_registration_stats.get("fusion_reasons", {})
 
             accepted_indices = []
             for i, d in enumerate(diagnostics):
@@ -1073,21 +1088,27 @@ class ScanPipeline:
                     continue
 
                 if is_human_mode:
-                    fit = d[0]
-                    score_str = frame_scores.get(i, "")
-                    lm_res = None
-                    if "residual=" in score_str:
-                        try:
-                            lm_res = float(score_str.split("residual=")[1].split("mm")[0])
-                        except Exception:
-                            pass
+                    if fusion_eligible and i in fusion_eligible:
+                        if not fusion_eligible[i]:
+                            reason_ex = fusion_reasons.get(i, "stricter fusion gate")
+                            print(f"  frame {i}: pose accepted, EXCLUDED from fusion ({reason_ex})")
+                            continue
+                    else:
+                        fit = d[0]
+                        score_str = frame_scores.get(i, "")
+                        lm_res = None
+                        if "residual=" in score_str:
+                            try:
+                                lm_res = float(score_str.split("residual=")[1].split("mm")[0])
+                            except Exception:
+                                pass
 
-                    if fit < min_fit_fusion:
-                        print(f"  frame {i}: pose accepted, EXCLUDED from fusion (fitness {fit:.2f} < {min_fit_fusion:.2f} fusion threshold)")
-                        continue
-                    if lm_res is not None and lm_res > max_lm_res_fusion:
-                        print(f"  frame {i}: pose accepted, EXCLUDED from fusion (landmark residual {lm_res:.1f}mm > {max_lm_res_fusion:.1f}mm fusion threshold)")
-                        continue
+                        if fit < min_fit_fusion:
+                            print(f"  frame {i}: pose accepted, EXCLUDED from fusion (fitness {fit:.2f} < {min_fit_fusion:.2f} fusion threshold)")
+                            continue
+                        if lm_res is not None and lm_res > max_lm_res_fusion:
+                            print(f"  frame {i}: pose accepted, EXCLUDED from fusion (landmark residual {lm_res:.1f}mm > {max_lm_res_fusion:.1f}mm fusion threshold)")
+                            continue
 
                 accepted_indices.append(i)
 
@@ -1135,6 +1156,7 @@ class ScanPipeline:
                 skip_final_clustering=is_human_mode,
                 skip_outlier_removal=is_human_mode,
                 voxel_size=human_voxel_size,
+                reg_cfg=self.cfg.registration if is_human_mode else None,
             )
             fusion_name = "POINT CLOUD"
 
@@ -1145,7 +1167,13 @@ class ScanPipeline:
             print(f"  Saved: {self.scan_folder / 'stage4_output.ply'}")
 
         if self.cfg.show_stage_windows:
-            display_pcd = o3d.geometry.PointCloud(fused)
+            # TASK 3: Display-only downsampled copy for the live preview window.
+            # The saved stage4_output.ply, fused.ply, and the returned fused cloud passed
+            # into Stage 5 measurement strictly stay at full resolution for maximum accuracy.
+            display_pcd = prepare_display_geometry(
+                fused,
+                voxel_size_m=self.cfg.stage3_4_display_voxel_size_m,
+            )
             if not display_pcd.has_colors():
                 display_pcd.paint_uniform_color([0.65, 0.65, 0.65])
             screenshot_path = (self.scan_folder / "stage4_output.png") if (hasattr(self, "scan_folder") and self.scan_folder is not None) else None
@@ -1330,7 +1358,14 @@ class ScanPipeline:
             print(f"  Saved: {self.scan_folder / 'stage5_output.ply'}")
 
         if self.cfg.show_stage_windows and obb is not None:
-            seg_display = o3d.geometry.PointCloud(segmented)
+            # TASK 1 & 2: Display-only downsampled copy for interactive Stage 5 window.
+            # The actual measurements (head breadth/length/height, OBB fitting) and the
+            # saved files (segmented_object.ply, stage5_output.ply, measurement.json)
+            # strictly keep using the full-density cloud to avoid losing measurement accuracy.
+            seg_display = prepare_display_geometry(
+                segmented,
+                voxel_size_m=self.cfg.stage5_display_voxel_size_m,
+            )
             if not seg_display.has_colors():
                 seg_display.paint_uniform_color([0.18, 0.72, 0.38])
             geoms_to_show = [seg_display, obb_ls] if obb_ls is not None else [seg_display]
@@ -1352,8 +1387,10 @@ class ScanPipeline:
         print(f"  Saved segmented cloud: {seg_path}")
 
         if hasattr(self, "scan_folder") and self.scan_folder is not None and meas_path.exists():
-            shutil.copy(meas_path, self.scan_folder / "measurement.json")
-            print(f"  Saved: {self.scan_folder / 'measurement.json'}")
+            target_meas = self.scan_folder / "measurement.json"
+            if meas_path.resolve() != target_meas.resolve():
+                shutil.copy(meas_path, target_meas)
+                print(f"  Saved: {target_meas}")
 
         return result
 

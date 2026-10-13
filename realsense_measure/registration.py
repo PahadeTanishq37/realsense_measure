@@ -469,6 +469,74 @@ def register_frame_pair_landmark_guided(
                     )
                     return np.eye(4), 0.0, float("inf"), "dense_sanity_failed", float(residual_mm)
 
+                # Localized (face-region) fitness check (Task 2)
+                if getattr(cfg, "enable_landmark_face_fitness_check", True):
+                    face_crop_r = getattr(cfg, "face_crop_radius_m", 0.08)
+                    min_face_fit = getattr(cfg, "min_landmark_face_fitness", 0.25)
+                    face_corr_dist = getattr(cfg, "face_fitness_dist_m", 0.005)
+
+                    if "nose_tip" in dst_lm:
+                        d_nose = dst_lm["nose_tip"]
+                        face_anchor = d_nose["position"] if isinstance(d_nose, dict) else d_nose
+                    else:
+                        face_anchor = np.mean(dst_pts, axis=0)
+
+                    src_trans = copy.deepcopy(src_down).transform(init_T)
+                    src_trans_pts = np.asarray(src_trans.points)
+                    tgt_down_pts = np.asarray(tgt_down.points)
+
+                    src_face_mask = np.linalg.norm(src_trans_pts - face_anchor, axis=1) <= face_crop_r
+                    tgt_face_mask = np.linalg.norm(tgt_down_pts - face_anchor, axis=1) <= face_crop_r
+
+                    if np.count_nonzero(src_face_mask) >= 10 and np.count_nonzero(tgt_face_mask) >= 10:
+                        src_face_crop = src_trans.select_by_index(np.where(src_face_mask)[0])
+                        tgt_face_crop = tgt_down.select_by_index(np.where(tgt_face_mask)[0])
+
+                        eval_face = o3d.pipelines.registration.evaluate_registration(
+                            src_face_crop,
+                            tgt_face_crop,
+                            face_corr_dist,
+                            np.eye(4),
+                        )
+                        face_fitness = float(eval_face.fitness)
+
+                        if face_fitness < min_face_fit:
+                            print(
+                                f"      [landmarks] Kabsch seed rejected: local face-region fitness "
+                                f"{face_fitness:.2f} < {min_face_fit:.2f} threshold (residual was {residual_mm:.1f}mm) "
+                                f"-- falling through to Tier 2"
+                            )
+                            return np.eye(4), 0.0, float("inf"), "face_sanity_failed", float(residual_mm)
+
+                # Independent geometric FPFH+RANSAC cross-check (Task 1)
+                if getattr(cfg, "enable_landmark_fpfh_crosscheck", True):
+                    max_trans_disagree = getattr(cfg, "max_landmark_fpfh_disagreement_trans_m", 0.02)
+                    max_rot_disagree = getattr(cfg, "max_landmark_fpfh_disagreement_rot_deg", 10.0)
+
+                    try:
+                        voxel_fpfh = getattr(cfg, "voxel_size_m", 0.003)
+                        s_down_fpfh, s_fpfh = _prepare(source_pcd, voxel_fpfh, cfg)
+                        t_down_fpfh, t_fpfh = _prepare(target_pcd, voxel_fpfh, cfg)
+                        fpfh_res = _global_register(s_down_fpfh, t_down_fpfh, s_fpfh, t_fpfh, cfg, voxel_fpfh)
+
+                        fpfh_refined = _icp_refine(s_down_fpfh, t_down_fpfh, fpfh_res.transformation, cfg)
+                        T_fpfh = fpfh_refined.transformation if fpfh_refined.fitness >= 0.15 else fpfh_res.transformation
+                        fpfh_quality = max(float(fpfh_res.fitness), float(fpfh_refined.fitness))
+
+                        if fpfh_quality >= 0.15:
+                            trans_disagree = float(np.linalg.norm(init_T[:3, 3] - T_fpfh[:3, 3]))
+                            rot_disagree = float(compute_rotation_deg(init_T[:3, :3] @ T_fpfh[:3, :3].T))
+
+                            if trans_disagree > max_trans_disagree or rot_disagree > max_rot_disagree:
+                                print(
+                                    f"      [landmarks] Kabsch disagrees with independent FPFH check "
+                                    f"(trans {trans_disagree:.3f}m, rot {rot_disagree:.1f}deg) "
+                                    f"-- falling through to Tier 2"
+                                )
+                                return np.eye(4), 0.0, float("inf"), "fpfh_crosscheck_failed", float(residual_mm)
+                    except Exception:
+                        pass
+
                 # Tightened Colored ICP refinement specifically for landmark seed
                 src_temp = copy.deepcopy(source_pcd)
                 tgt_temp = copy.deepcopy(target_pcd)
@@ -1070,6 +1138,15 @@ def register_rgbd_pair(
     )
 
 
+def is_upper_face_frame(frame: RGBDFrame | o3d.geometry.PointCloud, threshold_y: float = 0.0) -> bool:
+    """Classify whether a frame's point cloud is in the upper (face/head) region (center_y <= threshold_y)."""
+    pcd = frame.pcd if hasattr(frame, "pcd") else frame
+    if pcd is None or not hasattr(pcd, "has_points") or not pcd.has_points():
+        return False
+    cy = float(pcd.get_axis_aligned_bounding_box().get_center()[1])
+    return cy <= threshold_y
+
+
 def build_pose_graph_rgbd(
     frames: list[RGBDFrame],
     cfg: RegistrationConfig,
@@ -1079,7 +1156,7 @@ def build_pose_graph_rgbd(
 
     Returns
     -------
-    (pose_graph, node_of, diagnostics, n_odom, n_loop, pair_logs, poses, best_methods, best_scores)
+    (pose_graph, node_of, diagnostics, n_odom, n_loop, pair_logs, poses, best_methods, best_scores, rejection_reasons)
     """
     n = len(frames)
     pose_graph = PoseGraph()
@@ -1099,6 +1176,15 @@ def build_pose_graph_rgbd(
     frames_since_accepted: int = 0
 
     for i in range(1, n):
+        # Region classification for source frame i
+        face_y_thresh = getattr(cfg, "face_region_center_y_threshold_m", 0.0)
+        src_is_upper = is_upper_face_frame(frames[i], face_y_thresh)
+        src_cy = (
+            float(frames[i].pcd.get_axis_aligned_bounding_box().get_center()[1])
+            if (hasattr(frames[i], "pcd") and frames[i].pcd is not None and frames[i].pcd.has_points())
+            else 0.0
+        )
+
         # Multi-candidate strategy: check preceding accepted frames in the search window
         # AND frame 0 (the anchor reference) to pick whichever gives higher inlier fitness.
         window = accepted_idx[-(cfg.search_accepted_window + 1):]
@@ -1125,6 +1211,14 @@ def build_pose_graph_rgbd(
         )
 
         for j in target_indices:
+            tgt_is_upper = is_upper_face_frame(frames[j], face_y_thresh)
+            tgt_cy = (
+                float(frames[j].pcd.get_axis_aligned_bounding_box().get_center()[1])
+                if (hasattr(frames[j], "pcd") and frames[j].pcd is not None and frames[j].pcd.has_points())
+                else 0.0
+            )
+            is_face_pair = (src_is_upper and tgt_is_upper)
+
             init_guess = np.eye(4)
             if j == prev_accepted_idx and frames_since_accepted == 0 and last_rel_trans is not None:
                 rot_p = compute_rotation_deg(last_rel_trans)
@@ -1179,6 +1273,9 @@ def build_pose_graph_rgbd(
                 ),
                 "jump_trans_m": jump_trans_m,
                 "jump_rot_deg": jump_rot_deg,
+                "is_face_pair": is_face_pair,
+                "src_center_y": src_cy,
+                "tgt_center_y": tgt_cy,
             })
 
             # Print pair log with exact tier and score
@@ -1239,9 +1336,21 @@ def build_pose_graph_rgbd(
         best_methods[i] = method_best
         best_scores[i] = reason_best
 
+        # Mark primary candidate in pair_logs for frame i
+        for pl in pair_logs:
+            if pl["source"] == i:
+                pl["is_primary"] = (pl["target"] == j_best)
+
         # Fusion eligibility check (secondary stricter gate for Stage 4 fusion)
+        # TASK 3: When BOTH frames are upper (face/head), enforce stricter quality gates
         min_fit_fusion = getattr(cfg, "min_fitness_for_fusion", 0.60)
         max_res_fusion = getattr(cfg, "max_landmark_residual_for_fusion_mm", 5.0)
+        min_face_fit = getattr(cfg, "min_face_pair_fitness_for_fusion", 0.75)
+        max_face_rmse = getattr(cfg, "max_face_pair_rmse_for_fusion_mm", 4.0)
+
+        best_tgt_is_upper = is_upper_face_frame(frames[j_best], face_y_thresh)
+        best_is_face_pair = (src_is_upper and best_tgt_is_upper)
+
         lm_res_val = None
         if "residual=" in reason_best:
             try:
@@ -1249,12 +1358,22 @@ def build_pose_graph_rgbd(
             except Exception:
                 pass
 
-        if fit_best < min_fit_fusion:
-            print(f"    frame {i:02d}: pose accepted, EXCLUDED from fusion (fitness {fit_best:.2f} < {min_fit_fusion:.2f} fusion threshold)")
-        elif lm_res_val is not None and lm_res_val > max_res_fusion:
-            print(f"    frame {i:02d}: pose accepted, EXCLUDED from fusion (landmark residual {lm_res_val:.1f}mm > {max_res_fusion:.1f}mm fusion threshold)")
+        rmse_best_mm = rmse_best * 1000.0 if np.isfinite(rmse_best) else 999.0
+
+        if best_is_face_pair:
+            if fit_best < min_face_fit:
+                print(f"    frame {i:02d}: pose accepted, EXCLUDED from fusion (face-pair fitness {fit_best:.2f} < {min_face_fit:.2f} threshold)")
+            elif rmse_best_mm > max_face_rmse:
+                print(f"    frame {i:02d}: pose accepted, EXCLUDED from fusion (face-pair rmse {rmse_best_mm:.1f}mm > {max_face_rmse:.1f}mm threshold)")
+            else:
+                print(f"    frame {i:02d}: tier={method_best} {reason_best} ACCEPTED")
         else:
-            print(f"    frame {i:02d}: tier={method_best} {reason_best} ACCEPTED")
+            if fit_best < min_fit_fusion:
+                print(f"    frame {i:02d}: pose accepted, EXCLUDED from fusion (fitness {fit_best:.2f} < {min_fit_fusion:.2f} fusion threshold)")
+            elif lm_res_val is not None and lm_res_val > max_res_fusion:
+                print(f"    frame {i:02d}: pose accepted, EXCLUDED from fusion (landmark residual {lm_res_val:.1f}mm > {max_res_fusion:.1f}mm fusion threshold)")
+            else:
+                print(f"    frame {i:02d}: tier={method_best} {reason_best} ACCEPTED")
 
         pose_i = poses[j_best] @ T_best
         node_id = len(pose_graph.nodes)
@@ -1280,6 +1399,61 @@ def build_pose_graph_rgbd(
 
         accepted_idx.append(i)
         diagnostics[i] = (fit_best, rmse_best, True)
+
+    # TASK 2: Diagnostic summary of loop-closure density and accepted-pair fitness/RMSE distribution
+    accepted_pairs = [p for p in pair_logs if p.get("success", False)]
+    total_accepted_frames = len(accepted_idx)
+    avg_loop_per_frame = (n_loop / max(1, total_accepted_frames))
+
+    print("\n" + "=" * 65)
+    print("RGB-D POSE GRAPH & LOOP CLOSURE DIAGNOSTICS (Face & Cloud Metrics)")
+    print("=" * 65)
+    print(f"  Total accepted frames: {total_accepted_frames} of {n}")
+    print(f"  Total loop-closure edges formed: {n_loop}")
+    print(f"  Average loop-closure edges per frame: {avg_loop_per_frame:.2f}")
+
+    if accepted_pairs:
+        fits = [p["fitness"] for p in accepted_pairs]
+        rmses = [p["rmse_mm"] for p in accepted_pairs if p["rmse_mm"] < 990.0]
+        n_pairs = len(accepted_pairs)
+
+        fit_high = sum(1 for f in fits if f >= 0.75)
+        fit_mod = sum(1 for f in fits if 0.60 <= f < 0.75)
+        fit_border = sum(1 for f in fits if f < 0.60)
+
+        rmse_tight = sum(1 for r in rmses if r <= 4.0)
+        rmse_mod = sum(1 for r in rmses if 4.0 < r <= 6.0)
+        rmse_border = sum(1 for r in rmses if r > 6.0)
+
+        print(f"\n  Accepted Pair Fitness Distribution (total accepted pairs: {n_pairs}):")
+        print(f"    High (>= 0.75):        {fit_high:3d} ({fit_high/n_pairs*100.0:5.1f}%) [comfortable alignment]")
+        print(f"    Moderate [0.60, 0.75): {fit_mod:3d} ({fit_mod/n_pairs*100.0:5.1f}%) [moderate alignment]")
+        print(f"    Borderline (< 0.60):   {fit_border:3d} ({fit_border/n_pairs*100.0:5.1f}%) [near acceptance threshold]")
+        print(f"    Fitness: mean={np.mean(fits):.3f}, median={np.median(fits):.3f}, min={np.min(fits):.3f}, max={np.max(fits):.3f}")
+
+        print(f"\n  Accepted Pair RMSE Distribution:")
+        print(f"    Tight (<= 4.0 mm):     {rmse_tight:3d} ({rmse_tight/n_pairs*100.0:5.1f}%) [clears strict face threshold]")
+        print(f"    Moderate (4.0-6.0 mm): {rmse_mod:3d} ({rmse_mod/n_pairs*100.0:5.1f}%)")
+        print(f"    Borderline (> 6.0 mm): {rmse_border:3d} ({rmse_border/n_pairs*100.0:5.1f}%) [near max RMSE limit]")
+        if rmses:
+            print(f"    RMSE: mean={np.mean(rmses):.2f}mm, median={np.median(rmses):.2f}mm, min={np.min(rmses):.2f}mm, max={np.max(rmses):.2f}mm")
+
+        face_pairs = [p for p in accepted_pairs if p.get("is_face_pair", False)]
+        if face_pairs:
+            n_fp = len(face_pairs)
+            fp_fits = [p["fitness"] for p in face_pairs]
+            fp_rmses = [p["rmse_mm"] for p in face_pairs if p["rmse_mm"] < 990.0]
+            fp_clear_75 = sum(1 for f in fp_fits if f >= 0.75)
+            fp_between_45_75 = sum(1 for f in fp_fits if 0.45 <= f < 0.75)
+            print(f"\n  Face-Region Pairs specifically (both frames upper face/head, n={n_fp}):")
+            print(f"    Clears strict threshold (>= 0.75): {fp_clear_75:3d} ({fp_clear_75/n_fp*100.0:5.1f}%)")
+            print(f"    Borderline [0.45, 0.75):           {fp_between_45_75:3d} ({fp_between_45_75/n_fp*100.0:5.1f}%) [excluded from face fusion]")
+            if fp_rmses:
+                fp_rmse_le_4 = sum(1 for r in fp_rmses if r <= 4.0)
+                print(f"    RMSE <= 4.0 mm:                    {fp_rmse_le_4:3d} ({fp_rmse_le_4/n_fp*100.0:5.1f}%)")
+        else:
+            print("\n  Face-Region Pairs specifically: 0 accepted upper-to-upper pairs detected (frames in lower/neutral region)")
+    print("=" * 65 + "\n")
 
     return pose_graph, node_of, diagnostics, n_odom, n_loop, pair_logs, poses, best_methods, best_scores, rejection_reasons
 
@@ -1382,6 +1556,9 @@ def register_sequence_rgbd_human(
     fusion_reasons_map: dict[int, str] = {}
     min_fit_fusion = getattr(cfg, "min_fitness_for_fusion", 0.60)
     max_res_fusion = getattr(cfg, "max_landmark_residual_for_fusion_mm", 5.0)
+    min_face_fit = getattr(cfg, "min_face_pair_fitness_for_fusion", 0.75)
+    max_face_rmse = getattr(cfg, "max_face_pair_rmse_for_fusion_mm", 4.0)
+    face_y_thresh = getattr(cfg, "face_region_center_y_threshold_m", 0.0)
 
     for i, d in enumerate(diagnostics):
         if i == 0:
@@ -1389,6 +1566,7 @@ def register_sequence_rgbd_human(
             continue
         if d is not None and d[2]:
             fit_val = d[0]
+            rmse_val_mm = d[1] * 1000.0 if np.isfinite(d[1]) else 999.0
             score_str = best_scores.get(i, "")
             res_val = None
             if "residual=" in score_str:
@@ -1396,14 +1574,44 @@ def register_sequence_rgbd_human(
                     res_val = float(score_str.split("residual=")[1].split("mm")[0])
                 except Exception:
                     pass
-            if fit_val < min_fit_fusion:
-                fusion_eligible_map[i] = False
-                fusion_reasons_map[i] = f"fitness {fit_val:.2f} < {min_fit_fusion:.2f} fusion threshold"
-            elif res_val is not None and res_val > max_res_fusion:
-                fusion_eligible_map[i] = False
-                fusion_reasons_map[i] = f"landmark residual {res_val:.1f}mm > {max_res_fusion:.1f}mm fusion threshold"
+
+            src_is_upper = is_upper_face_frame(frames[i], face_y_thresh)
+            # Find primary candidate target for frame i
+            target_j = None
+            for pl in pair_logs:
+                if pl["source"] == i and pl["success"] and pl.get("is_primary", False):
+                    target_j = pl["target"]
+                    break
+            if target_j is None:
+                for pl in pair_logs:
+                    if pl["source"] == i and pl["success"] and abs(pl["fitness"] - fit_val) < 1e-4:
+                        target_j = pl["target"]
+                        break
+
+            tgt_is_upper = False
+            if target_j is not None and target_j < len(frames):
+                tgt_is_upper = is_upper_face_frame(frames[target_j], face_y_thresh)
+
+            is_face_pair = (src_is_upper and tgt_is_upper)
+
+            if is_face_pair:
+                if fit_val < min_face_fit:
+                    fusion_eligible_map[i] = False
+                    fusion_reasons_map[i] = f"face-pair fitness {fit_val:.2f} < {min_face_fit:.2f} threshold"
+                elif rmse_val_mm > max_face_rmse:
+                    fusion_eligible_map[i] = False
+                    fusion_reasons_map[i] = f"face-pair rmse {rmse_val_mm:.1f}mm > {max_face_rmse:.1f}mm threshold"
+                else:
+                    fusion_eligible_map[i] = True
             else:
-                fusion_eligible_map[i] = True
+                if fit_val < min_fit_fusion:
+                    fusion_eligible_map[i] = False
+                    fusion_reasons_map[i] = f"fitness {fit_val:.2f} < {min_fit_fusion:.2f} fusion threshold"
+                elif res_val is not None and res_val > max_res_fusion:
+                    fusion_eligible_map[i] = False
+                    fusion_reasons_map[i] = f"landmark residual {res_val:.1f}mm > {max_res_fusion:.1f}mm fusion threshold"
+                else:
+                    fusion_eligible_map[i] = True
         else:
             fusion_eligible_map[i] = False
 

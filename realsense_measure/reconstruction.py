@@ -17,12 +17,139 @@ from config import PreprocessConfig
 from preprocessing import downsample_and_denoise, extract_largest_cluster
 
 
+
+def _remove_radius_stragglers(
+    pcd: o3d.geometry.PointCloud,
+    radius: float,
+    nb_points: int = 2,
+) -> o3d.geometry.PointCloud:
+    """
+    Gentle radius-based outlier removal (Task 2).
+
+    Removes isolated single-frame straggler points that have fewer than
+    ``nb_points`` neighbours within ``radius`` metres.  This is far looser
+    than SOR: real sparse features (ear tips, nose bridge wisps) still survive
+    because they accumulate a handful of consistent points across multiple
+    accepted frames.  Only truly isolated specks — often the product of a
+    single borderline-accepted frame — are dropped.
+
+    Parameters
+    ----------
+    pcd:
+        Input point cloud (head/body mode only; box mode must never call this).
+    radius:
+        Neighbourhood search radius in metres.  Recommended ≈ 2–3× the fusion
+        voxel size (2 mm), so ~4–6 mm.
+    nb_points:
+        Minimum neighbours required to keep a point.  2 is appropriate (removes
+        truly isolated single-point specks that have 0 or 1 nearby neighbour);
+        lower values are more permissive, higher values remove more aggressively.
+
+    Returns
+    -------
+    Cleaned point cloud with straggler specks removed.
+    """
+    if not pcd.has_points() or len(pcd.points) < nb_points + 1:
+        return pcd
+    cleaned, _ = pcd.remove_radius_outlier(nb_points=nb_points, radius=radius)
+    return cleaned
+
+
+def _remove_streak_artifacts(
+    pcd: o3d.geometry.PointCloud,
+    linearity_ratio: float = 8.0,
+    k_neighbors: int = 20,
+    voxel_size: float = 0.002,
+) -> o3d.geometry.PointCloud:
+    """
+    Linearity-aware streak artifact removal (Task 1).
+
+    A true surface patch has a locally 2-D (planar / curved) neighbourhood.
+    A streak artifact from slight frame misalignment has a locally 1-D
+    (linear) neighbourhood — points strung out along the direction of the
+    registration error.
+
+    For each point, PCA eigenvalues λ₁ ≥ λ₂ ≥ λ₃ of its k-nearest
+    neighbours are computed.  A neighbourhood is labelled *linear* when
+    λ₁ / max(λ₂, ε) > ``linearity_ratio``.  Linear neighbourhoods that also
+    sit in below-median local-density regions are flagged as streaks and
+    removed.  Genuinely sparse-but-isotropic regions (ear tip, nose bridge)
+    have small but roughly equal eigenvalues, so they survive.
+
+    Parameters
+    ----------
+    pcd:
+        Input point cloud (head/body mode only; box mode must never call this).
+    linearity_ratio:
+        λ₁/λ₂ threshold above which a neighbourhood is deemed linear.
+        Default 8.0 means λ₁ must be 8× larger than λ₂.
+    k_neighbors:
+        Number of neighbours used for PCA.  15–20 is a good balance between
+        stability and locality.
+    voxel_size:
+        Fusion voxel size in metres (used to set the KDTree search radius for
+        local-density estimation).
+
+    Returns
+    -------
+    Cleaned point cloud with linear streak artifacts removed.
+    """
+    if not pcd.has_points() or len(pcd.points) < k_neighbors + 1:
+        return pcd
+
+    pts = np.asarray(pcd.points)
+    n = len(pts)
+
+    kdtree = o3d.geometry.KDTreeFlann(pcd)
+
+    linearity_flags = np.zeros(n, dtype=bool)
+    local_counts = np.zeros(n, dtype=int)
+
+    # PCA window radius: large enough to capture linear streaks and local surface patches
+    # without reaching across to distant disconnected structures.
+    # 10× voxel_size = 20 mm for 2 mm voxel.
+    pca_radius = voxel_size * 10.0
+    density_radius = voxel_size * 3.0
+    min_pca_pts = 4  # Need at least 4 points in the neighborhood for stable 3D PCA
+
+    for i in range(n):
+        k_r_pca, idx_r_pca, _ = kdtree.search_radius_vector_3d(pts[i], pca_radius)
+        k_r_den, _, _ = kdtree.search_radius_vector_3d(pts[i], density_radius)
+        local_counts[i] = k_r_den - 1
+
+        # Genuinely sparse patch: not enough points to build a stable PCA -> keep unconditionally
+        if k_r_pca < min_pca_pts:
+            continue
+
+        # Use up to k_neighbors from the radius window for PCA
+        neighbour_pts = pts[np.asarray(idx_r_pca[:min(k_neighbors, k_r_pca)])]
+        cov = np.cov(neighbour_pts.T)
+        eigvals = np.linalg.eigvalsh(cov)   # ascending: λ₃ ≤ λ₂ ≤ λ₁
+        lam1 = float(eigvals[2])
+        lam2 = float(eigvals[1])
+        eps = 1e-12
+        if lam1 / max(lam2, eps) > linearity_ratio:
+            linearity_flags[i] = True
+
+    median_density = float(np.median(local_counts))
+    # Remove points that are BOTH locally linear AND below-median density
+    streak_mask = linearity_flags & (local_counts < median_density)
+
+    keep_idx = np.where(~streak_mask)[0]
+    n_removed = int(np.sum(streak_mask))
+    if n_removed > 0:
+        print(f"  [streak-removal] Removed {n_removed} streak/artifact points "
+              f"({n_removed / n * 100:.1f}% of {n} total).")
+    return pcd.select_by_index(keep_idx.tolist())
+
+
 def fuse_point_clouds(
     aligned_frames: list[o3d.geometry.PointCloud],
     cfg: PreprocessConfig,
     skip_final_clustering: bool = False,
     skip_outlier_removal: bool = False,
     voxel_size: float | None = None,
+    reg_cfg=None,
 ) -> o3d.geometry.PointCloud:
     """
     Merge a list of registered, per-frame object clouds into one clean cloud.
@@ -41,6 +168,9 @@ def fuse_point_clouds(
        This step is SKIPPED for human reconstructions (``skip_final_clustering=True``)
        because a human body consists of multiple connected regions (face, ears,
        shoulders) that would be wrongly discarded as separate small blobs.
+    5. (HUMAN/HEAD only) Gentle radius-based straggler removal then PCA-based
+       linearity/streak removal — catches misalignment artifacts without removing
+       sparse-but-real features like ear tips or nose bridge.
 
     Parameters
     ----------
@@ -56,6 +186,10 @@ def fuse_point_clouds(
     skip_outlier_removal:
         When True, skip statistical outlier removal. Use for human scans
         to avoid stripping sparse lateral/profile facial features.
+    reg_cfg:
+        Optional RegistrationConfig instance.  When provided, controls whether
+        and how streak removal is applied (``enable_streak_removal``,
+        ``streak_linearity_ratio_threshold``, ``streak_removal_radius_mult``).
 
     Returns
     -------
@@ -97,7 +231,34 @@ def fuse_point_clouds(
     if not skip_final_clustering and fused.has_points():
         fused = extract_largest_cluster(fused, cfg)
 
+    # 4. Head/body-only post-fusion artifact cleanup (Task 1 & 2):
+    #    Streak artifacts and single-frame ghost points that pass through when SOR is
+    #    bypassed.  Box mode must never reach this block.
+    if skip_outlier_removal and fused.has_points():
+        enable = False
+        linearity_ratio = 8.0
+        radius_mult = 2.5
+        if reg_cfg is not None:
+            enable = getattr(reg_cfg, "enable_streak_removal", True)
+            linearity_ratio = getattr(reg_cfg, "streak_linearity_ratio_threshold", 8.0)
+            radius_mult = getattr(reg_cfg, "streak_removal_radius_mult", 2.5)
+
+        if enable:
+            # Task 2: Gentle radius-based straggler pass first (cheap O(n log n))
+            straggler_radius = radius_mult * eff_voxel_size
+            fused = _remove_radius_stragglers(fused, radius=straggler_radius, nb_points=2)
+
+            # Task 1: PCA linearity-based streak removal (more expensive, but post-downsample)
+            if fused.has_points():
+                fused = _remove_streak_artifacts(
+                    fused,
+                    linearity_ratio=linearity_ratio,
+                    k_neighbors=20,
+                    voxel_size=eff_voxel_size,
+                )
+
     return fused
+
 
 
 def fuse_tsdf_volume(

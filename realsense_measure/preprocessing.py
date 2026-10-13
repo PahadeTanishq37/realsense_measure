@@ -274,29 +274,31 @@ def extract_plausible_cluster(
             largest_label = int(np.bincount(labels[labels >= 0]).argmax())
             best_idx = np.where(labels == largest_label)[0]
 
-        # Merge adjacent / nearby clusters (neck, jaw, shoulders) within anatomical distance of main centroid
-        main_cluster = pcd.select_by_index(best_idx)
-        main_centroid = np.asarray(main_cluster.points).mean(axis=0)
-        merged_indices = [best_idx]
+        # For body target: merge adjacent / nearby clusters within anatomical distance of main centroid
+        if getattr(target_cfg, "name", None) == "body":
+            main_cluster = pcd.select_by_index(best_idx)
+            main_centroid = np.asarray(main_cluster.points).mean(axis=0)
+            merged_indices = [best_idx]
+            proximity_limit_m = 0.35
+            for label in unique_labels:
+                other_idx = np.where(labels == label)[0]
+                if np.array_equal(other_idx, best_idx):
+                    continue
+                other_cluster = pcd.select_by_index(other_idx)
+                other_centroid = np.asarray(other_cluster.points).mean(axis=0)
+                dist_to_main = float(np.linalg.norm(other_centroid - main_centroid))
 
-        proximity_limit_m = 0.35 if getattr(target_cfg, "name", None) == "body" else 0.28
-        for label in unique_labels:
-            other_idx = np.where(labels == label)[0]
-            if np.array_equal(other_idx, best_idx):
-                continue
-            other_cluster = pcd.select_by_index(other_idx)
-            other_centroid = np.asarray(other_cluster.points).mean(axis=0)
-            dist_to_main = float(np.linalg.norm(other_centroid - main_centroid))
+                if dist_to_main <= proximity_limit_m:
+                    merged_indices.append(other_idx)
+                    print(
+                        f"[preprocessing] merged adjacent body cluster "
+                        f"(size: {len(other_idx)}, dist: {dist_to_main:.2f}m) into main body cluster"
+                    )
 
-            if dist_to_main <= proximity_limit_m:
-                merged_indices.append(other_idx)
-                print(
-                    f"[preprocessing] merged adjacent neck/body cluster "
-                    f"(size: {len(other_idx)}, dist: {dist_to_main:.2f}m) into main head cluster"
-                )
+            final_indices = np.concatenate(merged_indices)
+            return pcd.select_by_index(final_indices)
 
-        final_indices = np.concatenate(merged_indices)
-        return pcd.select_by_index(final_indices)
+        return pcd.select_by_index(best_idx)
 
     # General / box target handling (unchanged):
     if last_centroid is not None:

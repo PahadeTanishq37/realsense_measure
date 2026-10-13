@@ -26,6 +26,7 @@ from config import RegistrationConfig, PreprocessConfig
 from registration import (
     register_rgbd_pair,
     register_sequence_rgbd_human,
+    rigid_transform_from_correspondences,
     compute_rotation_deg,
     compute_translation_mm,
 )
@@ -748,6 +749,125 @@ def test_j_glasses_weighted_kabsch_and_dense_sanity():
     print("  [PASS] Part (b): Dense-surface sanity check successfully rejected corrupted landmark seed and fell through to Tier 2.")
 
 
+def test_k_systematic_bias_fpfh_crosscheck():
+    print("\n--- Test K: Smooth Systematic Eye-Region Bias & FPFH / Local Face Cross-Check ---")
+    scene = o3d.t.geometry.RaycastingScene()
+    mesh = make_synthetic_scene()
+    scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(mesh))
+
+    intr = o3d.camera.PinholeCameraIntrinsic(640, 480, 525.0, 525.0, 320.0, 240.0)
+    intr_tensor = o3d.core.Tensor([
+        [525.0, 0.0, 320.0],
+        [0.0, 525.0, 240.0],
+        [0.0, 0.0, 1.0],
+    ], dtype=o3d.core.Dtype.Float64)
+
+    P0 = np.eye(4)
+    P1 = np.eye(4)
+    P1[:3, :3] = o3d.geometry.get_rotation_matrix_from_xyz((np.radians(5.0), 0, 0))
+    P1[:3, 3] = [0.01, 0.0, 0.015]
+
+    f0 = render_synthetic_rgbd_frame(scene, P0, 0, intr, intr_tensor)
+    f1 = render_synthetic_rgbd_frame(scene, P1, 1, intr, intr_tensor)
+
+    T_gt = np.linalg.inv(P0) @ P1
+    R_gt = T_gt[:3, :3]
+    t_gt = T_gt[:3, 3]
+
+    base_landmarks = {
+        "left_eye_outer": np.array([-0.065, 0.035, 0.58]),
+        "right_eye_outer": np.array([0.065, 0.035, 0.58]),
+        "left_eye_inner": np.array([-0.032, 0.035, 0.57]),
+        "right_eye_inner": np.array([0.032, 0.035, 0.57]),
+        "nose_bridge": np.array([0.0, 0.020, 0.55]),
+        "nose_tip": np.array([0.0, 0.0, 0.52]),
+        "left_mouth_corner": np.array([-0.040, -0.045, 0.58]),
+        "right_mouth_corner": np.array([0.040, -0.045, 0.58]),
+        "chin": np.array([0.0, -0.075, 0.59]),
+        "left_nostril": np.array([-0.012, -0.010, 0.56]),
+        "right_nostril": np.array([0.012, -0.010, 0.56]),
+        "upper_lip_center": np.array([0.0, -0.025, 0.56]),
+        "lower_lip_center": np.array([0.0, -0.042, 0.57]),
+    }
+
+    eye_keys = {"left_eye_outer", "right_eye_outer", "left_eye_inner", "right_eye_inner"}
+
+    dst_lm_dict = {}
+    src_lm_dict = {}
+    src_pts_list = []
+    dst_pts_list = []
+    weights_list = []
+
+    for name, p_dst in base_landmarks.items():
+        p_src_true = R_gt.T @ (p_dst - t_gt)
+        if name in eye_keys:
+            # Constant 15mm bias along optical axis with LOW variance and HIGH valid_ratio (glasses refraction)
+            p_src_biased = p_src_true + np.array([0.0, 0.0, 0.015])
+            s_vr = 1.0
+            s_var = 1e-6
+        else:
+            p_src_biased = p_src_true.copy()
+            s_vr = 1.0
+            s_var = 1e-6
+
+        d_vr = 1.0
+        d_var = 1e-6
+        w = float(min(1.0, s_vr * d_vr) / (1.0 + (s_var / 1e-5) + (d_var / 1e-5)))
+
+        src_pts_list.append(p_src_biased)
+        dst_pts_list.append(p_dst)
+        weights_list.append(w)
+
+        src_lm_dict[name] = {"position": p_src_biased, "valid_ratio": s_vr, "variance": s_var, "low_confidence": False}
+        dst_lm_dict[name] = {"position": p_dst, "valid_ratio": d_vr, "variance": d_var, "low_confidence": False}
+
+    src_pts = np.array(src_pts_list)
+    dst_pts = np.array(dst_pts_list)
+    weights = np.array(weights_list)
+
+    # 1. Assert Kabsch residual passes existing 15mm gate despite systematic bias
+    T_kabsch, res_mm = rigid_transform_from_correspondences(src_pts, dst_pts, weights=weights)
+    print(f"  Biased Kabsch residual: {res_mm:.2f} mm (passes <=15mm residual gate)")
+    assert res_mm <= 15.0, f"Residual {res_mm} mm should be <= 15mm gate"
+
+    # 2. Assert global dense fitness passes >= 0.30 gate (diluted across entire head)
+    eval_voxel = 0.006
+    s_down = f1.pcd.voxel_down_sample(eval_voxel)
+    t_down = f0.pcd.voxel_down_sample(eval_voxel)
+    t_down.estimate_normals()
+    glob_eval = o3d.pipelines.registration.evaluate_registration(s_down, t_down, 0.02, T_kabsch)
+    print(f"  Biased Kabsch global dense fitness: {glob_eval.fitness:.2f} (passes >=0.30 gate)")
+    assert glob_eval.fitness >= 0.30, "Global dense fitness would deceptively pass without cross-checks"
+
+    # 3. Assert cross-check detects disagreement and triggers fallthrough to Tier 2
+    import landmarks
+    orig_detect = landmarks.detect_face_landmarks_3d
+
+    def mock_detect(color, depth, intrinsics, **kwargs):
+        if getattr(color, "shape", None) is not None and np.array_equal(color, f0.color_bgr):
+            return dst_lm_dict
+        return src_lm_dict
+
+    landmarks.detect_face_landmarks_3d = mock_detect
+    cfg = RegistrationConfig(
+        enable_landmark_fpfh_crosscheck=True,
+        max_landmark_fpfh_disagreement_trans_m=0.02,
+        max_landmark_fpfh_disagreement_rot_deg=10.0,
+    )
+
+    try:
+        T_est, fit, rmse, accepted, method, rot, trans, reason = register_rgbd_pair(f1, f0, cfg)
+        print(f"  Biased landmark pair registered via tier: '{method}', accepted={accepted}")
+        assert method in ("colored_icp", "rgbd_odometry_colored_icp"), (
+            f"Expected Tier 2 fallthrough due to cross-check disagreement, got method: '{method}'"
+        )
+        assert accepted is True, "Tier 2 should successfully align the frame pair"
+    finally:
+        landmarks.detect_face_landmarks_3d = orig_detect
+
+    print("  [PASS] Test K: Smooth systematic eye-region bias caught by cross-check; fallthrough to Tier 2 confirmed.")
+
+
 def main():
     print("=" * 65)
     print("  HUMAN 180 DEG MULTI-VIEW REGISTRATION SYNTHETIC TEST SUITE")
@@ -763,9 +883,10 @@ def main():
     test_h_loop_closure_fitness_threshold()
     test_i_non_overlapping_pair_colored_icp_skip()
     test_j_glasses_weighted_kabsch_and_dense_sanity()
+    test_k_systematic_bias_fpfh_crosscheck()
 
     print("\n" + "=" * 65)
-    print("  ALL 10 SYNTHETIC TESTS (A, B, C, D, E, F, G, H, I, J) PASSED SUCCESSFULLY!")
+    print("  ALL 11 SYNTHETIC TESTS (A, B, C, D, E, F, G, H, I, J, K) PASSED SUCCESSFULLY!")
     print("=" * 65)
 
 

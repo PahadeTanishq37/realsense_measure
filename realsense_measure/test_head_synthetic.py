@@ -256,6 +256,7 @@ def test_neck_region_preservation_isolate_register_fuse() -> bool:
     from reconstruction import fuse_point_clouds
 
     np.random.seed(42)
+    o3d.utility.random.seed(42)
     # 1. Build head+neck+shoulders mesh with intentionally sparse/noisy neck band
     # to simulate sensor dropouts at the chin-to-neck transition.
     pcd_full = create_head_with_neck_shoulders(n_pts=8000)

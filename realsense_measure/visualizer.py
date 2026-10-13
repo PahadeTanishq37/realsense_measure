@@ -114,6 +114,31 @@ def show(
     vis.destroy_window()
 
 
+def prepare_display_geometry(
+    geometry: o3d.geometry.Geometry | Sequence[o3d.geometry.Geometry],
+    voxel_size_m: float = 0.006,
+) -> o3d.geometry.Geometry | list[o3d.geometry.Geometry]:
+    """
+    Return a display-only downsampled deep copy of geometry.
+
+    For point clouds, creates a separate deep copy downsampled to ``voxel_size_m``
+    so on-screen rendering is clean and uncluttered rather than overly dense fuzz.
+    Non-point-cloud geometries (e.g. LineSet, TriangleMesh) are returned as copies.
+    """
+    if isinstance(geometry, (list, tuple)):
+        return [
+            g.voxel_down_sample(voxel_size=voxel_size_m)
+            if isinstance(g, o3d.geometry.PointCloud) and g.has_points() and voxel_size_m > 0
+            else copy.deepcopy(g)
+            for g in geometry
+        ]
+    elif isinstance(geometry, o3d.geometry.PointCloud):
+        if geometry.has_points() and voxel_size_m > 0:
+            return geometry.voxel_down_sample(voxel_size=voxel_size_m)
+        return copy.deepcopy(geometry)
+    return copy.deepcopy(geometry)
+
+
 def obb_lineset(
     obb: o3d.geometry.OrientedBoundingBox,
     color: tuple[float, float, float] = (1.0, 0.8, 0.0),

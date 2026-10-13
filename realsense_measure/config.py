@@ -186,6 +186,13 @@ class RegistrationConfig:
     min_seed_dense_fitness: float = 0.30       # minimum dense-surface fitness required to accept landmark Kabsch seed
     max_depth_variance_m2: float = 1e-5        # max depth variance threshold (m^2)
     landmark_cfg: LandmarkConfig = field(default_factory=LandmarkConfig)
+    enable_landmark_fpfh_crosscheck: bool = True               # independent FPFH+RANSAC geometric cross-check
+    max_landmark_fpfh_disagreement_trans_m: float = 0.02       # max translation disagreement between landmark and FPFH (20 mm)
+    max_landmark_fpfh_disagreement_rot_deg: float = 10.0       # max rotation angle disagreement between landmark and FPFH (10 deg)
+    enable_landmark_face_fitness_check: bool = True            # localized face-region fitness evaluation
+    face_crop_radius_m: float = 0.08                           # radius around nose tip/face anchor for localized fitness evaluation (80 mm)
+    min_landmark_face_fitness: float = 0.25                    # minimum local face-region fitness required to accept landmark seed
+    face_fitness_dist_m: float = 0.005                         # correspondence search distance for localized face fitness (5 mm)
 
     # Multiway pose-graph registration settings
     use_multiway: bool = False  # sequential is the safer default; set True to use the (corrected, gated) pose graph
@@ -217,6 +224,14 @@ class RegistrationConfig:
     # Fusion eligibility thresholds (stricter secondary gate for Stage 4 fusion)
     min_fitness_for_fusion: float = 0.60                  # frames with fitness < 0.60 keep pose in graph but are excluded from dense Stage 4 fusion
     max_landmark_residual_for_fusion_mm: float = 5.0      # landmark frames with residual > 5.0mm excluded from dense Stage 4 fusion
+    min_face_pair_fitness_for_fusion: float = 0.75        # stricter fusion fitness threshold for upper (face/head) pairs
+    max_face_pair_rmse_for_fusion_mm: float = 4.0         # stricter fusion RMSE threshold (mm) for upper (face/head) pairs
+    face_region_center_y_threshold_m: float = 0.0         # Y threshold (m): bbox_center_y <= threshold is upper (face/head)
+
+    # Post-fusion artifact cleanup for head/body mode (linearity-aware streak removal)
+    enable_streak_removal: bool = True                 # enable streak/speckle post-fusion cleanup for human scans
+    streak_linearity_ratio_threshold: float = 8.0      # PCA eigenvalue ratio above which a neighborhood is considered "linear" (streak)
+    streak_removal_radius_mult: float = 2.5            # radius-pass radius = this * fusion voxel_size (2 mm) ≈ 5 mm
 
     # Visualisation toggles
     show_registration_pairs: bool = False      # display before/after pairwise alignment window
@@ -316,6 +331,12 @@ class PipelineConfig:
 
     # Ground-truth reference dimensions for accuracy comparison (metres, sorted descending)
     reference_dims_m: list[float] | None = None
+
+    # Display-only downsampling settings for interactive preview windows (metres).
+    # Coarser display resolution prevents windows from looking overly dense/cluttered,
+    # while all saved .ply files and dimensional measurements remain at 100% full resolution.
+    stage5_display_voxel_size_m: float = 0.006      # 6 mm display resolution for Stage 5 window
+    stage3_4_display_voxel_size_m: float = 0.0025    # 2.5 mm display resolution for Stage 3/4 preview windows (loosened from 6mm)
 
     def __post_init__(self) -> None:
         # Ensure output_dir is always a Path, even if a plain string was passed.
