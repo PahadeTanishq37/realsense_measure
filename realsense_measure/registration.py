@@ -136,6 +136,216 @@ def rigid_transform_from_correspondences(
     return T, residual_mm
 
 
+def evaluate_point_set_geometry(
+    pts: np.ndarray,
+    weights: np.ndarray | None = None,
+    label: str = "points",
+    min_spread_m: float = 0.025,
+    min_secondary_spread_m: float = 0.005,
+    max_collinear_ratio: float = 10.0,
+    min_unique_dist_m: float = 0.005,
+    min_unique_count: int = 4,
+) -> tuple[bool, str, dict[str, float]]:
+    """
+    Evaluate the geometric conditioning of a single 3D landmark point set.
+
+    Assesses:
+    1. Count and coordinate finiteness.
+    2. Number of spatially distinct landmarks (clustering closer than min_unique_dist_m).
+    3. Maximum geometric spread (diameter / max pairwise distance).
+    4. Centered SVD singular values for 2D spread and collinearity.
+       - Planar configurations (s3 ~ 0, s2 >= min_secondary_spread_m) are ACCEPTED.
+       - Collinear configurations (s2 < min_secondary_spread_m or s1/s2 > max_collinear_ratio)
+         are REJECTED.
+
+    All spatial dimensions and thresholds are in METRES (m).
+
+    Parameters
+    ----------
+    pts:
+        (N, 3) float array of 3D coordinates in camera frame (metres).
+    weights:
+        Optional (N,) non-negative quality weights. If provided, SVD uses weighted
+        centered coordinates to assess the effective geometry seen by weighted Kabsch.
+    label:
+        Descriptive string for diagnostic messages (e.g. "source" or "destination").
+    min_spread_m:
+        Minimum allowable maximum pairwise distance across all points (metres). Default 25 mm.
+    min_secondary_spread_m:
+        Minimum allowable RMS spread along the 2nd principal axis (metres). Default 5 mm.
+    max_collinear_ratio:
+        Maximum allowable ratio of 1st to 2nd singular value (sigma_1 / sigma_2). Default 10.0.
+    min_unique_dist_m:
+        Minimum separation distance to consider two points distinct (metres). Default 5 mm.
+    min_unique_count:
+        Minimum number of distinct spatial clusters required. Default 4.
+
+    Returns
+    -------
+    (is_valid, reason, metrics)
+    """
+    pts_arr = np.asarray(pts, dtype=np.float64)
+    if pts_arr.ndim != 2 or pts_arr.shape[1] != 3:
+        return False, f"{label} shape invalid: {pts_arr.shape}", {}
+
+    n_pts = pts_arr.shape[0]
+    if n_pts < min_unique_count:
+        return False, f"{label} point count {n_pts} < {min_unique_count}", {}
+
+    if not np.all(np.isfinite(pts_arr)):
+        return False, f"{label} contains non-finite coordinates", {}
+
+    # Check for repeated / nearly coincident points
+    unique_pts: list[np.ndarray] = []
+    for p in pts_arr:
+        if not any(float(np.linalg.norm(p - u)) < min_unique_dist_m for u in unique_pts):
+            unique_pts.append(p)
+
+    n_unique = len(unique_pts)
+    if n_unique < min_unique_count:
+        return (
+            False,
+            f"{label} insufficient unique landmarks: {n_unique} < {min_unique_count} distinct clusters",
+            {"n_unique": float(n_unique)},
+        )
+
+    # Maximum pairwise distance (spread / diameter)
+    diffs = pts_arr[:, None, :] - pts_arr[None, :, :]
+    dists = np.linalg.norm(diffs, axis=2)
+    max_dist = float(np.max(dists))
+    if max_dist < min_spread_m:
+        return (
+            False,
+            f"{label} spread too small: {max_dist * 1000.0:.1f}mm < {min_spread_m * 1000.0:.1f}mm",
+            {"max_spread_m": max_dist, "n_unique": float(n_unique)},
+        )
+
+    # Centered SVD analysis (weighted if weights provided)
+    if weights is not None:
+        w = np.asarray(weights, dtype=np.float64).flatten()
+        if w.size != n_pts or float(np.sum(w)) <= 1e-9:
+            w = np.ones(n_pts, dtype=np.float64)
+    else:
+        w = np.ones(n_pts, dtype=np.float64)
+
+    W = float(np.sum(w))
+    w_norm = w / W
+    centroid = np.sum(pts_arr * w_norm[:, None], axis=0)
+    centered = pts_arr - centroid
+    X_w = np.sqrt(w_norm[:, None]) * centered
+    _, S, _ = np.linalg.svd(X_w)
+
+    s1 = float(S[0])
+    s2 = float(S[1])
+    s3 = float(S[2])
+    collinear_ratio = (s1 / s2) if s2 > 1e-9 else float("inf")
+
+    metrics = {
+        "max_spread_m": max_dist,
+        "n_unique": float(n_unique),
+        "s1_m": s1,
+        "s2_m": s2,
+        "s3_m": s3,
+        "collinear_ratio": collinear_ratio,
+    }
+
+    # Secondary spread gate (sufficient 2D spread to constrain rotation)
+    if s2 < min_secondary_spread_m:
+        return (
+            False,
+            f"{label} secondary spread too small: {s2 * 1000.0:.1f}mm < {min_secondary_spread_m * 1000.0:.1f}mm (nearly collinear)",
+            metrics,
+        )
+
+    # Collinearity ratio gate (elongation along 1D line)
+    if collinear_ratio > max_collinear_ratio:
+        return (
+            False,
+            f"{label} collinearity ratio too high: {collinear_ratio:.1f} > {max_collinear_ratio:.1f}",
+            metrics,
+        )
+
+    return True, f"{label} conditioning passed", metrics
+
+
+def check_landmark_geometric_conditioning(
+    src_pts: np.ndarray,
+    dst_pts: np.ndarray,
+    weights: np.ndarray | None = None,
+    cfg: RegistrationConfig | None = None,
+    *,
+    min_spread_m: float | None = None,
+    min_secondary_spread_m: float | None = None,
+    max_collinear_ratio: float | None = None,
+    min_unique_dist_m: float | None = None,
+    min_unique_count: int = 4,
+) -> tuple[bool, str]:
+    """
+    Validate the geometric conditioning of matched 3D landmark correspondences
+    before calling landmark-guided Kabsch registration.
+
+    Assesses both source and destination correspondences for:
+    1. Sufficient geometric spread (diameter).
+    2. Collinear or nearly collinear configurations.
+    3. Repeated or coincident points that make the nominal count misleading.
+    4. Sufficient 2D constraint for stable 3D rigid transform estimation.
+
+    Planar non-collinear configurations are accepted (rotation about plane normal
+    and in-plane axes are well-constrained). Collinear configurations are rejected.
+
+    Parameters
+    ----------
+    src_pts:
+        (N, 3) array of source landmark 3D positions (metres).
+    dst_pts:
+        (N, 3) array of destination landmark 3D positions (metres).
+    weights:
+        Optional (N,) array of correspondence weights.
+    cfg:
+        Optional RegistrationConfig providing threshold defaults.
+
+    Returns
+    -------
+    (is_valid, reason):
+        True if correspondence geometry is well-conditioned for Kabsch.
+        False with a human-readable reason if Kabsch should be bypassed.
+    """
+    spread_thresh = min_spread_m if min_spread_m is not None else getattr(cfg, "landmark_min_spread_m", 0.025)
+    s2_thresh = min_secondary_spread_m if min_secondary_spread_m is not None else getattr(cfg, "landmark_min_secondary_spread_m", 0.005)
+    ratio_thresh = max_collinear_ratio if max_collinear_ratio is not None else getattr(cfg, "landmark_max_collinear_ratio", 10.0)
+    uniq_dist = min_unique_dist_m if min_unique_dist_m is not None else getattr(cfg, "landmark_min_unique_dist_m", 0.005)
+
+    # 1. Validate source point set
+    src_ok, src_reason, _ = evaluate_point_set_geometry(
+        src_pts,
+        weights=weights,
+        label="source",
+        min_spread_m=spread_thresh,
+        min_secondary_spread_m=s2_thresh,
+        max_collinear_ratio=ratio_thresh,
+        min_unique_dist_m=uniq_dist,
+        min_unique_count=min_unique_count,
+    )
+    if not src_ok:
+        return False, f"Source geometry rejected: {src_reason}"
+
+    # 2. Validate destination point set
+    dst_ok, dst_reason, _ = evaluate_point_set_geometry(
+        dst_pts,
+        weights=weights,
+        label="destination",
+        min_spread_m=spread_thresh,
+        min_secondary_spread_m=s2_thresh,
+        max_collinear_ratio=ratio_thresh,
+        min_unique_dist_m=uniq_dist,
+        min_unique_count=min_unique_count,
+    )
+    if not dst_ok:
+        return False, f"Destination geometry rejected: {dst_reason}"
+
+    return True, "Landmark correspondence geometry is well-conditioned"
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
@@ -445,6 +655,16 @@ def register_frame_pair_landmark_guided(
             src_pts = np.array(src_pts_list)
             dst_pts = np.array(dst_pts_list)
             weights = np.array(weights_list)
+
+            # Geometric conditioning check (Problem 4)
+            if getattr(cfg, "enable_landmark_conditioning_check", True):
+                is_conditioned, cond_reason = check_landmark_geometric_conditioning(
+                    src_pts, dst_pts, weights=weights, cfg=cfg
+                )
+                if not is_conditioned:
+                    print(f"      [landmarks] Kabsch skipped: {cond_reason} -- falling back to FPFH")
+                    transform, fitness, rmse = register_frame_pair(source_pcd, target_pcd, cfg)
+                    return transform, fitness, rmse, "fpfh_fallback", float("nan")
 
             init_T, residual_mm = rigid_transform_from_correspondences(src_pts, dst_pts, weights=weights)
             if residual_mm <= residual_accept_mm:

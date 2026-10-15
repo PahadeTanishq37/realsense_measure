@@ -195,6 +195,13 @@ class RegistrationConfig:
     min_landmark_face_fitness: float = 0.25                    # minimum local face-region fitness required to accept landmark seed
     face_fitness_dist_m: float = 0.005                         # correspondence search distance for localized face fitness (5 mm)
 
+    # Landmark geometric conditioning gates (Problem 4)
+    enable_landmark_conditioning_check: bool = True            # evaluate matched landmark geometry before Kabsch
+    landmark_min_unique_dist_m: float = 0.005                  # min separation between distinct landmarks (5 mm)
+    landmark_min_spread_m: float = 0.025                       # min maximum-pairwise-distance / diameter (25 mm)
+    landmark_min_secondary_spread_m: float = 0.005             # min RMS spread along 2nd principal axis (5 mm)
+    landmark_max_collinear_ratio: float = 10.0                 # max ratio of 1st to 2nd singular value (sigma_1 / sigma_2)
+
     # Multiway pose-graph registration settings
     use_multiway: bool = False  # sequential is the safer default; set True to use the (corrected, gated) pose graph
     loop_closure_search_window: int = 4   # how many frames back, beyond the immediate previous frame, to also test for a good registration — catches cases where frame i overlaps with frame i-3 or i-4 even though it wasn't captured immediately after it
