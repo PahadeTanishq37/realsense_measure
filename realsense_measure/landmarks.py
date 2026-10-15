@@ -147,28 +147,73 @@ def detect_face_landmarks_3d(
 
     for name, idx in LANDMARK_INDICES.items():
         lm = face[idx]
-        px, py = int(lm.x * w), int(lm.y * h)
+        px = int(round(float(lm.x * w)))
+        py = int(round(float(lm.y * h)))
+        px = max(0, min(w - 1, px))
+        py = max(0, min(h - 1, py))
+
         y0, y1 = max(0, py - half), min(h, py + half + 1)
         x0, x1 = max(0, px - half), min(w, px + half + 1)
         patch = depth_m[y0:y1, x0:x1]
-        valid = patch[patch > 0]
-        used_patch = patch
+        patch_size = patch.size
+
+        z_center = depth_m[py, px]
+        center_valid = bool(np.isfinite(z_center) and z_center > 0.0)
+
+        valid_mask = np.isfinite(patch) & (patch > 0.0)
+        valid = patch[valid_mask]
+        used_patch_size = patch_size
+
         if valid.size == 0:
             # Expand search patch up to 7x7 if local pixel had a minor void/dropout
             y0_w, y1_w = max(0, py - 3), min(h, py + 4)
             x0_w, x1_w = max(0, px - 3), min(w, px + 4)
             wide_patch = depth_m[y0_w:y1_w, x0_w:x1_w]
-            valid = wide_patch[wide_patch > 0]
-            used_patch = wide_patch
+            used_patch_size = wide_patch.size
+            valid_mask = np.isfinite(wide_patch) & (wide_patch > 0.0)
+            valid = wide_patch[valid_mask]
             if valid.size == 0:
                 continue
 
-        total_px = used_patch.size
-        valid_ratio = float(valid.size / total_px) if total_px > 0 else 0.0
-        local_variance = float(np.var(valid)) if valid.size > 1 else 0.0
-        low_confidence = bool(valid_ratio < min_vr or local_variance > max_var)
+        step_thresh = getattr(cfg, "max_surface_step_m", 0.03) if cfg is not None else 0.03
+        valid_sorted = np.sort(valid)
+        split_indices = np.where(np.diff(valid_sorted) > step_thresh)[0] + 1
+        clusters = np.split(valid_sorted, split_indices)
 
-        z = float(np.median(valid))
+        if not center_valid:
+            # When center depth is invalid and patch contains only one depth cluster,
+            # there is no reliable evidence of a distinct face surface (e.g. flat background wall) -> reject!
+            if len(clusters) < 2:
+                continue
+            # When multiple clusters exist, require at least 2 pixels supporting the foreground cluster C_0
+            if len(clusters[0]) < 2:
+                continue
+            surface_pixels = clusters[0]
+            is_discontinuity = True
+        else:
+            if len(clusters) > 1:
+                # Multiple clusters (depth discontinuity).
+                # If center pixel belongs to a farther cluster rather than foreground C_0, reject ambiguous sample!
+                if np.abs(float(z_center) - np.median(clusters[0])) > step_thresh:
+                    continue
+                surface_pixels = clusters[0]
+                is_discontinuity = True
+            else:
+                surface_pixels = clusters[0]
+                is_discontinuity = False
+
+        total_px = used_patch_size
+        valid_ratio = float(surface_pixels.size / total_px) if total_px > 0 else 0.0
+        local_variance = float(np.var(surface_pixels)) if surface_pixels.size > 1 else 0.0
+        low_confidence = bool(
+            valid_ratio < min_vr
+            or local_variance > max_var
+            or not center_valid
+            or is_discontinuity
+            or used_patch_size > patch_size
+        )
+
+        z = float(np.median(surface_pixels))
         x = (px - cx) * z / fx
         y = (py - cy) * z / fy
         pos = np.array([x, y, z], dtype=np.float64)

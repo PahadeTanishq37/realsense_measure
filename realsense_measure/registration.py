@@ -413,27 +413,33 @@ def register_frame_pair_landmark_guided(
                     s_pos = s_item["position"]
                     s_vr = s_item.get("valid_ratio", 1.0)
                     s_var = s_item.get("variance", 0.0)
+                    s_low = s_item.get("low_confidence", False)
                 else:
                     s_pos = s_item
                     s_vr = 1.0
                     s_var = 0.0
+                    s_low = False
 
                 if isinstance(d_item, dict):
                     d_pos = d_item["position"]
                     d_vr = d_item.get("valid_ratio", 1.0)
                     d_var = d_item.get("variance", 0.0)
+                    d_low = d_item.get("low_confidence", False)
                 else:
                     d_pos = d_item
                     d_vr = 1.0
                     d_var = 0.0
+                    d_low = False
 
                 src_pts_list.append(s_pos)
                 dst_pts_list.append(d_pos)
 
                 # Weight: min(1.0, valid_ratio_src * valid_ratio_dst) / (1.0 + variance_src + variance_dst)
-                v_src_norm = s_var / max_var_thresh if (0.0 < s_var < 0.01 and max_var_thresh > 0) else s_var
-                v_dst_norm = d_var / max_var_thresh if (0.0 < d_var < 0.01 and max_var_thresh > 0) else d_var
-                w = float(min(1.0, s_vr * d_vr) / (1.0 + v_src_norm + v_dst_norm))
+                max_var_safe = max_var_thresh if (max_var_thresh is not None and np.isfinite(max_var_thresh) and max_var_thresh > 0) else 1e-5
+                v_src_norm = (max(0.0, s_var) / max_var_safe) if (np.isfinite(s_var) and s_var > 0) else (1e4 if not np.isfinite(s_var) else 0.0)
+                v_dst_norm = (max(0.0, d_var) / max_var_safe) if (np.isfinite(d_var) and d_var > 0) else (1e4 if not np.isfinite(d_var) else 0.0)
+                base_w = float(min(1.0, max(0.0, s_vr) * max(0.0, d_vr)) / (1.0 + v_src_norm + v_dst_norm))
+                w = base_w * (0.5 if (s_low or d_low) else 1.0)
                 weights_list.append(w)
 
             src_pts = np.array(src_pts_list)

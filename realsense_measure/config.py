@@ -66,6 +66,7 @@ class LandmarkConfig:
     """Settings for facial landmark depth sampling and quality scoring."""
     max_depth_variance_m2: float = 1e-5        # ~3mm std depth variance threshold (m^2)
     min_valid_ratio: float = 0.5               # minimum non-zero depth pixel ratio in patch
+    max_surface_step_m: float = 0.03           # max depth step (30mm) before treating as separate surface
 
 
 @dataclass
