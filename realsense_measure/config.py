@@ -229,6 +229,12 @@ class RegistrationConfig:
     max_pair_centroid_dist_m: float = 0.50     # maximum centroid distance between candidate source and target frames to attempt Colored ICP
     search_accepted_window: int = 4            # search up to 4 previously accepted frames when consecutive fails
 
+    # Bounded registration recovery settings (Problem 7A)
+    enable_bounded_recovery: bool = True               # enable bounded bridge buffer recovery
+    max_bridge_buffer_size: int = 2                    # maximum consecutive provisional bridge frames
+    max_bridge_crosscheck_trans_m: float = 0.020       # max translation disagreement for independent validation (20 mm)
+    max_bridge_crosscheck_rot_deg: float = 10.0        # max rotation disagreement for independent validation (10 deg)
+
     # Fusion eligibility thresholds (stricter secondary gate for Stage 4 fusion)
     min_fitness_for_fusion: float = 0.60                  # frames with fitness < 0.60 keep pose in graph but are excluded from dense Stage 4 fusion
     max_landmark_residual_for_fusion_mm: float = 5.0      # landmark frames with residual > 5.0mm excluded from dense Stage 4 fusion

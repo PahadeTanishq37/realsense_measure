@@ -957,18 +957,19 @@ def test_l_profile_transition_rejection_cascade():
     assert res_5_to_4[3] is True, "Frame 5 must have sufficient local overlap to register against frame 4"
 
     # Step 2: Inject controlled deterministic failure for the two profile-transition frames (2 and 3)
-    # and instrument register_rgbd_pair to record candidate target attempts.
+    # Step 2: Inject controlled deterministic failure for the two profile-transition frames (2 and 3)
+    # on global registration attempts, scoped by explicit call purpose (not is_bridge).
     attempted_targets = {i: [] for i in range(len(frames))}
     orig_register = registration.register_rgbd_pair
 
-    def spy_register(src, dst, cfg_arg, initial_guess=None):
+    def spy_register(src, dst, cfg_arg, initial_guess=None, is_bridge=False):
         src_id = src.frame_id
         dst_id = dst.frame_id
         attempted_targets[src_id].append(dst_id)
-        if src_id in (2, 3):
-            # Deterministic failure injection representing profile-transition tracking loss
+        if src_id in (2, 3) and not is_bridge:
+            # Deterministic failure injection representing profile-transition tracking loss on global search
             return np.eye(4), 0.0, 999.0, False, "none", 0.0, 0.0, "Controlled profile transition failure injection"
-        return orig_register(src, dst, cfg_arg, initial_guess=initial_guess)
+        return orig_register(src, dst, cfg_arg, initial_guess=initial_guess, is_bridge=is_bridge)
 
     registration.register_rgbd_pair = spy_register
     try:
@@ -980,56 +981,49 @@ def test_l_profile_transition_rejection_cascade():
     print(f"  Attempted targets for Frame 4: {attempted_targets[4]}")
     print(f"  Attempted targets for Frame 5: {attempted_targets[5]}")
 
-    # Confirm candidate targets attempted for frame 4 are strictly earlier accepted frames [1, 0]
-    assert attempted_targets[4] == [1, 0], f"Frame 4 should only attempt accepted frames [1, 0], got {attempted_targets[4]}"
-    assert 3 not in attempted_targets[4], "Frame 3 must not be attempted as target because it was rejected"
-    assert 2 not in attempted_targets[4], "Frame 2 must not be attempted as target because it was rejected"
+    # Confirm candidate targets attempted for frame 4 are earlier accepted frames [1, 0] followed by bridge head 3
+    assert attempted_targets[4] == [1, 0, 3], f"Frame 4 should attempt accepted frames [1, 0] and then bridge head 3, got {attempted_targets[4]}"
+    assert 2 not in attempted_targets[4], "Frame 2 must not be attempted directly as target because it was not bridge head"
 
-    # Confirm candidate targets attempted for frame 5 are also strictly [1, 0]
-    assert attempted_targets[5] == [1, 0], f"Frame 5 should only attempt accepted frames [1, 0], got {attempted_targets[5]}"
-    assert 4 not in attempted_targets[5], "Frame 4 must not be attempted as target because it was rejected"
+    # Confirm candidate targets attempted for frame 5 are accepted frames [1, 0] followed by unanchored tracking head 4
+    assert attempted_targets[5] == [1, 0, 4], f"Frame 5 should attempt accepted frames [1, 0] and then tracking head 4, got {attempted_targets[5]}"
 
     # Step 4: Verify whether later valid rear frames are accepted and connected to pose graph
-    # Under current implementation, the cascade causes frames 4 and 5 to be rejected.
     print(f"  Frame 0 accepted: {diags[0][2]}")
     print(f"  Frame 1 accepted: {diags[1][2]}")
-    print(f"  Frame 2 accepted: {diags[2][2]} (injected failure)")
-    print(f"  Frame 3 accepted: {diags[3][2]} (injected failure)")
-    print(f"  Frame 4 accepted: {diags[4][2]} (cascade victim)")
-    print(f"  Frame 5 accepted: {diags[5][2]} (cascade victim)")
+    print(f"  Frame 2 accepted: {diags[2][2]} (promoted bridge)")
+    print(f"  Frame 3 accepted: {diags[3][2]} (promoted bridge)")
+    print(f"  Frame 4 accepted: {diags[4][2]} (unanchored tracking)")
+    print(f"  Frame 5 accepted: {diags[5][2]} (unanchored tracking)")
     print(f"  Pose graph nodes: {stats['n_nodes']} / {len(frames)}")
 
     assert diags[0][2] is True, "Frame 0 (frontal) must be accepted"
     assert diags[1][2] is True, "Frame 1 (oblique) must be accepted"
-    assert diags[2][2] is False, "Frame 2 (profile transition 1) must be rejected by failure injection"
-    assert diags[3][2] is False, "Frame 3 (profile transition 2) must be rejected by failure injection"
+    assert diags[2][2] is False, "Frame 2 (promoted bridge) must remain False for primary acceptance"
+    assert diags[3][2] is False, "Frame 3 (promoted bridge) must remain False for primary acceptance"
+    assert diags[4][2] is True, "Frame 4 accepted into unanchored tracking odometry"
+    assert diags[5][2] is True, "Frame 5 accepted into unanchored tracking odometry"
 
-    # REGRESSION ASSERTION:
-    # Confirms the rejection cascade in current baseline: despite having valid geometry,
-    # frames 4 and 5 are rejected because they cannot connect across the gap to frames [1, 0].
-    # NOTE FOR PROBLEM 6: When recovery / bridging mechanism is implemented, these assertions
-    # should be updated to expect diags[4][2] is True and diags[5][2] is True.
-    assert diags[4][2] is False, "Regression check: Frame 4 rejected due to cascade (cannot reach frames 1, 0)"
-    assert diags[5][2] is False, "Regression check: Frame 5 rejected due to cascade (cannot reach frames 1, 0)"
-    assert stats["accepted"] == 2, f"Expected 2 accepted frames under current baseline cascade, got {stats['accepted']}"
-    assert stats["rejected"] == 4, f"Expected 4 rejected frames under current baseline cascade, got {stats['rejected']}"
+    assert stats["accepted"] == 4, f"Expected 4 accepted tracking frames (0, 1, 4, 5), got {stats['accepted']}"
+    assert stats["rejected"] == 2, f"Expected 2 rejected primary frames (2, 3), got {stats['rejected']}"
     assert stats["first_rejected_frame"] == 2, f"First rejected frame should be 2, got {stats['first_rejected_frame']}"
-    assert stats["n_nodes"] == 2, f"Pose graph should only contain 2 nodes under cascade, got {stats['n_nodes']}"
+    assert stats["n_nodes"] == 6, f"Pose graph should contain all 6 nodes, got {stats['n_nodes']}"
+    assert len(stats["node_of"]) == 6, f"node_of should map all 6 frames, got {len(stats['node_of'])}"
 
-    # Step 5: Verify whether rejected frames are excluded from fusion
+    # Step 5: Verify whether rejected frames and unanchored frames are excluded from fusion
     fusion_elig = stats["fusion_eligible"]
     print(f"  Fusion eligibility map: {fusion_elig}")
     print(f"  Fusion eligible count: {stats['n_fusion_eligible']}")
 
     assert fusion_elig[0] is True, "Frame 0 must be fusion eligible"
     assert fusion_elig[1] is True, "Frame 1 must be fusion eligible"
-    assert fusion_elig[2] is False, "Rejected Frame 2 must be excluded from fusion"
-    assert fusion_elig[3] is False, "Rejected Frame 3 must be excluded from fusion"
-    assert fusion_elig[4] is False, "Cascade-rejected Frame 4 must be excluded from fusion"
-    assert fusion_elig[5] is False, "Cascade-rejected Frame 5 must be excluded from fusion"
-    assert stats["n_fusion_eligible"] == 2, f"Only 2 frames should be fusion eligible, got {stats['n_fusion_eligible']}"
+    assert fusion_elig[2] is False, "Bridge Frame 2 must be excluded from fusion"
+    assert fusion_elig[3] is False, "Bridge Frame 3 must be excluded from fusion"
+    assert fusion_elig[4] is False, "Unanchored Frame 4 must be quarantined from fusion"
+    assert fusion_elig[5] is False, "Unanchored Frame 5 must be quarantined from fusion"
+    assert stats["n_fusion_eligible"] == 2, f"Exactly 2 frames should be fusion eligible, got {stats['n_fusion_eligible']}"
 
-    print("  [PASS] Test L: Deterministic regression test confirmed rejection cascade behavior.")
+    print("  [PASS] Test L: Deterministic regression test confirmed bounded recovery and fusion quarantine.")
 
 
 def main():
