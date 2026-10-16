@@ -245,7 +245,7 @@ def run_all_tests() -> bool:
     return all_passed
 
 
-def test_neck_region_preservation_isolate_register_fuse() -> bool:
+def test_neck_region_preservation_isolate_register_fuse() -> None:
     print("\n" + "=" * 115)
     print("  Testing Neck-to-Head Preservation through Isolate -> Register -> Fuse Pipeline")
     print("=" * 115)
@@ -338,13 +338,13 @@ def test_neck_region_preservation_isolate_register_fuse() -> bool:
     assert density_ratio >= 0.50, f"Neck region too sparse: density ratio {density_ratio:.2f} < 0.50"
 
     print("  PASS: Neck-to-head bridge preserved with healthy point density throughout.")
-    return True
+    assert True
 
 
 if __name__ == "__main__":
     success_envelope = run_all_tests()
-    success_neck = test_neck_region_preservation_isolate_register_fuse()
-    if success_envelope and success_neck:
+    test_neck_region_preservation_isolate_register_fuse()
+    if success_envelope:
         print("\nALL HEAD SYNTHETIC TESTS (ENVELOPE SUITE + NECK PRESERVATION) PASSED SUCCESSFULLY.")
     else:
         print("\nSOME HEAD SYNTHETIC TESTS FAILED.")
