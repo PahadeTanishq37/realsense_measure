@@ -2,13 +2,20 @@
 Comprehensive Synthetic Test Suite for Human 180° Multi-View Registration
 (RGB-D Odometry + Colored ICP + Pose Graph + TSDF Volumetric Reconstruction).
 
-Tests A through E validate the entire human multi-view pipeline without requiring
+Tests A through L validate the entire human multi-view pipeline without requiring
 a physical RealSense camera or display server:
   - Test A: Known rigid camera motion recovery (< 1.5 mm, < 0.5 deg)
   - Test B: Sequential camera motion over 10 frames without catastrophic drift
   - Test C: Bad/corrupted frame rejection with bounded recovery
   - Test D: Smooth surface with quality gating (rejecting ambiguous/poor fits)
   - Test E: Explicit transformation convention verification (p_target = T @ p_source)
+  - Test F: Max pose-jump rejection
+  - Test G: Multi-frame skip recovery with scaled bounds
+  - Test H: Loop closure fitness threshold gating (0.65)
+  - Test I: Non-overlapping pair Colored ICP skip & graceful fallback
+  - Test J: Glasses weighted Kabsch and dense sanity
+  - Test K: Systematic eye-region bias detection and FPFH cross-check
+  - Test L: Profile-transition rejection cascade deterministic regression (Problem 5B)
 
 Run from project root:
     python test_human_registration.py
@@ -868,6 +875,163 @@ def test_k_systematic_bias_fpfh_crosscheck():
     print("  [PASS] Test K: Smooth systematic eye-region bias caught by cross-check; fallthrough to Tier 2 confirmed.")
 
 
+
+# ===========================================================================
+# Test L — Profile-Transition Rejection Cascade (Problem 5B Regression Test)
+# ===========================================================================
+def test_l_profile_transition_rejection_cascade():
+    """
+    Problem 5B Regression Test: Deterministic verification of the rejection cascade.
+
+    Scenario:
+      A sequential 360°/180° scan of a human head where:
+      - Frame 0 (frontal) and Frame 1 (oblique) register successfully.
+      - Two consecutive profile-transition frames (Frames 2 and 3) fail registration
+        (injected via deterministic controlled mock, e.g. momentary occlusion/tracking loss).
+      - Subsequent valid rear-lateral (Frame 4) and posterior (Frame 5) frames have sufficient
+        local geometric overlap with their immediate predecessors (demonstrated in Step 1).
+
+    Mechanism & Defect Verified:
+      Under the current build_pose_graph_rgbd() implementation:
+      - Candidate target selection searches strictly within accepted_idx[-window:] and anchor 0.
+      - Because Frames 2 and 3 were rejected, they never enter accepted_idx.
+      - When Frame 4 arrives, its ONLY attempted candidate targets are earlier frontal frames
+        in accepted_idx (Frames 1 and 0).
+      - Due to large angular/translational baseline and viewpoint divergence from the frontal views,
+        Frame 4 cannot register to Frames 1 or 0 and is rejected.
+      - When Frame 5 arrives, accepted_idx is still [0, 1]. Frame 5 also fails.
+      - Result: A permanent rejection cascade where all subsequent valid rear frames are
+        rejected and excluded from TSDF fusion, preventing 360° reconstruction.
+
+    Regression Assertion vs Expected Recovery:
+      - Current production baseline (Problem 5B):
+          diags[4][2] is False, diags[5][2] is False
+          stats["accepted"] == 2, stats["rejected"] == 4
+          stats["n_nodes"] == 2
+          stats["fusion_eligible"] excludes frames 2, 3, 4, 5
+      - Future recovery fix (Problem 6):
+          With a motion predictor / bridging-frame buffer / multi-tier recovery,
+          valid rear frames (4 and 5) will recover and be accepted into the pose graph and fusion.
+    """
+    print("\n--- Test L: Profile-Transition Rejection Cascade (Problem 5B Regression Test) ---")
+    mesh = make_synthetic_scene()
+    tmesh = o3d.t.geometry.TriangleMesh.from_legacy(mesh)
+    scene = o3d.t.geometry.RaycastingScene()
+    scene.add_triangles(tmesh)
+
+    intr = o3d.camera.PinholeCameraIntrinsic(640, 480, 500.0, 500.0, 320.0, 240.0)
+    intr_tensor = o3d.core.Tensor(intr.intrinsic_matrix, dtype=o3d.core.Dtype.Float64)
+
+    center = np.array([0.0, 0.0, 0.70])
+    radius = 0.70
+
+    # 6 frames in sequential head-scan orbit:
+    # 0: 0° (frontal), 1: 10° (oblique), 2: 20° (profile trans 1),
+    # 3: 30° (profile trans 2), 4: 40° (rear-lateral), 5: 50° (posterior)
+    angles_deg = [0, 10, 20, 30, 40, 50]
+    frames = []
+    for i, ang in enumerate(angles_deg):
+        rad = np.radians(ang)
+        cam_pos = np.array([radius * np.sin(rad), 0.0, center[2] - radius * np.cos(rad)])
+        R = np.array([
+            [np.cos(rad), 0, -np.sin(rad)],
+            [0, 1, 0],
+            [np.sin(rad), 0, np.cos(rad)],
+        ])
+        P = np.eye(4)
+        P[:3, :3] = R
+        P[:3, 3] = cam_pos
+        f = render_synthetic_rgbd_frame(scene, P, i, intr, intr_tensor)
+        frames.append(f)
+
+    cfg = RegistrationConfig()
+
+    # Step 1: Demonstrate that rear frames 4 and 5 have sufficient local geometric
+    # overlap with their immediate predecessors when tested directly.
+    import registration
+    res_4_to_3 = registration.register_rgbd_pair(frames[4], frames[3], cfg)
+    res_5_to_4 = registration.register_rgbd_pair(frames[5], frames[4], cfg)
+    print(f"  Pre-check: pair 4->3 direct registration: accepted={res_4_to_3[3]}, method={res_4_to_3[4]}, fitness={res_4_to_3[1]:.2f}")
+    print(f"  Pre-check: pair 5->4 direct registration: accepted={res_5_to_4[3]}, method={res_5_to_4[4]}, fitness={res_5_to_4[1]:.2f}")
+    assert res_4_to_3[3] is True, "Frame 4 must have sufficient local overlap to register against frame 3"
+    assert res_5_to_4[3] is True, "Frame 5 must have sufficient local overlap to register against frame 4"
+
+    # Step 2: Inject controlled deterministic failure for the two profile-transition frames (2 and 3)
+    # and instrument register_rgbd_pair to record candidate target attempts.
+    attempted_targets = {i: [] for i in range(len(frames))}
+    orig_register = registration.register_rgbd_pair
+
+    def spy_register(src, dst, cfg_arg, initial_guess=None):
+        src_id = src.frame_id
+        dst_id = dst.frame_id
+        attempted_targets[src_id].append(dst_id)
+        if src_id in (2, 3):
+            # Deterministic failure injection representing profile-transition tracking loss
+            return np.eye(4), 0.0, 999.0, False, "none", 0.0, 0.0, "Controlled profile transition failure injection"
+        return orig_register(src, dst, cfg_arg, initial_guess=initial_guess)
+
+    registration.register_rgbd_pair = spy_register
+    try:
+        aligned, diags, poses, stats = register_sequence_rgbd_human(frames, cfg)
+    finally:
+        registration.register_rgbd_pair = orig_register
+
+    # Step 3: Verify candidate target frames actually attempted after the two failures
+    print(f"  Attempted targets for Frame 4: {attempted_targets[4]}")
+    print(f"  Attempted targets for Frame 5: {attempted_targets[5]}")
+
+    # Confirm candidate targets attempted for frame 4 are strictly earlier accepted frames [1, 0]
+    assert attempted_targets[4] == [1, 0], f"Frame 4 should only attempt accepted frames [1, 0], got {attempted_targets[4]}"
+    assert 3 not in attempted_targets[4], "Frame 3 must not be attempted as target because it was rejected"
+    assert 2 not in attempted_targets[4], "Frame 2 must not be attempted as target because it was rejected"
+
+    # Confirm candidate targets attempted for frame 5 are also strictly [1, 0]
+    assert attempted_targets[5] == [1, 0], f"Frame 5 should only attempt accepted frames [1, 0], got {attempted_targets[5]}"
+    assert 4 not in attempted_targets[5], "Frame 4 must not be attempted as target because it was rejected"
+
+    # Step 4: Verify whether later valid rear frames are accepted and connected to pose graph
+    # Under current implementation, the cascade causes frames 4 and 5 to be rejected.
+    print(f"  Frame 0 accepted: {diags[0][2]}")
+    print(f"  Frame 1 accepted: {diags[1][2]}")
+    print(f"  Frame 2 accepted: {diags[2][2]} (injected failure)")
+    print(f"  Frame 3 accepted: {diags[3][2]} (injected failure)")
+    print(f"  Frame 4 accepted: {diags[4][2]} (cascade victim)")
+    print(f"  Frame 5 accepted: {diags[5][2]} (cascade victim)")
+    print(f"  Pose graph nodes: {stats['n_nodes']} / {len(frames)}")
+
+    assert diags[0][2] is True, "Frame 0 (frontal) must be accepted"
+    assert diags[1][2] is True, "Frame 1 (oblique) must be accepted"
+    assert diags[2][2] is False, "Frame 2 (profile transition 1) must be rejected by failure injection"
+    assert diags[3][2] is False, "Frame 3 (profile transition 2) must be rejected by failure injection"
+
+    # REGRESSION ASSERTION:
+    # Confirms the rejection cascade in current baseline: despite having valid geometry,
+    # frames 4 and 5 are rejected because they cannot connect across the gap to frames [1, 0].
+    # NOTE FOR PROBLEM 6: When recovery / bridging mechanism is implemented, these assertions
+    # should be updated to expect diags[4][2] is True and diags[5][2] is True.
+    assert diags[4][2] is False, "Regression check: Frame 4 rejected due to cascade (cannot reach frames 1, 0)"
+    assert diags[5][2] is False, "Regression check: Frame 5 rejected due to cascade (cannot reach frames 1, 0)"
+    assert stats["accepted"] == 2, f"Expected 2 accepted frames under current baseline cascade, got {stats['accepted']}"
+    assert stats["rejected"] == 4, f"Expected 4 rejected frames under current baseline cascade, got {stats['rejected']}"
+    assert stats["first_rejected_frame"] == 2, f"First rejected frame should be 2, got {stats['first_rejected_frame']}"
+    assert stats["n_nodes"] == 2, f"Pose graph should only contain 2 nodes under cascade, got {stats['n_nodes']}"
+
+    # Step 5: Verify whether rejected frames are excluded from fusion
+    fusion_elig = stats["fusion_eligible"]
+    print(f"  Fusion eligibility map: {fusion_elig}")
+    print(f"  Fusion eligible count: {stats['n_fusion_eligible']}")
+
+    assert fusion_elig[0] is True, "Frame 0 must be fusion eligible"
+    assert fusion_elig[1] is True, "Frame 1 must be fusion eligible"
+    assert fusion_elig[2] is False, "Rejected Frame 2 must be excluded from fusion"
+    assert fusion_elig[3] is False, "Rejected Frame 3 must be excluded from fusion"
+    assert fusion_elig[4] is False, "Cascade-rejected Frame 4 must be excluded from fusion"
+    assert fusion_elig[5] is False, "Cascade-rejected Frame 5 must be excluded from fusion"
+    assert stats["n_fusion_eligible"] == 2, f"Only 2 frames should be fusion eligible, got {stats['n_fusion_eligible']}"
+
+    print("  [PASS] Test L: Deterministic regression test confirmed rejection cascade behavior.")
+
+
 def main():
     print("=" * 65)
     print("  HUMAN 180 DEG MULTI-VIEW REGISTRATION SYNTHETIC TEST SUITE")
@@ -884,12 +1048,14 @@ def main():
     test_i_non_overlapping_pair_colored_icp_skip()
     test_j_glasses_weighted_kabsch_and_dense_sanity()
     test_k_systematic_bias_fpfh_crosscheck()
+    test_l_profile_transition_rejection_cascade()
 
     print("\n" + "=" * 65)
-    print("  ALL 11 SYNTHETIC TESTS (A, B, C, D, E, F, G, H, I, J, K) PASSED SUCCESSFULLY!")
+    print("  ALL 12 SYNTHETIC TESTS (A, B, C, D, E, F, G, H, I, J, K, L) PASSED SUCCESSFULLY!")
     print("=" * 65)
 
 
 if __name__ == "__main__":
     main()
+
 
