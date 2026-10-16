@@ -589,5 +589,105 @@ def test_12_bridge_edge_uncertainty_and_information_weighting():
         np.testing.assert_allclose(edge.information, expected_scaled_info, rtol=1e-4)
 
 
+# ---------------------------------------------------------------------------
+# Test 13: Broken unanchored chain prevents stale skip and starts new chain
+# ---------------------------------------------------------------------------
+def test_13_broken_unanchored_chain_prevents_stale_skip_and_starts_new_chain():
+    frames = [make_dummy_frame(i) for i in range(7)]
+    cfg = RegistrationConfig()
+    cfg.enable_bounded_recovery = True
+    cfg.max_bridge_buffer_size = 2
+
+    step = np.eye(4)
+    step[0, 3] = 0.010
+
+    attempted_targets = {i: [] for i in range(7)}
+
+    def mock_register(src, dst, cfg_arg, initial_guess=None, is_bridge=False):
+        s, d = src.frame_id, dst.frame_id
+        attempted_targets[s].append(d)
+        if s == 1 and d == 0:
+            return step, 0.85, 0.002, True, "colored_icp", 0.0, 10.0, "ok"
+        if s == 2 and d == 1:
+            return (step, 0.80, 0.002, True, "colored_icp", 0.0, 10.0, "ok") if is_bridge else (np.eye(4), 0.0, 999.0, False, "none", 0.0, 0.0, "fail")
+        if s == 3 and d == 2:
+            return (step, 0.80, 0.002, True, "colored_icp", 0.0, 10.0, "ok") if is_bridge else (np.eye(4), 0.0, 999.0, False, "none", 0.0, 0.0, "fail")
+        if s == 4 and d == 3:
+            return step, 0.80, 0.002, True, "colored_icp", 0.0, 10.0, "ok"
+        if s == 5 and d == 4:
+            # Broken local link
+            return np.eye(4), 0.0, 999.0, False, "none", 0.0, 0.0, "broken local link"
+        if s == 6 and d == 1:
+            return (step, 0.80, 0.002, True, "colored_icp", 0.0, 10.0, "ok") if is_bridge else (np.eye(4), 0.0, 999.0, False, "none", 0.0, 0.0, "fail")
+        return np.eye(4), 0.0, 999.0, False, "none", 0.0, 0.0, "fail"
+
+    orig = registration.register_rgbd_pair
+    registration.register_rgbd_pair = mock_register
+    try:
+        aligned, diags, poses, stats = register_sequence_rgbd_human(frames, cfg)
+    finally:
+        registration.register_rgbd_pair = orig
+
+    # Frame 6 must not attempt broken unanchored frame 4 or failed frame 5
+    assert 4 not in attempted_targets[6], f"Frame 6 must not attempt broken unanchored frame 4, attempted: {attempted_targets[6]}"
+    assert 5 not in attempted_targets[6], f"Frame 6 must not attempt broken frame 5, attempted: {attempted_targets[6]}"
+    assert attempted_targets[6] == [1, 0, 1], f"Frame 6 should attempt accepted frames [1, 0] then fallback anchor 1, got {attempted_targets[6]}"
+
+    # State transitions
+    assert stats["frame_states"][4] == "UNANCHORED_ODOMETRY"
+    assert stats["frame_states"][5] == "REJECTED"
+    assert stats["frame_states"][6] == "PROVISIONAL_BRIDGE"
+
+    # Fusion quarantine
+    assert stats["fusion_eligible"][4] is False
+    assert stats["fusion_eligible"][5] is False
+    assert stats["fusion_eligible"][6] is False
+
+
+# ---------------------------------------------------------------------------
+# Test 14: Broken unanchored chain cannot be promoted by later loop closure
+# ---------------------------------------------------------------------------
+def test_14_broken_unanchored_chain_cannot_be_promoted_by_later_loop_closure():
+    frames = [make_dummy_frame(i) for i in range(7)]
+    cfg = RegistrationConfig()
+    cfg.enable_bounded_recovery = True
+    cfg.max_bridge_buffer_size = 2
+
+    step = np.eye(4)
+    step[0, 3] = 0.010
+
+    def mock_register(src, dst, cfg_arg, initial_guess=None, is_bridge=False):
+        s, d = src.frame_id, dst.frame_id
+        if s == 1 and d == 0:
+            return step, 0.85, 0.002, True, "colored_icp", 0.0, 10.0, "ok"
+        if s == 2 and d == 1:
+            return (step, 0.80, 0.002, True, "colored_icp", 0.0, 10.0, "ok") if is_bridge else (np.eye(4), 0.0, 999.0, False, "none", 0.0, 0.0, "fail")
+        if s == 3 and d == 2:
+            return (step, 0.80, 0.002, True, "colored_icp", 0.0, 10.0, "ok") if is_bridge else (np.eye(4), 0.0, 999.0, False, "none", 0.0, 0.0, "fail")
+        if s == 4 and d == 3:
+            return step, 0.80, 0.002, True, "colored_icp", 0.0, 10.0, "ok"
+        if s == 5 and d == 4:
+            # Broken local link
+            return np.eye(4), 0.0, 999.0, False, "none", 0.0, 0.0, "broken"
+        if s == 6 and d == 0:
+            # Frame 6 direct registers to anchor 0
+            return step, 0.85, 0.002, True, "colored_icp", 0.0, 10.0, "ok"
+        return np.eye(4), 0.0, 999.0, False, "none", 0.0, 0.0, "fail"
+
+    orig = registration.register_rgbd_pair
+    registration.register_rgbd_pair = mock_register
+    try:
+        aligned, diags, poses, stats = register_sequence_rgbd_human(frames, cfg)
+    finally:
+        registration.register_rgbd_pair = orig
+
+    # Frame 4 was in unanchored chain that broke at frame 5
+    # Even though frame 6 succeeded direct to frame 0, frame 4 must remain quarantined from fusion
+    assert stats["fusion_eligible"][4] is False
+    assert stats["fusion_eligible"][0] is True
+    assert stats["fusion_eligible"][1] is True
+    assert stats["fusion_eligible"][6] is True
+
+
 if __name__ == "__main__":
     pytest.main(["-v", __file__])

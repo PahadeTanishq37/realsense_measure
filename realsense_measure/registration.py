@@ -1430,7 +1430,9 @@ def build_pose_graph_rgbd(
 
     # Bounded recovery tracking structures
     bridge_buffer: list[dict] = []
-    unanchored_chain: list[int] = []
+    active_unanchored_chain: list[int] = []
+    promotable_unanchored_chain: list[int] = []
+    all_unanchored_nodes: list[int] = []
     frame_states: dict[int, str] = {0: "DIRECT_ACCEPTED"}
     bridge_edges_info: list[tuple[int, int, int]] = []
     potential_loop_closures: list[dict] = []
@@ -1599,10 +1601,10 @@ def build_pose_graph_rgbd(
                 anchor_idx = bridge_buffer[-1]["anchor_idx"]
                 hop = bridge_buffer[-1]["hop"] + 1
                 prev_T_to_anchor = bridge_buffer[-1]["T_to_anchor"]
-            elif unanchored_chain:
-                pred_idx = unanchored_chain[-1]
+            elif active_unanchored_chain:
+                pred_idx = active_unanchored_chain[-1]
                 anchor_idx = accepted_idx[-1]
-                hop = frame_hops.get(pred_idx, len(unanchored_chain)) + 1
+                hop = frame_hops.get(pred_idx, len(active_unanchored_chain)) + 1
                 prev_T_to_anchor = composed_to_anchor.get(pred_idx, np.eye(4))
             else:
                 pred_idx = accepted_idx[-1]
@@ -1615,8 +1617,10 @@ def build_pose_graph_rgbd(
             T_loc, fit_loc, rmse_loc, acc_loc, meth_loc, rot_loc, trans_loc, reason_loc = res_local
 
             if not acc_loc:
-                # Local link broken: clear buffer to prevent reusing stale transforms
+                # Local link broken: clear buffer and terminate active unanchored chain to prevent reusing stale transforms
                 bridge_buffer.clear()
+                active_unanchored_chain.clear()
+                promotable_unanchored_chain.clear()
                 frames_since_accepted += 1
                 last_rel_trans = None
                 diagnostics[i] = (fit_loc, rmse_loc, False)
@@ -1644,8 +1648,10 @@ def build_pose_graph_rgbd(
             )
 
             if jump_trans_m > effective_trans_bound or jump_rot_deg > effective_rot_bound:
-                # Pose jump exceeds motion bounds: reject and clear buffer
+                # Pose jump exceeds motion bounds: reject, clear buffer, and terminate unanchored chain
                 bridge_buffer.clear()
+                active_unanchored_chain.clear()
+                promotable_unanchored_chain.clear()
                 frames_since_accepted += 1
                 last_rel_trans = None
                 diagnostics[i] = (fit_loc, rmse_loc, False)
@@ -1662,7 +1668,7 @@ def build_pose_graph_rgbd(
 
             # Kinematic check passed!
             max_buf_size = getattr(cfg, "max_bridge_buffer_size", 2)
-            if len(bridge_buffer) < max_buf_size and not unanchored_chain:
+            if len(bridge_buffer) < max_buf_size and not active_unanchored_chain:
                 # Store in bridge buffer as provisional bridge frame
                 bridge_buffer.append({
                     "frame_idx": i,
@@ -1725,7 +1731,9 @@ def build_pose_graph_rgbd(
                     PoseGraphEdge(node_id, node_of[pred_idx], T_loc, info_scaled, uncertain=True)
                 )
                 bridge_edges_info.append((i, pred_idx, hop))
-                unanchored_chain.append(i)
+                active_unanchored_chain.append(i)
+                promotable_unanchored_chain.append(i)
+                all_unanchored_nodes.append(i)
                 frame_hops[i] = hop
                 composed_to_anchor[i] = T_to_anchor_cand
                 frames_since_accepted += 1
@@ -1866,7 +1874,7 @@ def build_pose_graph_rgbd(
                 n_odom += 1
             else:
                 n_loop += 1
-                if unanchored_chain and (i in unanchored_chain or j in unanchored_chain):
+                if promotable_unanchored_chain and (i in promotable_unanchored_chain or j in promotable_unanchored_chain):
                     potential_loop_closures.append({"source": i, "target": j, "fitness": fit, "rmse": rmse})
 
         # If terminal recovered, also add bridge edge to buffer head with uncertain=True and scaled info
@@ -1880,9 +1888,9 @@ def build_pose_graph_rgbd(
             )
             bridge_edges_info.append((i, head_idx, b_hop))
 
-        # If unanchored chain exists, check if frame i connects to the unanchored chain head
-        if unanchored_chain and unanchored_chain[-1] in node_of and i not in unanchored_chain:
-            last_u = unanchored_chain[-1]
+        # If active unanchored chain exists, check if frame i connects to the unanchored chain head
+        if active_unanchored_chain and active_unanchored_chain[-1] in node_of and i not in active_unanchored_chain:
+            last_u = active_unanchored_chain[-1]
             res_u = _call_register_pair(frames[i], frames[last_u], cfg, is_bridge=True)
             if res_u[3] and res_u[1] >= min_loop_fit:
                 u_hop = frame_hops.get(last_u, 1) + 1
@@ -1894,6 +1902,9 @@ def build_pose_graph_rgbd(
                 n_loop += 1
                 bridge_edges_info.append((i, last_u, u_hop))
                 potential_loop_closures.append({"source": i, "target": j_best, "fitness": fit_best, "rmse": rmse_best})
+            else:
+                promotable_unanchored_chain.clear()
+            active_unanchored_chain.clear()
 
         accepted_idx.append(i)
         diagnostics[i] = (fit_best, rmse_best, True)
@@ -1956,7 +1967,7 @@ def build_pose_graph_rgbd(
     return BuildPoseGraphResult(
         (pose_graph, node_of, diagnostics, n_odom, n_loop, pair_logs, poses, best_methods, best_scores, rejection_reasons),
         frame_states=frame_states,
-        unanchored_chain=unanchored_chain,
+        unanchored_chain=promotable_unanchored_chain,
         bridge_edges=bridge_edges_info,
         potential_loop_closures=potential_loop_closures,
     )
