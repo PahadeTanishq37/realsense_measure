@@ -73,6 +73,67 @@ def _check_face_support_2d(
     return True, "face supported", n_pts
 
 
+def _orthonormal_transverse_basis(u: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Construct a numerically stable orthonormal 2D basis (e1, e2) perpendicular to unit vector u.
+
+    Selects a reference vector not nearly parallel to u, projects it orthogonally onto
+    the plane perpendicular to u, and normalizes it to obtain e1. e2 is computed as u x e1.
+    """
+    # Select reference vector not nearly parallel to u
+    a = (
+        np.array([1.0, 0.0, 0.0], dtype=float)
+        if abs(float(u[0])) < 0.9
+        else np.array([0.0, 1.0, 0.0], dtype=float)
+    )
+    v1 = a - float(np.dot(a, u)) * u
+    norm_v1 = float(np.linalg.norm(v1))
+    if norm_v1 < 1e-8:
+        # Fallback if reference vector was somehow collinear
+        a = np.array([0.0, 0.0, 1.0], dtype=float)
+        v1 = a - float(np.dot(a, u)) * u
+        norm_v1 = float(np.linalg.norm(v1))
+        if norm_v1 < 1e-8:
+            return np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0])
+
+    e1 = v1 / norm_v1
+    e2 = np.cross(u, e1)
+    norm_e2 = float(np.linalg.norm(e2))
+    if norm_e2 < 1e-8:
+        return e1, np.array([0.0, 1.0, 0.0])
+    e2 = e2 / norm_e2
+    return e1, e2
+
+
+def _compute_slice_bounding_areas(
+    pts_centered: np.ndarray,
+    proj: np.ndarray,
+    bins: np.ndarray,
+    e1: np.ndarray,
+    e2: np.ndarray,
+    min_pts_per_bin: int = 10,
+) -> tuple[list[float], list[float]]:
+    """
+    Compute 2D bounding-box cross-sectional areas along slices using the orthonormal basis (e1, e2).
+    """
+    areas: list[float] = []
+    bin_centers: list[float] = []
+    for i in range(len(bins) - 1):
+        mask = (proj >= bins[i]) & (proj < bins[i + 1])
+        s_pts = pts_centered[mask]
+        bin_centers.append(float((bins[i] + bins[i + 1]) / 2.0))
+        if len(s_pts) < min_pts_per_bin:
+            areas.append(0.0)
+        else:
+            c1 = s_pts @ e1
+            c2 = s_pts @ e2
+            span1 = float(np.ptp(c1)) if len(c1) else 0.0
+            span2 = float(np.ptp(c2)) if len(c2) else 0.0
+            area = span1 * span2
+            areas.append(area if np.isfinite(area) and area > 0.0 else 0.0)
+    return areas, bin_centers
+
+
 @register_target
 class HeadTarget(Target):
     """
@@ -161,8 +222,12 @@ class HeadTarget(Target):
         cov = Pc.T @ Pc / len(Pc)
         evals, evecs = np.linalg.eigh(cov)
         v_long = evecs[:, np.argmax(evals)]  # principal long axis
+        norm_v = float(np.linalg.norm(v_long))
+        if norm_v < 1e-8:
+            return dominant
+        u = v_long / norm_v
 
-        proj = Pc @ v_long
+        proj = Pc @ u
         p_min, p_max = float(np.min(proj)), float(np.max(proj))
         span_long = p_max - p_min
 
@@ -170,52 +235,54 @@ class HeadTarget(Target):
         if span_long > 0.30:
             n_bins = 25
             bins = np.linspace(p_min, p_max, n_bins)
-            areas: list[float] = []
-            bin_centers: list[float] = []
+            e1, e2 = _orthonormal_transverse_basis(u)
+            areas, bin_centers = _compute_slice_bounding_areas(Pc, proj, bins, e1, e2)
 
-            for i in range(len(bins) - 1):
-                mask = (proj >= bins[i]) & (proj < bins[i + 1])
-                s_pts = Pc[mask]
-                if len(s_pts) < 10:
-                    areas.append(0.0)
-                else:
-                    orth_proj = s_pts - (s_pts @ v_long[:, None]) * v_long
-                    w_span = np.ptp(orth_proj[:, 0]) if len(orth_proj) else 0.0
-                    d_span = np.ptp(orth_proj[:, 1]) if len(orth_proj) else 0.0
-                    areas.append(float(w_span * d_span))
-                bin_centers.append(float((bins[i] + bins[i + 1]) / 2.0))
+            # Robust orientation handling:
+            # Convention: Head is at the positive end of u (proj >= cut_val retains cranium).
+            # Shoulders/torso are at the negative end of u.
+            # Evidence: Torso exhibits broad shoulder mass, producing peak transverse bounding
+            # areas substantially larger than the cranium (typically > 1.25x the cranial peak).
+            # If the positive half of the projection contains the greater peak area, u points
+            # toward the torso, so u and proj are inverted.
+            mid_idx = len(areas) // 2
+            max_neg_half = max(areas[:mid_idx]) if areas[:mid_idx] else 0.0
+            max_pos_half = max(areas[mid_idx:]) if areas[mid_idx:] else 0.0
 
-            # Orient v_long so head is always on the positive side (areas[0] shoulders > areas[-1] head)
-            if areas and areas[-1] > areas[0]:
-                v_long = -v_long
+            if max_pos_half > 1.20 * max_neg_half:
+                # Shoulders are currently in the positive half; invert axis to place head at positive u
+                u = -u
                 proj = -proj
                 p_min, p_max = float(np.min(proj)), float(np.max(proj))
                 bins = np.linspace(p_min, p_max, n_bins)
-                areas = []
-                bin_centers = []
-                for i in range(len(bins) - 1):
-                    mask = (proj >= bins[i]) & (proj < bins[i + 1])
-                    s_pts = Pc[mask]
-                    if len(s_pts) < 10:
-                        areas.append(0.0)
-                    else:
-                        orth_proj = s_pts - (s_pts @ v_long[:, None]) * v_long
-                        w_span = np.ptp(orth_proj[:, 0]) if len(orth_proj) else 0.0
-                        d_span = np.ptp(orth_proj[:, 1]) if len(orth_proj) else 0.0
-                        areas.append(float(w_span * d_span))
-                    bin_centers.append(float((bins[i] + bins[i + 1]) / 2.0))
+                e1, e2 = _orthonormal_transverse_basis(u)
+                areas, bin_centers = _compute_slice_bounding_areas(Pc, proj, bins, e1, e2)
+            elif max_neg_half <= 1.20 * max_pos_half:
+                # Neither half exhibits clear shoulder expansion (> 1.20x).
+                # Check coronal taper: the cranial crown tapers toward zero span,
+                # whereas the neck/torso base maintains broader support.
+                if len(areas) >= 6:
+                    crown_cand_pos = max(areas[-3:]) if areas[-3:] else 0.0
+                    crown_cand_neg = max(areas[:3]) if areas[:3] else 0.0
+                    if crown_cand_neg < 0.70 * crown_cand_pos:
+                        # Negative half has the tapering crown; invert to place crown at positive u
+                        u = -u
+                        proj = -proj
+                        p_min, p_max = float(np.min(proj)), float(np.max(proj))
+                        bins = np.linspace(p_min, p_max, n_bins)
+                        e1, e2 = _orthonormal_transverse_basis(u)
+                        areas, bin_centers = _compute_slice_bounding_areas(Pc, proj, bins, e1, e2)
 
-            mid_idx = len(areas) // 2
+            # Constriction search: locate neck constriction between torso (below) and head (above)
             candidate_min_idx = -1
             min_area_val = float("inf")
-            for idx in range(3, mid_idx + 4):
-                if 0 < idx < len(areas) - 1:
-                    if areas[idx] < areas[idx - 1] and areas[idx] <= areas[idx + 1]:
-                        if areas[idx] < min_area_val:
-                            min_area_val = areas[idx]
-                            candidate_min_idx = idx
+            for idx in range(3, len(areas) - 3):
+                if areas[idx] < areas[idx - 1] and areas[idx] <= areas[idx + 1]:
+                    if areas[idx] < min_area_val:
+                        min_area_val = areas[idx]
+                        candidate_min_idx = idx
 
-            if candidate_min_idx != -1 and min_area_val > 0:
+            if candidate_min_idx != -1 and min_area_val > 0.0:
                 head_mass_above = max(areas[candidate_min_idx:])
                 shoulder_mass_below = max(areas[:candidate_min_idx]) if candidate_min_idx > 0 else 0.0
 

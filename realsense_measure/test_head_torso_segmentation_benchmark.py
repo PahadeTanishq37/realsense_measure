@@ -154,6 +154,11 @@ def create_synthetic_labeled_head_torso(
         "pitch_deg": pitch_deg,
         "slouch_deg": slouch_deg,
         "truncate_posterior": truncate_posterior,
+        "meshes": {
+            "head": head_mesh,
+            "neck": neck_mesh,
+            "torso": torso_mesh,
+        },
     }
 
     return pcd_cam, pts_local, labels, R_pitch, meta
@@ -270,28 +275,70 @@ def test_synthetic_generator_label_reconciliation():
     pts_n = pts_local[labels == 1]
     pts_t = pts_local[labels == 2]
 
-    # Check head breadth (X span around 160 mm)
-    assert np.isclose(np.ptp(pts_h[:, 0]) * 1000.0, 160.0, atol=2.0)
-    # Check head height (Y span around 220 mm: [-110, +110] mm)
-    assert np.isclose(np.ptp(pts_h[:, 1]) * 1000.0, 220.0, atol=2.0)
-    assert np.min(pts_h[:, 1]) >= -0.1105
-    assert np.max(pts_h[:, 1]) <= 0.1105
-    # Check total geometric Z extent including nose (z_min ~ -100 mm, z_max ~ +132 mm -> span ~ 232 mm)
-    assert np.ptp(pts_h[:, 2]) * 1000.0 > 230.0
+    # ------------------------------------------------------------------
+    # 1. Analytical Mesh Geometry Bounds
+    # ------------------------------------------------------------------
+    meshes = meta["meshes"]
+    vh = np.asarray(meshes["head"].vertices)
+    vn = np.asarray(meshes["neck"].vertices)
+    vt = np.asarray(meshes["torso"].vertices)
 
-    # Step 1 Verification: Neck longitudinal axis aligned with Y (bounds in [-180, -110] mm)
-    assert np.isclose(np.min(pts_n[:, 1]), -0.180, atol=1e-3)
-    assert np.isclose(np.max(pts_n[:, 1]), -0.110, atol=1e-3)
-    assert np.isclose(np.ptp(pts_n[:, 0]) * 1000.0, 90.0, atol=1.0)  # 2 * radius (45 mm)
-    assert np.isclose(np.ptp(pts_n[:, 2]) * 1000.0, 90.0, atol=1.0)  # 2 * radius (45 mm)
+    # Head mesh analytical bounds (breadth 160 mm, height 220 mm, depth 235 mm with nose cone)
+    assert np.isclose(np.ptp(vh[:, 0]) * 1000.0, 160.0, atol=1e-3)
+    assert np.isclose(np.ptp(vh[:, 1]) * 1000.0, 220.0, atol=1e-3)
+    assert np.isclose(np.min(vh[:, 1]), -0.110, atol=1e-3)
+    assert np.isclose(np.max(vh[:, 1]), 0.110, atol=1e-3)
+    assert np.isclose(np.ptp(vh[:, 2]) * 1000.0, 235.0, atol=1e-3)
 
-    # Step 2 Verification: Slouched torso remains strictly below neck compartment (y_s <= -0.180 m)
-    assert np.max(pts_t[:, 1]) <= -0.1800  # Zero volumetric penetration into neck compartment
-    # Verify anatomical connectivity: touching contact at y_s = -0.180 m boundary
+    # Neck mesh analytical bounds (height 70 mm, aligned with subject Y axis)
+    assert np.isclose(np.min(vn[:, 1]), -0.180, atol=1e-3)
+    assert np.isclose(np.max(vn[:, 1]), -0.110, atol=1e-3)
+    assert np.isclose(np.ptp(vn[:, 0]) * 1000.0, 90.0, atol=1e-3)
+    assert np.isclose(np.ptp(vn[:, 2]) * 1000.0, 90.0, atol=1e-3)
+
+    # Torso mesh analytical bounds (top face anchored at y_s = -0.180 m)
+    assert np.isclose(np.max(vt[:, 1]), -0.180, atol=1e-3)
+    assert np.min(vt[:, 1]) >= -0.500
+
+    # ------------------------------------------------------------------
+    # 2. Continuous Mesh-Surface Interface & Penetration Tolerance
+    # ------------------------------------------------------------------
+    # Interface tolerance: zero volumetric penetration beyond numerical epsilon (50 um)
+    interface_tolerance_m = 5e-5
+
+    # Head-to-neck boundary plane (y_s = -0.110 m):
+    head_min_y = np.min(vh[:, 1])
+    neck_max_y = np.max(vn[:, 1])
+    assert abs(head_min_y - (-0.110)) <= interface_tolerance_m
+    assert abs(neck_max_y - (-0.110)) <= interface_tolerance_m
+    # Penetration check: neck must not penetrate cranium beyond declared tolerance
+    assert (neck_max_y - head_min_y) <= interface_tolerance_m
+
+    # Neck-to-torso boundary plane (y_s = -0.180 m):
+    neck_min_y = np.min(vn[:, 1])
+    torso_max_y = np.max(vt[:, 1])
+    assert abs(neck_min_y - (-0.180)) <= interface_tolerance_m
+    assert abs(torso_max_y - (-0.180)) <= interface_tolerance_m
+    # Penetration check: torso must not penetrate neck beyond declared tolerance
+    assert (torso_max_y - neck_min_y) <= interface_tolerance_m
+
+    # ------------------------------------------------------------------
+    # 3. Sampled-Point Discrete Surface Distance (Separate from Mesh Contact)
+    # ------------------------------------------------------------------
+    # Discrete Poisson-disk samples on 2D surfaces have non-zero spacing.
+    # We verify discrete inter-sample distances and DBSCAN connectivity (eps = 25 mm).
     tree_n = cKDTree(pts_n)
-    dists_t_to_n, _ = tree_n.query(pts_t)
-    min_dist_mm = np.min(dists_t_to_n) * 1000.0
-    assert min_dist_mm < 25.0, f"Torso disconnected from neck (min dist {min_dist_mm:.1f} mm >= 25 mm DBSCAN eps)"
+    dists_hn, _ = tree_n.query(pts_h)
+    dists_tn, _ = tree_n.query(pts_t)
+    min_dist_hn_mm = np.min(dists_hn) * 1000.0
+    min_dist_tn_mm = np.min(dists_tn) * 1000.0
+
+    # Non-zero point spacing due to discrete sampling (distinct from continuous mesh contact)
+    assert min_dist_hn_mm > 0.1
+    assert min_dist_tn_mm > 0.1
+    # Connectivity: must be within DBSCAN cluster_eps (25 mm)
+    assert min_dist_hn_mm < 25.0, f"Head disconnected from neck (gap {min_dist_hn_mm:.1f} mm >= 25 mm)"
+    assert min_dist_tn_mm < 25.0, f"Torso disconnected from neck (gap {min_dist_tn_mm:.1f} mm >= 25 mm)"
 
 
 def test_segmentation_benchmark_full_reconciliation():
@@ -319,6 +366,7 @@ def test_segmentation_benchmark_full_reconciliation():
 
         dists, idx_pca = tree.query(pts_pca_local)
         assert np.all(dists < 1e-12), "PCA points altered coordinates!"
+        assert len(np.unique(idx_pca)) == len(idx_pca), "Bijective point index mapping violated"
         surv_l_pca = labels[idx_pca]
 
         k0_pca = int(np.sum(surv_l_pca == 0))
@@ -326,6 +374,18 @@ def test_segmentation_benchmark_full_reconciliation():
         k2_pca = int(np.sum(surv_l_pca == 2))
         # P0 Identity Reconciliation
         assert len(pts_pca_cam) == k0_pca + k1_pca + k2_pca
+
+        rec_pca = k0_pca / N_h
+        rej_pca = (N_t - k2_pca) / N_t
+        loss_pca = (N_h - k0_pca) / N_h
+        assert np.isfinite(rec_pca) and 0.0 <= rec_pca <= 1.0
+        assert np.isfinite(rej_pca) and 0.0 <= rej_pca <= 1.0
+        assert np.isfinite(loss_pca) and 0.0 <= loss_pca <= 1.0
+        assert np.isclose(loss_pca, 1.0 - rec_pca, atol=1e-12)
+        # Stable regression target for Method A: Production PCA covariance tilts by ~37 deg
+        # due to slouched torso; orientation heuristic flips v_long, cutting off 100% of the cranium.
+        assert rec_pca <= 0.05, f"Method A unexpectedly isolated cranium (recall {rec_pca:.2f} > 0.05)"
+        assert rej_pca >= 0.90, f"Method A failed torso rejection target (rej {rej_pca:.2f} < 0.90)"
 
         # ------------------------------------------------------------------
         # Method C: Baseline Camera-Y Slicing
@@ -336,12 +396,24 @@ def test_segmentation_benchmark_full_reconciliation():
 
         dists_y, idx_y = tree.query(pts_y_local)
         assert np.all(dists_y < 1e-12)
+        assert len(np.unique(idx_y)) == len(idx_y)
         surv_l_y = labels[idx_y]
 
         k0_y = int(np.sum(surv_l_y == 0))
         k1_y = int(np.sum(surv_l_y == 1))
         k2_y = int(np.sum(surv_l_y == 2))
         assert len(pts_y_cam) == k0_y + k1_y + k2_y
+
+        rec_y = k0_y / N_h
+        rej_y = (N_t - k2_y) / N_t
+        loss_y = (N_h - k0_y) / N_h
+        assert np.isfinite(rec_y) and 0.0 <= rec_y <= 1.0
+        assert np.isfinite(rej_y) and 0.0 <= rej_y <= 1.0
+        assert np.isfinite(loss_y) and 0.0 <= loss_y <= 1.0
+        assert np.isclose(loss_y, 1.0 - rec_y, atol=1e-12)
+        # Experimental target for Method C: Upright 70 mm neck provides clearance for horizontal cut
+        assert rec_y >= 0.99, f"Method C head recall target failed (recall {rec_y:.2f} < 0.99)"
+        assert rej_y >= 0.99, f"Method C torso rejection target failed (rej {rej_y:.2f} < 0.99)"
 
         # ------------------------------------------------------------------
         # Method B: Multi-Axis Prototype (25 deg search cone)
@@ -351,6 +423,7 @@ def test_segmentation_benchmark_full_reconciliation():
 
         dists_m, idx_m = tree.query(pts_m_local)
         assert np.all(dists_m < 1e-12)
+        assert len(np.unique(idx_m)) == len(idx_m)
         surv_l_m = labels[idx_m]
 
         k0_m = int(np.sum(surv_l_m == 0))
@@ -358,11 +431,22 @@ def test_segmentation_benchmark_full_reconciliation():
         k2_m = int(np.sum(surv_l_m == 2))
         assert len(pts_m_cam) == k0_m + k1_m + k2_m
 
+        rec_m = k0_m / N_h
+        rej_m = (N_t - k2_m) / N_t
+        loss_m = (N_h - k0_m) / N_h
+        assert np.isfinite(rec_m) and 0.0 <= rec_m <= 1.0
+        assert np.isfinite(rej_m) and 0.0 <= rej_m <= 1.0
+        assert np.isfinite(loss_m) and 0.0 <= loss_m <= 1.0
+        assert np.isclose(loss_m, 1.0 - rec_m, atol=1e-12)
+        # Experimental target for Method B: Conical constriction search locates neck constriction plane
+        assert rec_m >= 0.99, f"Method B head recall target failed (recall {rec_m:.2f} < 0.99)"
+        assert rej_m >= 0.99, f"Method B torso rejection target failed (rej {rej_m:.2f} < 0.99)"
+
         # Print reconciled counts for audit
         print(f"\n[Pitch {pitch:4.1f}° Evaluation]")
-        print(f"  Method A (Production PCA): Surv={len(pts_pca_cam):5d} | RetHead={k0_pca:5d} ({k0_pca/N_h*100:5.1f}%) | RetTorso={k2_pca:5d} | TorsoRej={(N_t-k2_pca)/N_t*100:5.1f}%")
-        print(f"  Method C (Camera-Y):       Surv={len(pts_y_cam):5d} | RetHead={k0_y:5d} ({k0_y/N_h*100:5.1f}%) | RetTorso={k2_y:5d} | TorsoRej={(N_t-k2_y)/N_t*100:5.1f}%")
-        print(f"  Method B (Multi-Axis 25°): Surv={len(pts_m_cam):5d} | RetHead={k0_m:5d} ({k0_m/N_h*100:5.1f}%) | RetTorso={k2_m:5d} | TorsoRej={(N_t-k2_m)/N_t*100:5.1f}%")
+        print(f"  Method A (Production PCA): Surv={len(pts_pca_cam):5d} | RetHead={k0_pca:5d} ({rec_pca*100:5.1f}%) | RetTorso={k2_pca:5d} | TorsoRej={rej_pca*100:5.1f}% | HeadLoss={loss_pca*100:5.1f}%")
+        print(f"  Method C (Camera-Y):       Surv={len(pts_y_cam):5d} | RetHead={k0_y:5d} ({rec_y*100:5.1f}%) | RetTorso={k2_y:5d} | TorsoRej={rej_y*100:5.1f}% | HeadLoss={loss_y*100:5.1f}%")
+        print(f"  Method B (Multi-Axis 25°): Surv={len(pts_m_cam):5d} | RetHead={k0_m:5d} ({rec_m*100:5.1f}%) | RetTorso={k2_m:5d} | TorsoRej={rej_m*100:5.1f}% | HeadLoss={loss_m*100:5.1f}%")
 
 
 def test_measurement_validator_complete_synthetic_head():
@@ -383,6 +467,8 @@ def test_measurement_validator_complete_synthetic_head():
 
     assert result["status"] == "validated", f"Expected 'validated', got {result['status']}"
     assert result["oriented_bbox"]["volume_m3"] is not None
+    assert result["symmetry_residual_mm"] <= 12.0, f"Expected symmetry <= 12.0 mm, got {result['symmetry_residual_mm']}"
+    assert result["diagnostics"] == [], f"Expected zero diagnostics on complete head, got {result['diagnostics']}"
 
     dims = result["cranial_envelope_3d"]
     # Breadth: nominal 160 mm, measured ~157.9 mm (error ~2.1 mm)
@@ -410,9 +496,12 @@ def test_measurement_validator_partial_synthetic_head():
 
     assert result["status"] == "unverified", f"Expected 'unverified', got {result['status']}"
     assert result["oriented_bbox"]["volume_m3"] is None
-    # Verify exact diagnostics recorded
+
+    # Verify exact failure diagnostic and threshold from active production targets/head.py:274-276
+    assert result["symmetry_residual_mm"] > 12.0, f"Expected symmetry > 12.0 mm, got {result['symmetry_residual_mm']}"
     diags = result.get("diagnostics", [])
-    assert any("symmetry residual" in d.lower() or "boundary" in d.lower() for d in diags)
+    assert any("symmetry residual" in d.lower() and "12.0" in d for d in diags), f"Missing symmetry diagnostic: {diags}"
+    assert any("anterior-posterior" in d.lower() or "facial relief" in d.lower() for d in diags), f"Missing A-P relief diagnostic: {diags}"
 
 
 if __name__ == "__main__":
