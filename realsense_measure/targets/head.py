@@ -6,6 +6,7 @@ Registered under the name "head". See targets/base.py for the extension contract
 
 from __future__ import annotations
 
+from typing import Any
 import numpy as np
 import open3d as o3d
 from scipy.spatial import cKDTree
@@ -21,6 +22,67 @@ def _sanitize_points(pts: np.ndarray) -> np.ndarray:
         return pts
     finite_mask = np.all(np.isfinite(pts), axis=1)
     return pts[finite_mask]
+
+
+def _check_short_span_head_isolation(
+    pts: np.ndarray,
+    u_SI: np.ndarray,
+    height_m: float,
+) -> tuple[bool, str]:
+    """
+    Evaluate whether a point cloud that bypassed the 300 mm neck-constriction search
+    (or was supplied directly to measure) exhibits verified isolated cranial geometry
+    versus unsegmented or ambiguous neck attachment.
+
+    Conservative Policy:
+      1. Anatomical Height Margin: In standard adult anthropometric reference data (e.g. ISO 7250-1,
+         ANSUR II), isolated menton-to-vertex cranial height averages 210-230 mm and rarely exceeds
+         245-250 mm (99th percentile ~248 mm). A height exceeding 260 mm (0.260 m) without a confirmed
+         neck cut is ambiguous: an attached neck (typically adding 50-80 mm to a head) falls directly
+         into the 270-300 mm span range. Because available geometric evidence cannot rule out neck
+         geometry in this range without a cut, the system fails closed and withholds validation.
+      2. Interior Constriction Check: If an interior transverse constriction (cross-sectional area
+         <= 0.65 of cranial mass) is present along the longitudinal axis, attached neck geometry is
+         detected but unsegmented.
+      3. Otherwise, the cloud exhibits smooth convex isolated cranial geometry and is confirmed.
+    """
+    if height_m > 0.260:
+        return (
+            False,
+            f"Head segmentation unconfirmed: measured height ({height_m * 1000.0:.1f} mm > 260 mm) "
+            f"exceeds verified isolated cranial bounds without a confirmed neck cut; attached neck cannot be ruled out",
+        )
+
+    C = np.mean(pts, axis=0)
+    Pc = pts - C
+    proj = Pc @ u_SI
+    p_min, p_max = float(np.min(proj)), float(np.max(proj))
+    span = p_max - p_min
+    if span < 0.10:
+        return True, ""
+
+    n_bins = 25
+    bins = np.linspace(p_min, p_max, n_bins)
+    e1, e2 = _orthonormal_transverse_basis(u_SI)
+    areas, _ = _compute_slice_bounding_areas(Pc, proj, bins, e1, e2)
+
+    candidate_min_idx = -1
+    min_area_val = float("inf")
+    for idx in range(3, len(areas) - 3):
+        if areas[idx] < areas[idx - 1] and areas[idx] <= areas[idx + 1]:
+            if areas[idx] < min_area_val:
+                min_area_val = areas[idx]
+                candidate_min_idx = idx
+
+    head_mass = max(areas) if areas else 0.0
+    if candidate_min_idx != -1 and head_mass > 0 and min_area_val <= 0.65 * head_mass:
+        return (
+            False,
+            f"Head segmentation unconfirmed: interior constriction detected (ratio {min_area_val / head_mass:.2f} <= 0.65) "
+            f"along longitudinal axis; attached neck is present but was not cut",
+        )
+
+    return True, ""
 
 
 def _check_face_support_2d(
@@ -150,6 +212,18 @@ class HeadTarget(Target):
 
     def __init__(self, preprocess_cfg: PreprocessConfig | None = None) -> None:
         self.cfg: PreprocessConfig = preprocess_cfg or PreprocessConfig()
+        self.last_segmentation_result: dict[str, Any] = {
+            "outcome": "none",
+            "cut_applied": False,
+            "reason": "segment() has not been called on this instance",
+            "raw_point_count": 0,
+            "finite_point_count": 0,
+            "dominant_point_count": None,
+            "retained_point_count": 0,
+            "retention_ratio": None,
+            "longitudinal_span_m": None,
+        }
+        self._last_segmented_pcd_ref: o3d.geometry.PointCloud | None = None
 
     def is_plausible_head(self, pcd: o3d.geometry.PointCloud) -> tuple[bool, str]:
         """
@@ -189,8 +263,33 @@ class HeadTarget(Target):
         Isolate cranial geometry, separating disconnected outliers and torso attachments.
         """
         raw_pts = np.asarray(pcd.points)
+        n_raw = len(raw_pts)
         pts = _sanitize_points(raw_pts)
-        if len(pts) < 50:
+        n_finite = len(pts)
+
+        # Reset internal segmentation metadata on every call
+        self.last_segmentation_result = {
+            "outcome": "none",
+            "cut_applied": False,
+            "reason": "",
+            "raw_point_count": n_raw,
+            "finite_point_count": n_finite,
+            "dominant_point_count": None,
+            "retained_point_count": 0,
+            "retention_ratio": None,
+            "longitudinal_span_m": None,
+        }
+        self._last_segmented_pcd_ref = None
+
+        if n_finite < 50:
+            self.last_segmentation_result.update({
+                "outcome": "insufficient_input",
+                "cut_applied": False,
+                "reason": f"Input cloud has insufficient finite points ({n_finite} < 50)",
+                "retained_point_count": n_finite,
+                "retention_ratio": round(n_finite / max(n_raw, 1), 4) if n_raw > 0 else None,
+            })
+            self._last_segmented_pcd_ref = pcd
             return pcd
 
         cleaned_pcd = o3d.geometry.PointCloud()
@@ -213,7 +312,17 @@ class HeadTarget(Target):
             dominant = cleaned_pcd
 
         pts_dom = np.asarray(dominant.points)
-        if len(pts_dom) < 200:
+        n_dom = len(pts_dom)
+        if n_dom < 200:
+            self.last_segmentation_result.update({
+                "outcome": "insufficient_input",
+                "cut_applied": False,
+                "reason": f"Dominant cluster has insufficient points ({n_dom} < 200)",
+                "dominant_point_count": n_dom,
+                "retained_point_count": n_dom,
+                "retention_ratio": round(n_dom / max(n_raw, 1), 4) if n_raw > 0 else None,
+            })
+            self._last_segmented_pcd_ref = dominant
             return dominant
 
         # Check for neck constriction along vertical long axis
@@ -224,6 +333,15 @@ class HeadTarget(Target):
         v_long = evecs[:, np.argmax(evals)]  # principal long axis
         norm_v = float(np.linalg.norm(v_long))
         if norm_v < 1e-8:
+            self.last_segmentation_result.update({
+                "outcome": "segmentation_error",
+                "cut_applied": False,
+                "reason": "Degenerate covariance or zero-norm principal axis",
+                "dominant_point_count": n_dom,
+                "retained_point_count": n_dom,
+                "retention_ratio": round(n_dom / max(n_raw, 1), 4) if n_raw > 0 else None,
+            })
+            self._last_segmented_pcd_ref = dominant
             return dominant
         u = v_long / norm_v
 
@@ -232,68 +350,115 @@ class HeadTarget(Target):
         span_long = p_max - p_min
 
         # If long span > 30 cm, check if neck/shoulders are attached
-        if span_long > 0.30:
-            n_bins = 25
+        if span_long <= 0.30:
+            self.last_segmentation_result.update({
+                "outcome": "bypassed_short_span",
+                "cut_applied": False,
+                "reason": f"Longitudinal span ({span_long * 1000.0:.1f} mm) does not exceed 300 mm neck-search gate",
+                "dominant_point_count": n_dom,
+                "retained_point_count": n_dom,
+                "retention_ratio": round(n_dom / max(n_raw, 1), 4) if n_raw > 0 else None,
+                "longitudinal_span_m": round(span_long, 4),
+            })
+            self._last_segmented_pcd_ref = dominant
+            return dominant
+
+        n_bins = 25
+        bins = np.linspace(p_min, p_max, n_bins)
+        e1, e2 = _orthonormal_transverse_basis(u)
+        areas, bin_centers = _compute_slice_bounding_areas(Pc, proj, bins, e1, e2)
+
+        # Robust orientation handling:
+        # Convention: Head is at the positive end of u (proj >= cut_val retains cranium).
+        # Shoulders/torso are at the negative end of u.
+        # Evidence: Torso exhibits broad shoulder mass, producing peak transverse bounding
+        # areas substantially larger than the cranium (typically > 1.25x the cranial peak).
+        # If the positive half of the projection contains the greater peak area, u points
+        # toward the torso, so u and proj are inverted.
+        mid_idx = len(areas) // 2
+        max_neg_half = max(areas[:mid_idx]) if areas[:mid_idx] else 0.0
+        max_pos_half = max(areas[mid_idx:]) if areas[mid_idx:] else 0.0
+
+        if max_pos_half > 1.20 * max_neg_half:
+            # Shoulders are currently in the positive half; invert axis to place head at positive u
+            u = -u
+            proj = -proj
+            p_min, p_max = float(np.min(proj)), float(np.max(proj))
             bins = np.linspace(p_min, p_max, n_bins)
             e1, e2 = _orthonormal_transverse_basis(u)
             areas, bin_centers = _compute_slice_bounding_areas(Pc, proj, bins, e1, e2)
+        elif max_neg_half <= 1.20 * max_pos_half:
+            # Neither half exhibits clear shoulder expansion (> 1.20x).
+            # Check coronal taper: the cranial crown tapers toward zero span,
+            # whereas the neck/torso base maintains broader support.
+            if len(areas) >= 6:
+                crown_cand_pos = max(areas[-3:]) if areas[-3:] else 0.0
+                crown_cand_neg = max(areas[:3]) if areas[:3] else 0.0
+                if crown_cand_neg < 0.70 * crown_cand_pos:
+                    # Negative half has the tapering crown; invert to place crown at positive u
+                    u = -u
+                    proj = -proj
+                    p_min, p_max = float(np.min(proj)), float(np.max(proj))
+                    bins = np.linspace(p_min, p_max, n_bins)
+                    e1, e2 = _orthonormal_transverse_basis(u)
+                    areas, bin_centers = _compute_slice_bounding_areas(Pc, proj, bins, e1, e2)
 
-            # Robust orientation handling:
-            # Convention: Head is at the positive end of u (proj >= cut_val retains cranium).
-            # Shoulders/torso are at the negative end of u.
-            # Evidence: Torso exhibits broad shoulder mass, producing peak transverse bounding
-            # areas substantially larger than the cranium (typically > 1.25x the cranial peak).
-            # If the positive half of the projection contains the greater peak area, u points
-            # toward the torso, so u and proj are inverted.
-            mid_idx = len(areas) // 2
-            max_neg_half = max(areas[:mid_idx]) if areas[:mid_idx] else 0.0
-            max_pos_half = max(areas[mid_idx:]) if areas[mid_idx:] else 0.0
+        # Constriction search: locate neck constriction between torso (below) and head (above)
+        candidate_min_idx = -1
+        min_area_val = float("inf")
+        for idx in range(3, len(areas) - 3):
+            if areas[idx] < areas[idx - 1] and areas[idx] <= areas[idx + 1]:
+                if areas[idx] < min_area_val:
+                    min_area_val = areas[idx]
+                    candidate_min_idx = idx
 
-            if max_pos_half > 1.20 * max_neg_half:
-                # Shoulders are currently in the positive half; invert axis to place head at positive u
-                u = -u
-                proj = -proj
-                p_min, p_max = float(np.min(proj)), float(np.max(proj))
-                bins = np.linspace(p_min, p_max, n_bins)
-                e1, e2 = _orthonormal_transverse_basis(u)
-                areas, bin_centers = _compute_slice_bounding_areas(Pc, proj, bins, e1, e2)
-            elif max_neg_half <= 1.20 * max_pos_half:
-                # Neither half exhibits clear shoulder expansion (> 1.20x).
-                # Check coronal taper: the cranial crown tapers toward zero span,
-                # whereas the neck/torso base maintains broader support.
-                if len(areas) >= 6:
-                    crown_cand_pos = max(areas[-3:]) if areas[-3:] else 0.0
-                    crown_cand_neg = max(areas[:3]) if areas[:3] else 0.0
-                    if crown_cand_neg < 0.70 * crown_cand_pos:
-                        # Negative half has the tapering crown; invert to place crown at positive u
-                        u = -u
-                        proj = -proj
-                        p_min, p_max = float(np.min(proj)), float(np.max(proj))
-                        bins = np.linspace(p_min, p_max, n_bins)
-                        e1, e2 = _orthonormal_transverse_basis(u)
-                        areas, bin_centers = _compute_slice_bounding_areas(Pc, proj, bins, e1, e2)
+        if candidate_min_idx != -1 and min_area_val > 0.0:
+            head_mass_above = max(areas[candidate_min_idx:])
+            shoulder_mass_below = max(areas[:candidate_min_idx]) if candidate_min_idx > 0 else 0.0
 
-            # Constriction search: locate neck constriction between torso (below) and head (above)
-            candidate_min_idx = -1
-            min_area_val = float("inf")
-            for idx in range(3, len(areas) - 3):
-                if areas[idx] < areas[idx - 1] and areas[idx] <= areas[idx + 1]:
-                    if areas[idx] < min_area_val:
-                        min_area_val = areas[idx]
-                        candidate_min_idx = idx
+            if min_area_val <= 0.65 * head_mass_above and shoulder_mass_below >= 1.40 * min_area_val:
+                cut_val = bin_centers[candidate_min_idx]
+                head_mask = proj >= cut_val
+                n_head_cand = int(np.sum(head_mask))
+                if n_head_cand >= 150:
+                    seg_pts = pts_dom[head_mask]
+                    n_seg = len(seg_pts)
+                    self.last_segmentation_result.update({
+                        "outcome": "constriction_cut",
+                        "cut_applied": True,
+                        "reason": f"Neck constriction cut applied at projection {cut_val:.4f} m, retaining {n_seg} points",
+                        "dominant_point_count": n_dom,
+                        "retained_point_count": n_seg,
+                        "retention_ratio": round(n_seg / max(n_raw, 1), 4) if n_raw > 0 else None,
+                        "longitudinal_span_m": round(span_long, 4),
+                    })
+                    seg_pcd = o3d.geometry.PointCloud()
+                    seg_pcd.points = o3d.utility.Vector3dVector(seg_pts)
+                    self._last_segmented_pcd_ref = seg_pcd
+                    return seg_pcd
+                else:
+                    self.last_segmentation_result.update({
+                        "outcome": "insufficient_retained_points",
+                        "cut_applied": False,
+                        "reason": f"Candidate constriction cut retains too few points ({n_head_cand} < 150)",
+                        "dominant_point_count": n_dom,
+                        "retained_point_count": n_dom,
+                        "retention_ratio": round(n_dom / max(n_raw, 1), 4) if n_raw > 0 else None,
+                        "longitudinal_span_m": round(span_long, 4),
+                    })
+                    self._last_segmented_pcd_ref = dominant
+                    return dominant
 
-            if candidate_min_idx != -1 and min_area_val > 0.0:
-                head_mass_above = max(areas[candidate_min_idx:])
-                shoulder_mass_below = max(areas[:candidate_min_idx]) if candidate_min_idx > 0 else 0.0
-
-                if min_area_val <= 0.65 * head_mass_above and shoulder_mass_below >= 1.40 * min_area_val:
-                    cut_val = bin_centers[candidate_min_idx]
-                    head_mask = proj >= cut_val
-                    if np.sum(head_mask) >= 150:
-                        seg_pcd = o3d.geometry.PointCloud()
-                        seg_pcd.points = o3d.utility.Vector3dVector(pts_dom[head_mask])
-                        return seg_pcd
-
+        self.last_segmentation_result.update({
+            "outcome": "no_constriction_found",
+            "cut_applied": False,
+            "reason": "Search evaluated transverse slices but found no valid neck constriction satisfying criteria",
+            "dominant_point_count": n_dom,
+            "retained_point_count": n_dom,
+            "retention_ratio": round(n_dom / max(n_raw, 1), 4) if n_raw > 0 else None,
+            "longitudinal_span_m": round(span_long, 4),
+        })
+        self._last_segmented_pcd_ref = dominant
         return dominant
 
     def _estimate_anatomical_frame(
@@ -396,6 +561,8 @@ class HeadTarget(Target):
             "estimated_volume_m3": 0.0,
         }
 
+        is_from_last_segment = (getattr(self, "_last_segmented_pcd_ref", None) is pcd)
+
         if n_pts < 50:
             return {
                 "target": self.name,
@@ -413,6 +580,10 @@ class HeadTarget(Target):
                 },
                 "volume_m3": None,
                 "estimated_volume_m3": 0.0,
+                "segmentation": dict(self.last_segmentation_result) if is_from_last_segment else {
+                    "outcome": "untracked_direct_call",
+                    "cut_applied": False,
+                },
             }
 
         is_plaus, plaus_reason = self.is_plausible_head(pcd)
@@ -433,6 +604,10 @@ class HeadTarget(Target):
                 },
                 "volume_m3": None,
                 "estimated_volume_m3": 0.0,
+                "segmentation": dict(self.last_segmentation_result) if is_from_last_segment else {
+                    "outcome": "untracked_direct_call",
+                    "cut_applied": False,
+                },
             }
 
         # ------------------------------------------------------------------
@@ -532,7 +707,43 @@ class HeadTarget(Target):
                 f"Dimensions ({breadth_m*1000:.0f}x{length_m*1000:.0f}x{height_m*1000:.0f} mm) fall outside typical anthropometric range"
             )
 
-        is_validated = bool(is_confident and all_faces_supported and dim_in_range)
+        # Check segmentation confirmation and fail-safe policy
+        is_seg_confirmed = True
+        seg_diag: list[str] = []
+
+        is_from_last_segment = (getattr(self, "_last_segmented_pcd_ref", None) is pcd)
+        seg_outcome = self.last_segmentation_result.get("outcome", "none") if is_from_last_segment else "none"
+
+        if is_from_last_segment:
+            if seg_outcome == "constriction_cut":
+                # Confirmed valid neck cut: proceed through standard validation gates
+                is_seg_confirmed = True
+            elif seg_outcome in (
+                "no_constriction_found",
+                "insufficient_retained_points",
+                "insufficient_input",
+                "segmentation_error",
+            ):
+                # Failed or incomplete segmentation must not produce validated status
+                is_seg_confirmed = False
+                reason = self.last_segmentation_result.get("reason", "unspecified")
+                seg_diag.append(f"Head segmentation unconfirmed ({seg_outcome}): {reason}")
+            elif seg_outcome == "bypassed_short_span":
+                # Short-span bypass (<= 300 mm). Check whether cloud exhibits verified isolated
+                # cranial geometry or potentially attached neck geometry.
+                is_isolated, iso_reason = _check_short_span_head_isolation(pts, u_SI, height_m)
+                if not is_isolated:
+                    is_seg_confirmed = False
+                    seg_diag.append(iso_reason)
+        else:
+            # Direct or untracked call to measure(pcd)
+            is_isolated, iso_reason = _check_short_span_head_isolation(pts, u_SI, height_m)
+            if not is_isolated:
+                is_seg_confirmed = False
+                seg_diag.append(iso_reason)
+
+        diagnostics.extend(seg_diag)
+        is_validated = bool(is_confident and all_faces_supported and dim_in_range and is_seg_confirmed)
 
         # Volume: Ellipsoid / OBB volume
         # V = 4/3 * pi * (breadth/2) * (length/2) * (height/2)
@@ -563,6 +774,8 @@ class HeadTarget(Target):
                 "center": [round(float(v), 5) for v in C],
                 "rotation": [round(float(v), 5) for v in axes_matrix.flatten()],
             },
+            "volume_m3": ellipsoid_vol_m3 if is_validated else None,
+            "estimated_volume_m3": ellipsoid_vol_m3,
             # Preserved for backward compatibility
             "head_dimensions_mm": {
                 "cranial_width_mm": cranial_dims["breadth_mm"],
@@ -572,6 +785,10 @@ class HeadTarget(Target):
             "boundary_checks": boundary_checks,
             "symmetry_residual_mm": round(sym_err_mm, 2),
             "diagnostics": diagnostics if not is_validated else [],
+            "segmentation": dict(self.last_segmentation_result) if is_from_last_segment else {
+                "outcome": "untracked_direct_call",
+                "cut_applied": False,
+            },
             "axis_aligned_bbox_extent_m": aabb_extent,
             "geometry_for_viz": obb,
         }
