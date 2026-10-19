@@ -6,6 +6,7 @@ Registered under the name "head". See targets/base.py for the extension contract
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 import numpy as np
 import open3d as o3d
@@ -22,6 +23,29 @@ def _sanitize_points(pts: np.ndarray) -> np.ndarray:
         return pts
     finite_mask = np.all(np.isfinite(pts), axis=1)
     return pts[finite_mask]
+
+
+def _compute_point_cloud_fingerprint(pcd: o3d.geometry.PointCloud | None) -> str | None:
+    """
+    Compute a deterministic SHA-256 digest of a point cloud's coordinate array.
+    Captures shape and exact float64 coordinates in canonical contiguous byte representation.
+    Returns None if pcd is None, contains no points, contains non-finite values, or encounters an exception.
+    """
+    if pcd is None:
+        return None
+    try:
+        raw_pts = np.asarray(pcd.points)
+        if len(raw_pts) == 0:
+            return None
+        if not np.all(np.isfinite(raw_pts)):
+            return None
+        arr = np.ascontiguousarray(raw_pts, dtype=np.float64)
+        hasher = hashlib.sha256()
+        hasher.update(str(arr.shape).encode("ascii"))
+        hasher.update(arr.tobytes())
+        return hasher.hexdigest()
+    except Exception:
+        return None
 
 
 def _check_short_span_head_isolation(
@@ -222,8 +246,39 @@ class HeadTarget(Target):
             "retained_point_count": 0,
             "retention_ratio": None,
             "longitudinal_span_m": None,
+            "fingerprint": None,
         }
         self._last_segmented_pcd_ref: o3d.geometry.PointCloud | None = None
+        self._last_segmented_fingerprint: str | None = None
+
+    def _finalize_segmentation_result(
+        self,
+        ret_pcd: o3d.geometry.PointCloud,
+        outcome: str,
+        cut_applied: bool,
+        reason: str,
+        retained_point_count: int,
+        dominant_point_count: int | None = None,
+        retention_ratio: float | None = None,
+        longitudinal_span_m: float | None = None,
+    ) -> o3d.geometry.PointCloud:
+        """
+        Record internal outcome metadata and deterministic coordinate fingerprint for ret_pcd.
+        """
+        fp = _compute_point_cloud_fingerprint(ret_pcd)
+        self.last_segmentation_result.update({
+            "outcome": outcome,
+            "cut_applied": cut_applied,
+            "reason": reason,
+            "dominant_point_count": dominant_point_count,
+            "retained_point_count": retained_point_count,
+            "retention_ratio": retention_ratio,
+            "longitudinal_span_m": longitudinal_span_m,
+            "fingerprint": fp,
+        })
+        self._last_segmented_pcd_ref = ret_pcd
+        self._last_segmented_fingerprint = fp
+        return ret_pcd
 
     def is_plausible_head(self, pcd: o3d.geometry.PointCloud) -> tuple[bool, str]:
         """
@@ -278,19 +333,20 @@ class HeadTarget(Target):
             "retained_point_count": 0,
             "retention_ratio": None,
             "longitudinal_span_m": None,
+            "fingerprint": None,
         }
         self._last_segmented_pcd_ref = None
+        self._last_segmented_fingerprint = None
 
         if n_finite < 50:
-            self.last_segmentation_result.update({
-                "outcome": "insufficient_input",
-                "cut_applied": False,
-                "reason": f"Input cloud has insufficient finite points ({n_finite} < 50)",
-                "retained_point_count": n_finite,
-                "retention_ratio": round(n_finite / max(n_raw, 1), 4) if n_raw > 0 else None,
-            })
-            self._last_segmented_pcd_ref = pcd
-            return pcd
+            return self._finalize_segmentation_result(
+                ret_pcd=pcd,
+                outcome="insufficient_input",
+                cut_applied=False,
+                reason=f"Input cloud has insufficient finite points ({n_finite} < 50)",
+                retained_point_count=n_finite,
+                retention_ratio=round(n_finite / max(n_raw, 1), 4) if n_raw > 0 else None,
+            )
 
         cleaned_pcd = o3d.geometry.PointCloud()
         cleaned_pcd.points = o3d.utility.Vector3dVector(pts)
@@ -314,16 +370,15 @@ class HeadTarget(Target):
         pts_dom = np.asarray(dominant.points)
         n_dom = len(pts_dom)
         if n_dom < 200:
-            self.last_segmentation_result.update({
-                "outcome": "insufficient_input",
-                "cut_applied": False,
-                "reason": f"Dominant cluster has insufficient points ({n_dom} < 200)",
-                "dominant_point_count": n_dom,
-                "retained_point_count": n_dom,
-                "retention_ratio": round(n_dom / max(n_raw, 1), 4) if n_raw > 0 else None,
-            })
-            self._last_segmented_pcd_ref = dominant
-            return dominant
+            return self._finalize_segmentation_result(
+                ret_pcd=dominant,
+                outcome="insufficient_input",
+                cut_applied=False,
+                reason=f"Dominant cluster has insufficient points ({n_dom} < 200)",
+                dominant_point_count=n_dom,
+                retained_point_count=n_dom,
+                retention_ratio=round(n_dom / max(n_raw, 1), 4) if n_raw > 0 else None,
+            )
 
         # Check for neck constriction along vertical long axis
         C = np.mean(pts_dom, axis=0)
@@ -333,16 +388,15 @@ class HeadTarget(Target):
         v_long = evecs[:, np.argmax(evals)]  # principal long axis
         norm_v = float(np.linalg.norm(v_long))
         if norm_v < 1e-8:
-            self.last_segmentation_result.update({
-                "outcome": "segmentation_error",
-                "cut_applied": False,
-                "reason": "Degenerate covariance or zero-norm principal axis",
-                "dominant_point_count": n_dom,
-                "retained_point_count": n_dom,
-                "retention_ratio": round(n_dom / max(n_raw, 1), 4) if n_raw > 0 else None,
-            })
-            self._last_segmented_pcd_ref = dominant
-            return dominant
+            return self._finalize_segmentation_result(
+                ret_pcd=dominant,
+                outcome="segmentation_error",
+                cut_applied=False,
+                reason="Degenerate covariance or zero-norm principal axis",
+                dominant_point_count=n_dom,
+                retained_point_count=n_dom,
+                retention_ratio=round(n_dom / max(n_raw, 1), 4) if n_raw > 0 else None,
+            )
         u = v_long / norm_v
 
         proj = Pc @ u
@@ -351,17 +405,16 @@ class HeadTarget(Target):
 
         # If long span > 30 cm, check if neck/shoulders are attached
         if span_long <= 0.30:
-            self.last_segmentation_result.update({
-                "outcome": "bypassed_short_span",
-                "cut_applied": False,
-                "reason": f"Longitudinal span ({span_long * 1000.0:.1f} mm) does not exceed 300 mm neck-search gate",
-                "dominant_point_count": n_dom,
-                "retained_point_count": n_dom,
-                "retention_ratio": round(n_dom / max(n_raw, 1), 4) if n_raw > 0 else None,
-                "longitudinal_span_m": round(span_long, 4),
-            })
-            self._last_segmented_pcd_ref = dominant
-            return dominant
+            return self._finalize_segmentation_result(
+                ret_pcd=dominant,
+                outcome="bypassed_short_span",
+                cut_applied=False,
+                reason=f"Longitudinal span ({span_long * 1000.0:.1f} mm) does not exceed 300 mm neck-search gate",
+                dominant_point_count=n_dom,
+                retained_point_count=n_dom,
+                retention_ratio=round(n_dom / max(n_raw, 1), 4) if n_raw > 0 else None,
+                longitudinal_span_m=round(span_long, 4),
+            )
 
         n_bins = 25
         bins = np.linspace(p_min, p_max, n_bins)
@@ -423,43 +476,40 @@ class HeadTarget(Target):
                 if n_head_cand >= 150:
                     seg_pts = pts_dom[head_mask]
                     n_seg = len(seg_pts)
-                    self.last_segmentation_result.update({
-                        "outcome": "constriction_cut",
-                        "cut_applied": True,
-                        "reason": f"Neck constriction cut applied at projection {cut_val:.4f} m, retaining {n_seg} points",
-                        "dominant_point_count": n_dom,
-                        "retained_point_count": n_seg,
-                        "retention_ratio": round(n_seg / max(n_raw, 1), 4) if n_raw > 0 else None,
-                        "longitudinal_span_m": round(span_long, 4),
-                    })
                     seg_pcd = o3d.geometry.PointCloud()
                     seg_pcd.points = o3d.utility.Vector3dVector(seg_pts)
-                    self._last_segmented_pcd_ref = seg_pcd
-                    return seg_pcd
+                    return self._finalize_segmentation_result(
+                        ret_pcd=seg_pcd,
+                        outcome="constriction_cut",
+                        cut_applied=True,
+                        reason=f"Neck constriction cut applied at projection {cut_val:.4f} m, retaining {n_seg} points",
+                        dominant_point_count=n_dom,
+                        retained_point_count=n_seg,
+                        retention_ratio=round(n_seg / max(n_raw, 1), 4) if n_raw > 0 else None,
+                        longitudinal_span_m=round(span_long, 4),
+                    )
                 else:
-                    self.last_segmentation_result.update({
-                        "outcome": "insufficient_retained_points",
-                        "cut_applied": False,
-                        "reason": f"Candidate constriction cut retains too few points ({n_head_cand} < 150)",
-                        "dominant_point_count": n_dom,
-                        "retained_point_count": n_dom,
-                        "retention_ratio": round(n_dom / max(n_raw, 1), 4) if n_raw > 0 else None,
-                        "longitudinal_span_m": round(span_long, 4),
-                    })
-                    self._last_segmented_pcd_ref = dominant
-                    return dominant
+                    return self._finalize_segmentation_result(
+                        ret_pcd=dominant,
+                        outcome="insufficient_retained_points",
+                        cut_applied=False,
+                        reason=f"Candidate constriction cut retains too few points ({n_head_cand} < 150)",
+                        dominant_point_count=n_dom,
+                        retained_point_count=n_dom,
+                        retention_ratio=round(n_dom / max(n_raw, 1), 4) if n_raw > 0 else None,
+                        longitudinal_span_m=round(span_long, 4),
+                    )
 
-        self.last_segmentation_result.update({
-            "outcome": "no_constriction_found",
-            "cut_applied": False,
-            "reason": "Search evaluated transverse slices but found no valid neck constriction satisfying criteria",
-            "dominant_point_count": n_dom,
-            "retained_point_count": n_dom,
-            "retention_ratio": round(n_dom / max(n_raw, 1), 4) if n_raw > 0 else None,
-            "longitudinal_span_m": round(span_long, 4),
-        })
-        self._last_segmented_pcd_ref = dominant
-        return dominant
+        return self._finalize_segmentation_result(
+            ret_pcd=dominant,
+            outcome="no_constriction_found",
+            cut_applied=False,
+            reason="Search evaluated transverse slices but found no valid neck constriction satisfying criteria",
+            dominant_point_count=n_dom,
+            retained_point_count=n_dom,
+            retention_ratio=round(n_dom / max(n_raw, 1), 4) if n_raw > 0 else None,
+            longitudinal_span_m=round(span_long, 4),
+        )
 
     def _estimate_anatomical_frame(
         self, pts: np.ndarray
@@ -561,7 +611,55 @@ class HeadTarget(Target):
             "estimated_volume_m3": 0.0,
         }
 
-        is_from_last_segment = (getattr(self, "_last_segmented_pcd_ref", None) is pcd)
+        is_ref_match = (getattr(self, "_last_segmented_pcd_ref", None) is pcd)
+        expected_fp = getattr(self, "_last_segmented_fingerprint", None)
+        current_fp = _compute_point_cloud_fingerprint(pcd)
+
+        if expected_fp is not None:
+            is_fp_match = bool(current_fp is not None and expected_fp == current_fp)
+            is_from_last_segment = bool(is_ref_match and is_fp_match)
+            is_mutated_after_segment = bool(is_ref_match and not is_fp_match)
+        else:
+            # No fingerprint recorded at segmentation time (e.g. empty or non-finite cloud)
+            if is_ref_match and current_fp is None:
+                # Still empty or non-finite: cloud was not mutated; retain original segmentation outcome
+                is_from_last_segment = True
+                is_mutated_after_segment = False
+            elif is_ref_match and current_fp is not None:
+                # Points were added to an originally empty/non-finite cloud
+                is_from_last_segment = False
+                is_mutated_after_segment = True
+            else:
+                is_from_last_segment = False
+                is_mutated_after_segment = False
+
+        if is_from_last_segment:
+            seg_info = dict(self.last_segmentation_result)
+        elif is_mutated_after_segment:
+            seg_info = {
+                "outcome": "mutated_after_segmentation",
+                "cut_applied": False,
+                "fingerprint_mismatch": True,
+                "reason": (
+                    "Point cloud coordinates, shape, or point count modified after segment(); "
+                    "prior segmentation outcome invalidated"
+                ),
+            }
+        else:
+            seg_info = {
+                "outcome": "untracked_direct_call",
+                "cut_applied": False,
+            }
+
+        mutation_diag = (
+            [
+                "Head segmentation unconfirmed (mutated_after_segmentation): "
+                "point cloud coordinates, shape, or point count modified after segment() call; "
+                "prior segmentation outcome invalidated"
+            ]
+            if is_mutated_after_segment
+            else []
+        )
 
         if n_pts < 50:
             return {
@@ -580,10 +678,8 @@ class HeadTarget(Target):
                 },
                 "volume_m3": None,
                 "estimated_volume_m3": 0.0,
-                "segmentation": dict(self.last_segmentation_result) if is_from_last_segment else {
-                    "outcome": "untracked_direct_call",
-                    "cut_applied": False,
-                },
+                "diagnostics": list(mutation_diag) if mutation_diag else [f"Insufficient points in segmented head cloud ({n_pts} < 50)"],
+                "segmentation": dict(seg_info),
             }
 
         is_plaus, plaus_reason = self.is_plausible_head(pcd)
@@ -604,10 +700,8 @@ class HeadTarget(Target):
                 },
                 "volume_m3": None,
                 "estimated_volume_m3": 0.0,
-                "segmentation": dict(self.last_segmentation_result) if is_from_last_segment else {
-                    "outcome": "untracked_direct_call",
-                    "cut_applied": False,
-                },
+                "diagnostics": list(mutation_diag) if mutation_diag else [plaus_reason],
+                "segmentation": dict(seg_info),
             }
 
         # ------------------------------------------------------------------
@@ -711,10 +805,17 @@ class HeadTarget(Target):
         is_seg_confirmed = True
         seg_diag: list[str] = []
 
-        is_from_last_segment = (getattr(self, "_last_segmented_pcd_ref", None) is pcd)
-        seg_outcome = self.last_segmentation_result.get("outcome", "none") if is_from_last_segment else "none"
-
-        if is_from_last_segment:
+        if is_mutated_after_segment:
+            # Cloud object reference matches last segment() return, but point coordinates/shape have changed.
+            # Invalidate prior segmentation outcome, fail closed with unverified status and null volume.
+            is_seg_confirmed = False
+            seg_diag.append(
+                "Head segmentation unconfirmed (mutated_after_segmentation): "
+                "point cloud coordinates, shape, or point count modified after segment() call; "
+                "prior segmentation outcome invalidated"
+            )
+        elif is_from_last_segment:
+            seg_outcome = self.last_segmentation_result.get("outcome", "none")
             if seg_outcome == "constriction_cut":
                 # Confirmed valid neck cut: proceed through standard validation gates
                 is_seg_confirmed = True
@@ -751,11 +852,17 @@ class HeadTarget(Target):
 
         try:
             obb = pcd.get_minimal_oriented_bounding_box(robust=True)
-        except AttributeError:
-            obb = pcd.get_oriented_bounding_box(robust=True)
+        except Exception:
+            try:
+                obb = pcd.get_oriented_bounding_box(robust=True)
+            except Exception:
+                obb = None
 
-        aabb = pcd.get_axis_aligned_bounding_box()
-        aabb_extent = [round(float(v), 4) for v in np.asarray(aabb.get_extent())]
+        try:
+            aabb = pcd.get_axis_aligned_bounding_box()
+            aabb_extent = [round(float(v), 4) for v in np.asarray(aabb.get_extent())]
+        except Exception:
+            aabb_extent = [0.0, 0.0, 0.0]
 
         return {
             "target": self.name,
@@ -785,10 +892,7 @@ class HeadTarget(Target):
             "boundary_checks": boundary_checks,
             "symmetry_residual_mm": round(sym_err_mm, 2),
             "diagnostics": diagnostics if not is_validated else [],
-            "segmentation": dict(self.last_segmentation_result) if is_from_last_segment else {
-                "outcome": "untracked_direct_call",
-                "cut_applied": False,
-            },
+            "segmentation": dict(seg_info),
             "axis_aligned_bbox_extent_m": aabb_extent,
             "geometry_for_viz": obb,
         }
