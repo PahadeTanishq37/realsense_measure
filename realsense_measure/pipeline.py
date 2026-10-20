@@ -350,6 +350,236 @@ class ScanPipeline:
     # Stage 1: capture
     # ------------------------------------------------------------------
 
+    def _log_capture_guidance(self, is_human_mode: bool, capture_interval: float) -> None:
+        """Display stage 1 operator guidance in terminal."""
+        logger.info("\n" + "=" * 60)
+        logger.info("  Stage 1: Capture")
+        if is_human_mode:
+            logger.info("  MODE: HUMAN 180° SCAN (RGB-D Odometry + Colored ICP)")
+            logger.info("  OPERATOR GUIDANCE:")
+            logger.info("    * Keep the subject still (subject rigidity is assumed).")
+            logger.info("    * Move camera slowly in a smooth ~180° arc around the front.")
+            logger.info("    * Maintain substantial overlap between consecutive views.")
+            logger.info("    * Keep the subject's face/head approximately centered.")
+            logger.info("    * Avoid sudden camera rotations or translations.")
+            logger.info("    * Complete the 180° sweep smoothly.")
+            logger.info(f"  AUTO-CAPTURE interval: {capture_interval:.2f}s")
+            logger.info("  ENTER = finish (requires 2+ frames) | ESC = abort")
+        else:
+            logger.info("  MODE: BOX / OBJECT SCAN (Point Cloud)")
+            if self.cfg.camera.auto_capture:
+                logger.info(f"  AUTO-CAPTURE: move camera around object (interval: "
+                      f"{capture_interval:.2f}s)")
+                logger.info("  TIP: for small or irregular objects, --manual-capture "
+                      "(press SPACE per angle) gives much more consistent results "
+                      "than auto-capture.")
+                logger.info("  ENTER = finish (requires 2+ frames) | ESC = abort")
+            else:
+                logger.info("  MANUAL CAPTURE: SPACE = capture frame | ENTER = finish | ESC = abort")
+        logger.info("=" * 60)
+
+    def _init_manual_roi(
+        self,
+        cam: RealSenseCamera,
+        is_human_mode: bool,
+    ) -> tuple[int, int, int, int] | None:
+        """Acquire initial frame for interactive ROI selection if configured."""
+        if not (self.cfg.target.use_manual_roi and not is_human_mode):
+            return None
+        logger.info("\n  [MANUAL ROI MODE] Acquiring initial frame for ROI selection...")
+        init_color, init_depth = None, None
+        for _ in range(40):
+            init_color, init_depth, _ = cam.read_with_colorized()
+            if init_color is not None and init_depth is not None:
+                break
+            time.sleep(0.05)
+        if init_color is not None:
+            logger.info("  --> Drag a rectangle around the target object in the window, then press SPACE or ENTER.")
+            manual_roi = select_roi_on_frame(init_color)
+            if manual_roi is not None:
+                rx, ry, rw, rh = manual_roi
+                logger.info(f"  --> Manual ROI locked: x={rx}, y={ry}, w={rw}, h={rh} px\n")
+                return manual_roi
+            else:
+                logger.warning("  [!] Manual ROI selection cancelled -- falling back to full-frame.\n")
+        return None
+
+    def _render_capture_preview(
+        self,
+        color_bgr: np.ndarray,
+        depth_m: np.ndarray,
+        depth_color: np.ndarray,
+        cam: RealSenseCamera,
+        head_tracker: HeadCaptureTracker | None,
+        manual_roi: tuple[int, int, int, int] | None,
+        is_human_mode: bool,
+        motion_warn_text: str | None,
+        motion_warn_until: float,
+        n_frames: int,
+        last_n_pts: int,
+    ) -> np.ndarray:
+        """Compose dual-panel color + depth HUD preview image for live display."""
+        if depth_color.shape[:2] != color_bgr.shape[:2]:
+            h, w = color_bgr.shape[:2]
+            depth_color = cv2.resize(depth_color, (w, h), interpolation=cv2.INTER_NEAREST)
+
+        depth_panel = depth_color.copy()
+        hud_title = "HUMAN 180° SCAN" if is_human_mode else "D455f STATUS"
+
+        head_warn_text: str | None = None
+        head_warn_color: str | None = None
+        lock_status_str: str | None = None
+        live_landmarks_px: dict[str, np.ndarray] | None = None
+
+        if head_tracker is not None:
+            intr = getattr(cam, "intrinsics_o3d", None)
+            if intr is None:
+                h_f, w_f = color_bgr.shape[:2]
+                intr = o3d.camera.PinholeCameraIntrinsic(w_f, h_f, w_f * 0.8, w_f * 0.8, w_f / 2.0, h_f / 2.0)
+            try:
+                lm_3d = detect_face_landmarks_3d(color_bgr, depth_m, intr, quiet=True)
+                if lm_3d:
+                    live_landmarks_px = project_landmarks_3d_to_pixel(lm_3d, intr)
+            except Exception:
+                pass
+
+            head_warn_text, head_warn_color, avg_disp, lock_gap = head_tracker.update(live_landmarks_px)
+            n_lm = len(live_landmarks_px) if live_landmarks_px else 0
+            if n_lm >= head_tracker.cfg.min_landmarks_for_lock:
+                lock_status_str = f"LOCKED ({n_lm} pts)"
+            elif lock_gap < head_tracker.cfg.max_frames_without_lock:
+                lock_status_str = f"LOW LOCK ({n_lm} pts, gap={lock_gap})"
+            else:
+                lock_status_str = f"NO LOCK (gap={lock_gap})"
+
+        if is_human_mode and head_warn_text:
+            active_warn = head_warn_text
+            active_warn_color = head_warn_color
+        elif time.time() < motion_warn_until:
+            active_warn = motion_warn_text
+            active_warn_color = "red"
+        else:
+            active_warn = None
+            active_warn_color = None
+
+        _draw_hud(
+            depth_panel,
+            depth_m,
+            n_frames=n_frames,
+            n_pts=last_n_pts,
+            vis_min_m=self.cfg.camera.depth_vis.visual_min_m,
+            vis_max_m=self.cfg.camera.depth_vis.visual_max_m,
+            auto_capture=self.cfg.camera.auto_capture,
+            mode_title=hud_title,
+            is_human=is_human_mode,
+            warning_banner=active_warn,
+            warning_color=active_warn_color,
+            lock_status=lock_status_str,
+        )
+
+        display_color = color_bgr.copy()
+        if is_human_mode:
+            h_c, w_c = display_color.shape[:2]
+            cx_c, cy_c = w_c // 2, h_c // 2
+            cv2.ellipse(display_color, (cx_c, cy_c), (int(w_c * 0.20), int(h_c * 0.35)), 0, 0, 360, (0, 220, 220), 1, cv2.LINE_AA)
+            cv2.drawMarker(display_color, (cx_c, cy_c), (0, 220, 220), cv2.MARKER_CROSS, 16, 1, cv2.LINE_AA)
+            cv2.putText(display_color, "HEAD GUIDE", (cx_c - 45, cy_c - int(h_c * 0.37)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.40, (0, 220, 220), 1, cv2.LINE_AA)
+            if live_landmarks_px:
+                for pt in live_landmarks_px.values():
+                    cv2.circle(display_color, (int(pt[0]), int(pt[1])), 2, (0, 255, 255), -1, cv2.LINE_AA)
+
+        if manual_roi is not None:
+            rx, ry, rw, rh = manual_roi
+            cv2.rectangle(display_color, (rx, ry), (rx + rw, ry + rh), (0, 255, 0), 2)
+            cv2.putText(display_color, "ROI", (rx + 4, max(ry - 6, 16)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1, cv2.LINE_AA)
+
+        return np.hstack([display_color, depth_panel])
+
+    def _try_capture_human_frame(
+        self,
+        cam: RealSenseCamera,
+        color_bgr: np.ndarray,
+        depth_m: np.ndarray,
+        raw_frames: list[o3d.geometry.PointCloud | RGBDFrame],
+        now: float,
+    ) -> tuple[RGBDFrame | None, int, str | None, float]:
+        """Construct and validate a human RGBDFrame from current sensor observations."""
+        rgbd_frame = cam.create_rgbd_frame(
+            color_bgr=color_bgr,
+            depth_m=depth_m,
+            frame_id=len(raw_frames),
+            timestamp=now,
+        )
+        n_pts = len(rgbd_frame.pcd.points)
+        if n_pts < self.cfg.target.min_object_points:
+            logger.debug(f"  Frame discarded: only {n_pts} pts in range -- check distance to subject (0.4m - 1.2m)")
+            return None, 0, None, 0.0
+
+        warn_text = None
+        warn_until = 0.0
+        if raw_frames:
+            prev_frame = raw_frames[-1]
+            prev_pcd = prev_frame.pcd if isinstance(prev_frame, RGBDFrame) else prev_frame
+            est_t_m, est_r_deg = _rough_motion_estimate(rgbd_frame.pcd, prev_pcd)
+            max_jump_t = getattr(self.cfg.registration, "max_pose_jump_translation_m", 0.15)
+            max_jump_r = getattr(self.cfg.registration, "max_pose_jump_rotation_deg", 45.0)
+            if est_t_m > max_jump_t or est_r_deg > max_jump_r:
+                logger.info(
+                    f"  [!] WARNING: large motion since last frame "
+                    f"({est_t_m * 100:.0f}cm, {est_r_deg:.0f}deg) "
+                    f"-- consider moving slower through this section, or reduce "
+                    f"--interval for denser capture"
+                )
+                warn_text = f"LARGE MOTION ({est_t_m * 100:.0f}cm, {est_r_deg:.0f}deg) -- MOVE SLOWER"
+                warn_until = now + 3.0
+
+        return rgbd_frame, n_pts, warn_text, warn_until
+
+    def _try_capture_object_frame(
+        self,
+        cam: RealSenseCamera,
+        color_bgr: np.ndarray,
+        depth_m: np.ndarray,
+        manual_roi: tuple[int, int, int, int] | None,
+        raw_frames: list[o3d.geometry.PointCloud | RGBDFrame],
+        captured_centroids: list[np.ndarray],
+        last_centroid: np.ndarray | None,
+        is_manual: bool = False,
+    ) -> tuple[o3d.geometry.PointCloud | None, np.ndarray | None, int]:
+        """Construct and isolate a pointcloud from object observation."""
+        pcd = cam.to_point_cloud(color_bgr, depth_m, roi=manual_roi)
+        iso_test = isolate_object(pcd, self.cfg.preprocess, self.cfg.target, last_centroid=last_centroid)
+        n_obj_pts = len(iso_test.points)
+        if n_obj_pts < self.cfg.target.min_object_points:
+            hint = "try adjusting angle" if is_manual else "keep moving"
+            logger.debug(f"  Frame discarded: isolated to only {n_obj_pts} pts "
+                  f"(need >= {self.cfg.target.min_object_points}) -- "
+                  f"this angle didn't capture usable object data, {hint}")
+            return None, last_centroid, 0
+
+        centroid = np.asarray(iso_test.points).mean(axis=0)
+        dev = 0.0
+        is_outlier = False
+        if captured_centroids:
+            median_c = np.median(np.array(captured_centroids), axis=0)
+            dev = float(np.linalg.norm(centroid - median_c))
+            if dev > self.cfg.target.max_centroid_dev_m:
+                is_outlier = True
+
+        raw_n_pts = len(pcd.points)
+        frame_num = len(raw_frames) + 1
+        if is_outlier:
+            logger.debug(f"  Captured frame {frame_num:2d}: {n_obj_pts:>5} object "
+                  f"pts, but {dev*100:.0f} cm from your other frames -- "
+                  f"[WARNING] this may not be the same object, keep it centered")
+        else:
+            logger.debug(f"  Captured frame {frame_num:2d}: "
+                  f"{raw_n_pts:>7} raw pts -> {n_obj_pts:>5} object pts [OK]")
+
+        return pcd, centroid, raw_n_pts
+
     def capture_frames(self) -> list[o3d.geometry.PointCloud | RGBDFrame]:
         """
         Live camera capture loop.
@@ -377,31 +607,7 @@ class ScanPipeline:
         captured_centroids: list[np.ndarray] = []
         last_centroid: np.ndarray | None = None
 
-        logger.info("\n" + "=" * 60)
-        logger.info("  Stage 1: Capture")
-        if is_human_mode:
-            logger.info("  MODE: HUMAN 180° SCAN (RGB-D Odometry + Colored ICP)")
-            logger.info("  OPERATOR GUIDANCE:")
-            logger.info("    * Keep the subject still (subject rigidity is assumed).")
-            logger.info("    * Move camera slowly in a smooth ~180° arc around the front.")
-            logger.info("    * Maintain substantial overlap between consecutive views.")
-            logger.info("    * Keep the subject's face/head approximately centered.")
-            logger.info("    * Avoid sudden camera rotations or translations.")
-            logger.info("    * Complete the 180° sweep smoothly.")
-            logger.info(f"  AUTO-CAPTURE interval: {capture_interval:.2f}s")
-            logger.info("  ENTER = finish (requires 2+ frames) | ESC = abort")
-        else:
-            logger.info("  MODE: BOX / OBJECT SCAN (Point Cloud)")
-            if self.cfg.camera.auto_capture:
-                logger.info(f"  AUTO-CAPTURE: move camera around object (interval: "
-                      f"{capture_interval:.2f}s)")
-                logger.info("  TIP: for small or irregular objects, --manual-capture "
-                      "(press SPACE per angle) gives much more consistent results "
-                      "than auto-capture.")
-                logger.info("  ENTER = finish (requires 2+ frames) | ESC = abort")
-            else:
-                logger.info("  MANUAL CAPTURE: SPACE = capture frame | ENTER = finish | ESC = abort")
-        logger.info("=" * 60)
+        self._log_capture_guidance(is_human_mode, capture_interval)
 
         start_capture_time = time.time()
         last_capture_time = 0.0  # triggers capture on the first valid frame
@@ -414,23 +620,7 @@ class ScanPipeline:
         use_landmarks_capture = getattr(self.cfg.registration, "use_landmarks", True) and getattr(head_tracker_cfg, "enabled", True)
         head_tracker = HeadCaptureTracker(head_tracker_cfg) if (is_human_mode and use_landmarks_capture) else None
 
-        manual_roi: tuple[int, int, int, int] | None = None
-        if self.cfg.target.use_manual_roi and not is_human_mode:
-            logger.info("\n  [MANUAL ROI MODE] Acquiring initial frame for ROI selection...")
-            init_color, init_depth = None, None
-            for _ in range(40):
-                init_color, init_depth, _ = cam.read_with_colorized()
-                if init_color is not None and init_depth is not None:
-                    break
-                time.sleep(0.05)
-            if init_color is not None:
-                logger.info("  --> Drag a rectangle around the target object in the window, then press SPACE or ENTER.")
-                manual_roi = select_roi_on_frame(init_color)
-                if manual_roi is not None:
-                    rx, ry, rw, rh = manual_roi
-                    logger.info(f"  --> Manual ROI locked: x={rx}, y={ry}, w={rw}, h={rh} px\n")
-                else:
-                    logger.warning("  [!] Manual ROI selection cancelled -- falling back to full-frame.\n")
+        manual_roi = self._init_manual_roi(cam, is_human_mode)
 
         window_name = "Stage 1: Human 180 deg Capture" if is_human_mode else "Stage 1: D455f Capture (RGB | Depth)"
         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
@@ -448,91 +638,12 @@ class ScanPipeline:
                     time.sleep(0.005)
                     continue  # dropped frame — just retry
 
-                # depth_color is the SDK-colorized BGR image (VISUALIZATION ONLY).
-                # depth_m is the raw float32 metres array (used for point cloud).
-
-                # Ensure both panels are the same size before hstack.
-                if depth_color.shape[:2] != color_bgr.shape[:2]:
-                    h, w = color_bgr.shape[:2]
-                    depth_color = cv2.resize(depth_color, (w, h),
-                                             interpolation=cv2.INTER_NEAREST)
-
-                # Draw the rich HUD onto the depth panel
-                depth_panel = depth_color.copy()
-                hud_title = "HUMAN 180° SCAN" if is_human_mode else "D455f STATUS"
-
-                # Real-time feedback for human mode
-                head_warn_text: str | None = None
-                head_warn_color: str | None = None
-                lock_status_str: str | None = None
-                live_landmarks_px: dict[str, np.ndarray] | None = None
-
-                if head_tracker is not None:
-                    intr = getattr(cam, "intrinsics_o3d", None)
-                    if intr is None:
-                        h_f, w_f = color_bgr.shape[:2]
-                        intr = o3d.camera.PinholeCameraIntrinsic(w_f, h_f, w_f * 0.8, w_f * 0.8, w_f / 2.0, h_f / 2.0)
-                    try:
-                        lm_3d = detect_face_landmarks_3d(color_bgr, depth_m, intr, quiet=True)
-                        if lm_3d:
-                            live_landmarks_px = project_landmarks_3d_to_pixel(lm_3d, intr)
-                    except Exception:
-                        pass
-
-                    head_warn_text, head_warn_color, avg_disp, lock_gap = head_tracker.update(live_landmarks_px)
-                    n_lm = len(live_landmarks_px) if live_landmarks_px else 0
-                    if n_lm >= head_tracker.cfg.min_landmarks_for_lock:
-                        lock_status_str = f"LOCKED ({n_lm} pts)"
-                    elif lock_gap < head_tracker.cfg.max_frames_without_lock:
-                        lock_status_str = f"LOW LOCK ({n_lm} pts, gap={lock_gap})"
-                    else:
-                        lock_status_str = f"NO LOCK (gap={lock_gap})"
-
-                if is_human_mode and head_warn_text:
-                    active_warn = head_warn_text
-                    active_warn_color = head_warn_color
-                elif time.time() < motion_warn_until:
-                    active_warn = motion_warn_text
-                    active_warn_color = "red"
-                else:
-                    active_warn = None
-                    active_warn_color = None
-
-                _draw_hud(
-                    depth_panel,
-                    depth_m,
-                    n_frames=len(raw_frames),
-                    n_pts=last_n_pts,
-                    vis_min_m=self.cfg.camera.depth_vis.visual_min_m,
-                    vis_max_m=self.cfg.camera.depth_vis.visual_max_m,
-                    auto_capture=self.cfg.camera.auto_capture,
-                    mode_title=hud_title,
-                    is_human=is_human_mode,
-                    warning_banner=active_warn,
-                    warning_color=active_warn_color,
-                    lock_status=lock_status_str,
+                preview = self._render_capture_preview(
+                    color_bgr, depth_m, depth_color, cam, head_tracker, manual_roi,
+                    is_human_mode, motion_warn_text, motion_warn_until,
+                    len(raw_frames), last_n_pts,
                 )
 
-                display_color = color_bgr.copy()
-                if is_human_mode:
-                    h_c, w_c = display_color.shape[:2]
-                    cx_c, cy_c = w_c // 2, h_c // 2
-                    # Subtle center head framing guide
-                    cv2.ellipse(display_color, (cx_c, cy_c), (int(w_c * 0.20), int(h_c * 0.35)), 0, 0, 360, (0, 220, 220), 1, cv2.LINE_AA)
-                    cv2.drawMarker(display_color, (cx_c, cy_c), (0, 220, 220), cv2.MARKER_CROSS, 16, 1, cv2.LINE_AA)
-                    cv2.putText(display_color, "HEAD GUIDE", (cx_c - 45, cy_c - int(h_c * 0.37)),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.40, (0, 220, 220), 1, cv2.LINE_AA)
-                    if live_landmarks_px:
-                        for pt in live_landmarks_px.values():
-                            cv2.circle(display_color, (int(pt[0]), int(pt[1])), 2, (0, 255, 255), -1, cv2.LINE_AA)
-
-                if manual_roi is not None:
-                    rx, ry, rw, rh = manual_roi
-                    cv2.rectangle(display_color, (rx, ry), (rx + rw, ry + rh), (0, 255, 0), 2)
-                    cv2.putText(display_color, "ROI", (rx + 4, max(ry - 6, 16)),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1, cv2.LINE_AA)
-
-                preview = np.hstack([display_color, depth_panel])
                 if not window_initialized:
                     disp_w = min(1280, preview.shape[1])
                     disp_h = int(preview.shape[0] * (disp_w / preview.shape[1]))
@@ -541,7 +652,6 @@ class ScanPipeline:
 
                 cv2.imshow(window_name, preview)
                 key = cv2.waitKey(1) & 0xFF
-
                 now = time.time()
 
                 # ---- Auto-capture logic --------------------------------
@@ -560,134 +670,56 @@ class ScanPipeline:
                                 last_skip_warn_time = now
                         else:
                             if is_human_mode:
-                                rgbd_frame = cam.create_rgbd_frame(
-                                    color_bgr=color_bgr,
-                                    depth_m=depth_m,
-                                    frame_id=len(raw_frames),
-                                    timestamp=now,
+                                frame, n_pts, m_warn, m_until = self._try_capture_human_frame(
+                                    cam, color_bgr, depth_m, raw_frames, now
                                 )
-                                n_pts = len(rgbd_frame.pcd.points)
-                                if n_pts < self.cfg.target.min_object_points:
-                                    logger.debug(f"  Frame discarded: only {n_pts} pts in range -- check distance to subject (0.4m - 1.2m)")
-                                else:
-                                    if raw_frames:
-                                        prev_frame = raw_frames[-1]
-                                        prev_pcd = prev_frame.pcd if isinstance(prev_frame, RGBDFrame) else prev_frame
-                                        est_t_m, est_r_deg = _rough_motion_estimate(rgbd_frame.pcd, prev_pcd)
-                                        max_jump_t = getattr(self.cfg.registration, "max_pose_jump_translation_m", 0.15)
-                                        max_jump_r = getattr(self.cfg.registration, "max_pose_jump_rotation_deg", 45.0)
-                                        if est_t_m > max_jump_t or est_r_deg > max_jump_r:
-                                            logger.info(
-                                                f"  [!] WARNING: large motion since last frame "
-                                                f"({est_t_m * 100:.0f}cm, {est_r_deg:.0f}deg) "
-                                                f"-- consider moving slower through this section, or reduce "
-                                                f"--interval for denser capture"
-                                            )
-                                            motion_warn_text = f"LARGE MOTION ({est_t_m * 100:.0f}cm, {est_r_deg:.0f}deg) -- MOVE SLOWER"
-                                            motion_warn_until = now + 3.0
-
-                                    raw_frames.append(rgbd_frame)
+                                if frame is not None:
+                                    raw_frames.append(frame)
                                     last_n_pts = n_pts
                                     last_capture_time = now
                                     last_captured_depth = depth_m.copy()
+                                    if m_warn is not None:
+                                        motion_warn_text = m_warn
+                                        motion_warn_until = m_until
                                     logger.debug(f"  Captured human frame {len(raw_frames):2d}: {n_pts:>6} pts with RGB-D [OK]")
                             else:
-                                pcd = cam.to_point_cloud(color_bgr, depth_m, roi=manual_roi)
-                                iso_test = isolate_object(pcd, self.cfg.preprocess, self.cfg.target, last_centroid=last_centroid)
-                                n_obj_pts = len(iso_test.points)
-                                if n_obj_pts < self.cfg.target.min_object_points:
-                                    logger.debug(f"  Frame discarded: isolated to only {n_obj_pts} pts "
-                                          f"(need >= {self.cfg.target.min_object_points}) -- "
-                                          f"this angle didn't capture usable object data, keep moving")
-                                else:
-                                    centroid = np.asarray(iso_test.points).mean(axis=0)
-                                    dev = 0.0
-                                    is_outlier = False
-                                    if captured_centroids:
-                                        median_c = np.median(np.array(captured_centroids), axis=0)
-                                        dev = float(np.linalg.norm(centroid - median_c))
-                                        if dev > self.cfg.target.max_centroid_dev_m:
-                                            is_outlier = True
-
+                                pcd, centroid, raw_pts = self._try_capture_object_frame(
+                                    cam, color_bgr, depth_m, manual_roi, raw_frames,
+                                    captured_centroids, last_centroid, is_manual=False
+                                )
+                                if pcd is not None:
                                     raw_frames.append(pcd)
                                     captured_centroids.append(centroid)
                                     last_centroid = centroid
-                                    last_n_pts = len(pcd.points)
+                                    last_n_pts = raw_pts
                                     last_capture_time = now
                                     last_captured_depth = depth_m.copy()
-
-                                    if is_outlier:
-                                        logger.debug(f"  Captured frame {len(raw_frames):2d}: {n_obj_pts:>5} object "
-                                              f"pts, but {dev*100:.0f} cm from your other frames -- "
-                                              f"[WARNING] this may not be the same object, keep it centered")
-                                    else:
-                                        logger.debug(f"  Captured frame {len(raw_frames):2d}: "
-                                              f"{last_n_pts:>7} raw pts -> {n_obj_pts:>5} object pts [OK]")
 
                 # ---- Manual capture handling ---------------------------
                 elif key == 32:  # SPACE — manual capture
                     if is_human_mode:
-                        rgbd_frame = cam.create_rgbd_frame(
-                            color_bgr=color_bgr,
-                            depth_m=depth_m,
-                            frame_id=len(raw_frames),
-                            timestamp=time.time(),
+                        frame, n_pts, m_warn, m_until = self._try_capture_human_frame(
+                            cam, color_bgr, depth_m, raw_frames, time.time()
                         )
-                        n_pts = len(rgbd_frame.pcd.points)
-                        if n_pts < self.cfg.target.min_object_points:
-                            logger.debug(f"  Frame discarded: only {n_pts} pts in range -- check distance to subject")
-                        else:
-                            if raw_frames:
-                                prev_frame = raw_frames[-1]
-                                prev_pcd = prev_frame.pcd if isinstance(prev_frame, RGBDFrame) else prev_frame
-                                est_t_m, est_r_deg = _rough_motion_estimate(rgbd_frame.pcd, prev_pcd)
-                                max_jump_t = getattr(self.cfg.registration, "max_pose_jump_translation_m", 0.15)
-                                max_jump_r = getattr(self.cfg.registration, "max_pose_jump_rotation_deg", 45.0)
-                                if est_t_m > max_jump_t or est_r_deg > max_jump_r:
-                                    logger.info(
-                                        f"  [!] WARNING: large motion since last frame "
-                                        f"({est_t_m * 100:.0f}cm, {est_r_deg:.0f}deg) "
-                                        f"-- consider moving slower through this section, or reduce "
-                                        f"--interval for denser capture"
-                                    )
-                                    motion_warn_text = f"LARGE MOTION ({est_t_m * 100:.0f}cm, {est_r_deg:.0f}deg) -- MOVE SLOWER"
-                                    motion_warn_until = time.time() + 3.0
-
-                            raw_frames.append(rgbd_frame)
+                        if frame is not None:
+                            raw_frames.append(frame)
                             last_n_pts = n_pts
                             last_captured_depth = depth_m.copy()
+                            if m_warn is not None:
+                                motion_warn_text = m_warn
+                                motion_warn_until = m_until
                             logger.debug(f"  Captured human frame {len(raw_frames):2d}: {n_pts:>6} pts with RGB-D [OK]")
                     else:
-                        pcd = cam.to_point_cloud(color_bgr, depth_m, roi=manual_roi)
-                        iso_test = isolate_object(pcd, self.cfg.preprocess, self.cfg.target, last_centroid=last_centroid)
-                        n_obj_pts = len(iso_test.points)
-                        if n_obj_pts < self.cfg.target.min_object_points:
-                            logger.debug(f"  Frame discarded: isolated to only {n_obj_pts} pts "
-                                  f"(need >= {self.cfg.target.min_object_points}) -- "
-                                  f"this angle didn't capture usable object data, try adjusting angle")
-                        else:
-                            centroid = np.asarray(iso_test.points).mean(axis=0)
-                            dev = 0.0
-                            is_outlier = False
-                            if captured_centroids:
-                                median_c = np.median(np.array(captured_centroids), axis=0)
-                                dev = float(np.linalg.norm(centroid - median_c))
-                                if dev > self.cfg.target.max_centroid_dev_m:
-                                    is_outlier = True
-
+                        pcd, centroid, raw_pts = self._try_capture_object_frame(
+                            cam, color_bgr, depth_m, manual_roi, raw_frames,
+                            captured_centroids, last_centroid, is_manual=True
+                        )
+                        if pcd is not None:
                             raw_frames.append(pcd)
                             captured_centroids.append(centroid)
                             last_centroid = centroid
-                            last_n_pts = len(pcd.points)
+                            last_n_pts = raw_pts
                             last_captured_depth = depth_m.copy()
-
-                            if is_outlier:
-                                logger.debug(f"  Captured frame {len(raw_frames):2d}: {n_obj_pts:>5} object "
-                                      f"pts, but {dev*100:.0f} cm from your other frames -- "
-                                      f"[WARNING] this may not be the same object, keep it centered")
-                            else:
-                                logger.debug(f"  Captured frame {len(raw_frames):2d}: "
-                                      f"{last_n_pts:>7} raw pts -> {n_obj_pts:>5} object pts [OK]")
 
                 # ---- Finish / Abort keys -------------------------------
                 if key == 13:  # ENTER — finish
@@ -844,130 +876,166 @@ class ScanPipeline:
     # Stage 3: register
     # ------------------------------------------------------------------
 
-    def register(
+    def _log_human_registration_summary(
+        self,
+        diagnostics: list[tuple[float, float, bool]],
+        summary_stats: dict,
+        isolated_frames: list,
+    ) -> None:
+        """Log human registration method diagnostics and tier summary."""
+        frame_methods = summary_stats.get("frame_methods", {})
+        frame_scores = summary_stats.get("frame_scores", {})
+        rejection_reasons = summary_stats.get("rejection_reasons", {})
+        fusion_eligible = summary_stats.get("fusion_eligible", {})
+        fusion_reasons = summary_stats.get("fusion_reasons", {})
+        logger.info("\n" + "=" * 60)
+        logger.info("HUMAN RGB-D REGISTRATION SUMMARY (Method Diagnostics)")
+        logger.info("-----------------------------------------------------")
+        for i, diag in enumerate(diagnostics):
+            if i == 0:
+                logger.debug("    frame 00: reference frame (origin) [ACCEPTED]")
+            elif diag is not None:
+                fit, rmse, acc = diag
+                method = frame_methods.get(i, "none")
+                score_str = frame_scores.get(i, f"fitness={fit:.2f} rmse={rmse * 1000.0:.1f}mm")
+                if acc:
+                    if not fusion_eligible.get(i, True):
+                        reason_ex = fusion_reasons.get(i, "")
+                        logger.debug(f"    frame {i:02d}: pose accepted, EXCLUDED from fusion ({reason_ex})")
+                    else:
+                        logger.debug(f"    frame {i:02d}: tier={method} {score_str} ACCEPTED")
+                elif i in rejection_reasons:
+                    logger.info(
+                        f"    frame {i:02d}: tier={method} {score_str}\n"
+                        f"              REJECTED -- {rejection_reasons[i]}"
+                    )
+                else:
+                    logger.debug(f"    frame {i:02d}: tier=none REJECTED")
+        logger.info("=" * 60)
+
+        n_accepted = summary_stats.get("accepted", sum(1 for d in diagnostics if d is not None and d[2]))
+        n_total = summary_stats.get("captured", len(isolated_frames))
+        n_rejected = n_total - n_accepted
+        tier_summary = summary_stats.get(
+            "tier_summary_str",
+            f"{sum(1 for m in frame_methods.values() if m == 'landmark')} landmark, "
+            f"{sum(1 for m in frame_methods.values() if m in ('colored_icp', 'rgbd_odometry_colored_icp'))} colored_icp, "
+            f"{sum(1 for m in frame_methods.values() if m == 'fpfh_fallback')} fpfh_fallback, "
+            f"{n_rejected} rejected"
+        )
+        logger.info(f"\n  Registration tier summary: {tier_summary}")
+        logger.info(f"  Registration summary: {n_accepted} of {n_total} frames accepted into the reconstruction"
+              f" ({n_rejected} rejected -- excluded from fusion).")
+        if n_total > 0 and (n_accepted / n_total) < 0.60:
+            logger.warning("  Tip: low acceptance ratio (< 60%). Try moving the camera more slowly for higher frame overlap.")
+
+    def _visualize_registration_diagnostics(
+        self,
+        isolated_frames: list[o3d.geometry.PointCloud | RGBDFrame],
+        aligned: list[o3d.geometry.PointCloud],
+        diagnostics: list[tuple[float, float, bool]],
+        poses: list[np.ndarray],
+    ) -> None:
+        """Display optional inspection windows for registration pairs and camera trajectory."""
+        if self.cfg.registration.show_registration_pairs and self.cfg.show_stage_windows:
+            logger.info("\n  Displaying pairwise registration inspection windows...")
+            for idx in range(min(2, len(isolated_frames) - 1)):
+                if isinstance(isolated_frames[idx], RGBDFrame) and isinstance(isolated_frames[idx + 1], RGBDFrame):
+                    T_src_to_tgt = np.linalg.inv(poses[idx + 1]) @ poses[idx]
+                    visualize_registration_pair(
+                        isolated_frames[idx].pcd,
+                        isolated_frames[idx + 1].pcd,
+                        T_src_to_tgt,
+                        title=f"Pair {idx:02d} -> {idx+1:02d}",
+                    )
+
+        if self.cfg.registration.show_camera_trajectory and self.cfg.show_stage_windows:
+            logger.info("\n  Displaying estimated camera trajectory...")
+            traj_geoms = draw_camera_trajectory(poses, scale=0.04)
+            if traj_geoms:
+                acc_clouds = [f for f, d in zip(aligned, diagnostics) if d is not None and d[2]]
+                show(traj_geoms + acc_clouds, window_name="Estimated Camera Trajectory")
+
+    def _save_and_display_stage3(
+        self,
+        aligned: list[o3d.geometry.PointCloud],
+        diagnostics: list[tuple[float, float, bool]],
+        is_human_mode: bool,
+    ) -> None:
+        """Save colored stage3 output point cloud and optionally render the Open3D inspection window."""
+        colored_aligned_frames = color_frames_distinctly(aligned)
+        if hasattr(self, "scan_folder") and self.scan_folder is not None:
+            combined = o3d.geometry.PointCloud()
+            for frame in colored_aligned_frames:
+                combined += frame
+            o3d.io.write_point_cloud(str(self.scan_folder / "stage3_output.ply"), combined)
+            logger.info(f"  Saved: {self.scan_folder / 'stage3_output.ply'}")
+
+        if self.cfg.show_stage_windows:
+            rejected_indices = [i for i, d in enumerate(diagnostics) if d is not None and not d[2]]
+            if rejected_indices:
+                if is_human_mode:
+                    logger.warning(f"\n  [!] Note: Stage 3 visualization displays all frames including rejected frame(s) {rejected_indices}.")
+                    logger.info("      Rejected frames are excluded from Stage 4 fusion.")
+                else:
+                    logger.warning(f"\n  [!] Note: Visualizing all frames including rejected frame(s) {rejected_indices}.")
+            screenshot_path = (self.scan_folder / "stage3_output.png") if (hasattr(self, "scan_folder") and self.scan_folder is not None) else None
+            display_frames = prepare_display_geometry(
+                colored_aligned_frames,
+                voxel_size_m=self.cfg.stage3_4_display_voxel_size_m,
+            )
+            win_name = "Stage 3: registered/aligned human clouds" if is_human_mode else "Stage 3: registered/aligned clouds"
+            show(
+                display_frames,
+                window_name=win_name,
+                screenshot_path=screenshot_path,
+            )
+
+    def _check_pointcloud_loop_closure(
+        self,
+        isolated_frames: list[o3d.geometry.PointCloud | RGBDFrame],
+        diagnostics: list[tuple[float, float, bool]],
+    ) -> None:
+        """Check loop closure consistency between first and last accepted frame if configured."""
+        if not self.cfg.attempt_loop_closure:
+            return
+        accepted_indices = [idx for idx, (*_, acc) in enumerate(diagnostics) if acc]
+        if len(accepted_indices) >= 8:
+            last_idx = accepted_indices[-1]
+            try:
+                _, loop_fitness, loop_rmse = register_frame_pair(
+                    isolated_frames[last_idx], isolated_frames[0], self.cfg.registration
+                )
+                if loop_fitness >= self.cfg.registration.min_accept_fitness:
+                    logger.info(f"\n  Loop closure check: fitness={loop_fitness:.4f} (rmse={loop_rmse * 1000:.2f} mm) -- looks like a consistent full orbit.")
+                else:
+                    logger.warning(f"\n  [!] Loop closure check: low overlap (fitness={loop_fitness:.4f}) with initial frame.")
+                    logger.info("      Drift may have accumulated over the full orbit.")
+            except Exception as exc:
+                logger.warning(f"\n  [!] Loop closure check skipped: {exc}")
+
+    def _register_human(
         self,
         isolated_frames: list[o3d.geometry.PointCloud | RGBDFrame],
     ) -> tuple[list[o3d.geometry.PointCloud], list[tuple[float, float, bool]], list[np.ndarray] | None]:
-        """
-        Align all isolated frames into the shared reference coordinate system.
-
-        Returns
-        -------
-        aligned:
-            List of all aligned point clouds in frame-0 coordinates.
-        diagnostics:
-            List of (fitness, rmse, accepted) tuples per frame.
-        poses:
-            List of 4x4 camera poses (or None in sequential pointcloud mode).
-        """
-        logger.info("\n" + "=" * 60)
-        is_human_mode = (self.cfg.registration.registration_mode == "rgbd_human") or (
-            self.cfg.target.name in ("head", "body") and self.cfg.registration.registration_mode != "pointcloud"
+        """Align human RGB-D frames using odometry + Colored ICP + pose graph."""
+        logger.info("  Stage 3: Registering human frames (RGB-D Odometry + Colored ICP + Pose Graph) ...")
+        logger.info("=" * 60)
+        aligned, diagnostics, poses, summary_stats = register_sequence_rgbd_human(
+            isolated_frames, self.cfg.registration
         )
+        self.last_registration_stats = summary_stats
 
-        if is_human_mode:
-            logger.info("  Stage 3: Registering human frames (RGB-D Odometry + Colored ICP + Pose Graph) ...")
-            logger.info("=" * 60)
-            aligned, diagnostics, poses, summary_stats = register_sequence_rgbd_human(
-                isolated_frames, self.cfg.registration
-            )
-            self.last_registration_stats = summary_stats
+        self._log_human_registration_summary(diagnostics, summary_stats, isolated_frames)
+        self._visualize_registration_diagnostics(isolated_frames, aligned, diagnostics, poses)
+        self._save_and_display_stage3(aligned, diagnostics, is_human_mode=True)
+        return aligned, diagnostics, poses
 
-            frame_methods = summary_stats.get("frame_methods", {})
-            frame_scores = summary_stats.get("frame_scores", {})
-            rejection_reasons = summary_stats.get("rejection_reasons", {})
-            fusion_eligible = summary_stats.get("fusion_eligible", {})
-            fusion_reasons = summary_stats.get("fusion_reasons", {})
-            logger.info("\n" + "=" * 60)
-            logger.info("HUMAN RGB-D REGISTRATION SUMMARY (Method Diagnostics)")
-            logger.info("-----------------------------------------------------")
-            for i, diag in enumerate(diagnostics):
-                if i == 0:
-                    logger.debug(f"    frame 00: reference frame (origin) [ACCEPTED]")
-                elif diag is not None:
-                    fit, rmse, acc = diag
-                    method = frame_methods.get(i, "none")
-                    score_str = frame_scores.get(i, f"fitness={fit:.2f} rmse={rmse * 1000.0:.1f}mm")
-                    if acc:
-                        if not fusion_eligible.get(i, True):
-                            reason_ex = fusion_reasons.get(i, "")
-                            logger.debug(f"    frame {i:02d}: pose accepted, EXCLUDED from fusion ({reason_ex})")
-                        else:
-                            logger.debug(f"    frame {i:02d}: tier={method} {score_str} ACCEPTED")
-                    elif i in rejection_reasons:
-                        logger.info(
-                            f"    frame {i:02d}: tier={method} {score_str}\n"
-                            f"              REJECTED -- {rejection_reasons[i]}"
-                        )
-                    else:
-                        logger.debug(f"    frame {i:02d}: tier=none REJECTED")
-            logger.info("=" * 60)
-
-            n_accepted = summary_stats.get("accepted", sum(1 for d in diagnostics if d is not None and d[2]))
-            n_total = summary_stats.get("captured", len(isolated_frames))
-            n_rejected = n_total - n_accepted
-            tier_summary = summary_stats.get(
-                "tier_summary_str",
-                f"{sum(1 for m in frame_methods.values() if m == 'landmark')} landmark, "
-                f"{sum(1 for m in frame_methods.values() if m in ('colored_icp', 'rgbd_odometry_colored_icp'))} colored_icp, "
-                f"{sum(1 for m in frame_methods.values() if m == 'fpfh_fallback')} fpfh_fallback, "
-                f"{n_rejected} rejected"
-            )
-            logger.info(f"\n  Registration tier summary: {tier_summary}")
-            logger.info(f"  Registration summary: {n_accepted} of {n_total} frames accepted into the reconstruction"
-                  f" ({n_rejected} rejected -- excluded from fusion).")
-            if n_total > 0 and (n_accepted / n_total) < 0.60:
-                logger.warning("  Tip: low acceptance ratio (< 60%). Try moving the camera more slowly for higher frame overlap.")
-
-            # Pairwise inspection visualization
-            if self.cfg.registration.show_registration_pairs and self.cfg.show_stage_windows:
-                logger.info("\n  Displaying pairwise registration inspection windows...")
-                for idx in range(min(2, len(isolated_frames) - 1)):
-                    if isinstance(isolated_frames[idx], RGBDFrame) and isinstance(isolated_frames[idx + 1], RGBDFrame):
-                        T_src_to_tgt = np.linalg.inv(poses[idx + 1]) @ poses[idx]
-                        visualize_registration_pair(
-                            isolated_frames[idx].pcd,
-                            isolated_frames[idx + 1].pcd,
-                            T_src_to_tgt,
-                            title=f"Pair {idx:02d} -> {idx+1:02d}",
-                        )
-
-            # Camera trajectory visualization
-            if self.cfg.registration.show_camera_trajectory and self.cfg.show_stage_windows:
-                logger.info("\n  Displaying estimated camera trajectory...")
-                traj_geoms = draw_camera_trajectory(poses, scale=0.04)
-                if traj_geoms:
-                    acc_clouds = [f for f, d in zip(aligned, diagnostics) if d is not None and d[2]]
-                    show(traj_geoms + acc_clouds, window_name="Estimated Camera Trajectory")
-
-            colored_aligned_frames = color_frames_distinctly(aligned)
-            if hasattr(self, "scan_folder") and self.scan_folder is not None:
-                combined = o3d.geometry.PointCloud()
-                for frame in colored_aligned_frames:
-                    combined += frame
-                o3d.io.write_point_cloud(str(self.scan_folder / "stage3_output.ply"), combined)
-                logger.info(f"  Saved: {self.scan_folder / 'stage3_output.ply'}")
-
-            if self.cfg.show_stage_windows:
-                rejected_indices = [i for i, d in enumerate(diagnostics) if d is not None and not d[2]]
-                if rejected_indices:
-                    logger.warning(f"\n  [!] Note: Stage 3 visualization displays all frames including rejected frame(s) {rejected_indices}.")
-                    logger.info("      Rejected frames are excluded from Stage 4 fusion.")
-                screenshot_path = (self.scan_folder / "stage3_output.png") if (hasattr(self, "scan_folder") and self.scan_folder is not None) else None
-                # TASK 3: Display-only downsampled copy: saved stage3_output.ply stays full resolution
-                display_frames = prepare_display_geometry(
-                    colored_aligned_frames,
-                    voxel_size_m=self.cfg.stage3_4_display_voxel_size_m,
-                )
-                show(
-                    display_frames,
-                    window_name="Stage 3: registered/aligned human clouds",
-                    screenshot_path=screenshot_path,
-                )
-
-            return aligned, diagnostics, poses
-
-        # Standard box / pointcloud path:
+    def _register_pointcloud(
+        self,
+        isolated_frames: list[o3d.geometry.PointCloud | RGBDFrame],
+    ) -> tuple[list[o3d.geometry.PointCloud], list[tuple[float, float, bool]], list[np.ndarray] | None]:
+        """Align object point cloud frames using multiway pose graph or sequential FPFH+ICP."""
         if self.cfg.registration.use_multiway:
             logger.info("  Stage 3: Registering frames (Pose Graph Multiway Registration) ...")
         else:
@@ -997,150 +1065,114 @@ class ScanPipeline:
             logger.warning("  Tip: low acceptance ratio (< 70%). Try moving the camera more slowly")
             logger.info("       or reducing --interval for higher frame overlap.")
 
-        if self.cfg.attempt_loop_closure:
-            accepted_indices = [idx for idx, (*_, acc) in enumerate(diagnostics) if acc]
-            if len(accepted_indices) >= 8:
-                last_idx = accepted_indices[-1]
-                try:
-                    _, loop_fitness, loop_rmse = register_frame_pair(
-                        isolated_frames[last_idx], isolated_frames[0], self.cfg.registration
-                    )
-                    if loop_fitness >= self.cfg.registration.min_accept_fitness:
-                        logger.info(f"\n  Loop closure check: fitness={loop_fitness:.4f} (rmse={loop_rmse * 1000:.2f} mm) -- looks like a consistent full orbit.")
-                    else:
-                        logger.warning(f"\n  [!] Loop closure check: low overlap (fitness={loop_fitness:.4f}) with initial frame.")
-                        logger.info("      Drift may have accumulated over the full orbit.")
-                except Exception as exc:
-                    logger.warning(f"\n  [!] Loop closure check skipped: {exc}")
-
-        colored_aligned_frames = color_frames_distinctly(aligned)
-        if hasattr(self, "scan_folder") and self.scan_folder is not None:
-            combined = o3d.geometry.PointCloud()
-            for frame in colored_aligned_frames:
-                combined += frame
-            o3d.io.write_point_cloud(str(self.scan_folder / "stage3_output.ply"), combined)
-            logger.info(f"  Saved: {self.scan_folder / 'stage3_output.ply'}")
-
-        if self.cfg.show_stage_windows:
-            if rejected_indices:
-                logger.warning(f"\n  [!] Note: Visualizing all frames including rejected frame(s) {rejected_indices}.")
-            screenshot_path = (self.scan_folder / "stage3_output.png") if (hasattr(self, "scan_folder") and self.scan_folder is not None) else None
-            # TASK 3: Display-only downsampled copy: saved stage3_output.ply stays full resolution
-            display_frames = prepare_display_geometry(
-                colored_aligned_frames,
-                voxel_size_m=self.cfg.stage3_4_display_voxel_size_m,
-            )
-            show(
-                display_frames,
-                window_name="Stage 3: registered/aligned clouds",
-                screenshot_path=screenshot_path,
-            )
-
+        self._check_pointcloud_loop_closure(isolated_frames, diagnostics)
+        self._save_and_display_stage3(aligned, diagnostics, is_human_mode=False)
         return aligned, diagnostics, None
+
+    def register(
+        self,
+        isolated_frames: list[o3d.geometry.PointCloud | RGBDFrame],
+    ) -> tuple[list[o3d.geometry.PointCloud], list[tuple[float, float, bool]], list[np.ndarray] | None]:
+        """
+        Align all isolated frames into the shared reference coordinate system.
+
+        Returns
+        -------
+        aligned:
+            List of all aligned point clouds in frame-0 coordinates.
+        diagnostics:
+            List of (fitness, rmse, accepted) tuples per frame.
+        poses:
+            List of 4x4 camera poses (or None in sequential pointcloud mode).
+        """
+        logger.info("\n" + "=" * 60)
+        is_human_mode = (self.cfg.registration.registration_mode == "rgbd_human") or (
+            self.cfg.target.name in ("head", "body") and self.cfg.registration.registration_mode != "pointcloud"
+        )
+        if is_human_mode:
+            return self._register_human(isolated_frames)
+        else:
+            return self._register_pointcloud(isolated_frames)
 
     # ------------------------------------------------------------------
     # Stage 4: fuse
     # ------------------------------------------------------------------
 
-    def fuse(
+    def _filter_fusion_eligible_frames(
         self,
         aligned_frames: list[o3d.geometry.PointCloud],
-        diagnostics: list[tuple[float, float, bool]] | None = None,
-        raw_frames: list | None = None,
-        poses: list[np.ndarray] | None = None,
-    ) -> o3d.geometry.PointCloud:
-        """
-        Merge registered frames into one clean point cloud.
+        diagnostics: list[tuple[float, float, bool]] | None,
+    ) -> tuple[list[o3d.geometry.PointCloud], list[int]]:
+        """Filter registered frames based on diagnostics and secondary fusion thresholds."""
+        if diagnostics is None:
+            return aligned_frames, list(range(len(aligned_frames)))
 
-        Only frames with accepted=True in diagnostics are included in the final fusion.
-        Supports volumetric TSDF integration for human RGB-D frames.
+        is_human_mode = (
+            (getattr(self.cfg.registration, "registration_mode", "") == "rgbd_human")
+            or (getattr(self.cfg.target, "name", "") in ("head", "body"))
+        )
+        min_fit_fusion = getattr(self.cfg.registration, "min_fitness_for_fusion", 0.60)
+        max_lm_res_fusion = getattr(self.cfg.registration, "max_landmark_residual_for_fusion_mm", 5.0)
 
-        Parameters
-        ----------
-        aligned_frames:
-            Registered per-frame clouds from :meth:`register`.
-        diagnostics:
-            Optional registration diagnostics tuples (fitness, rmse, accepted).
-        raw_frames:
-            Optional original raw / isolated frames (e.g. RGBDFrame instances).
-        poses:
-            Optional list of 4x4 camera poses.
+        frame_scores = {}
+        fusion_eligible = {}
+        fusion_reasons = {}
+        residuals = {}
+        if hasattr(self, "last_registration_stats") and self.last_registration_stats:
+            frame_scores = self.last_registration_stats.get("frame_scores", {})
+            fusion_eligible = self.last_registration_stats.get("fusion_eligible", {})
+            fusion_reasons = self.last_registration_stats.get("fusion_reasons", {})
+            residuals = self.last_registration_stats.get("residuals") or self.last_registration_stats.get("frame_residuals", {})
 
-        Returns
-        -------
-        o3d.geometry.PointCloud
-            Fused, denoised reconstruction.
-        """
-        logger.info("\n" + "=" * 60)
-        logger.info("  Stage 4: Fusing aligned frames ...")
-        logger.info("=" * 60)
+        accepted_indices = []
+        for i, d in enumerate(diagnostics):
+            if d is None or not d[2]:
+                continue
+            if i == 0:
+                accepted_indices.append(0)
+                continue
 
-        if diagnostics is not None:
-            # diagnostics entries can be None for frames rejected before pose-graph assignment
-            is_human_mode = (
-                (getattr(self.cfg.registration, "registration_mode", "") == "rgbd_human")
-                or (getattr(self.cfg.target, "name", "") in ("head", "body"))
-            )
-            min_fit_fusion = getattr(self.cfg.registration, "min_fitness_for_fusion", 0.60)
-            max_lm_res_fusion = getattr(self.cfg.registration, "max_landmark_residual_for_fusion_mm", 5.0)
+            if is_human_mode:
+                if fusion_eligible and i in fusion_eligible:
+                    if not fusion_eligible[i]:
+                        reason_ex = fusion_reasons.get(i, "stricter fusion gate")
+                        logger.debug(f"  frame {i}: pose accepted, EXCLUDED from fusion ({reason_ex})")
+                        continue
+                else:
+                    fit = d[0]
+                    score_str = frame_scores.get(i, "")
+                    lm_res = residuals.get(i)
+                    if lm_res is None and "residual=" in score_str:
+                        try:
+                            lm_res = float(score_str.split("residual=")[1].split("mm")[0])
+                        except Exception:
+                            pass
 
-            frame_scores = {}
-            fusion_eligible = {}
-            fusion_reasons = {}
-            residuals = {}
-            if hasattr(self, "last_registration_stats") and self.last_registration_stats:
-                frame_scores = self.last_registration_stats.get("frame_scores", {})
-                fusion_eligible = self.last_registration_stats.get("fusion_eligible", {})
-                fusion_reasons = self.last_registration_stats.get("fusion_reasons", {})
-                residuals = self.last_registration_stats.get("residuals") or self.last_registration_stats.get("frame_residuals", {})
+                    if fit < min_fit_fusion:
+                        logger.debug(f"  frame {i}: pose accepted, EXCLUDED from fusion (fitness {fit:.2f} < {min_fit_fusion:.2f} fusion threshold)")
+                        continue
+                    if lm_res is not None and lm_res > max_lm_res_fusion:
+                        logger.debug(f"  frame {i}: pose accepted, EXCLUDED from fusion (landmark residual {lm_res:.1f}mm > {max_lm_res_fusion:.1f}mm fusion threshold)")
+                        continue
 
-            accepted_indices = []
-            for i, d in enumerate(diagnostics):
-                if d is None or not d[2]:
-                    continue
-                if i == 0:
-                    accepted_indices.append(0)
-                    continue
+            accepted_indices.append(i)
 
-                if is_human_mode:
-                    if fusion_eligible and i in fusion_eligible:
-                        if not fusion_eligible[i]:
-                            reason_ex = fusion_reasons.get(i, "stricter fusion gate")
-                            logger.debug(f"  frame {i}: pose accepted, EXCLUDED from fusion ({reason_ex})")
-                            continue
-                    else:
-                        fit = d[0]
-                        score_str = frame_scores.get(i, "")
-                        lm_res = residuals.get(i)
-                        if lm_res is None and "residual=" in score_str:
-                            try:
-                                lm_res = float(score_str.split("residual=")[1].split("mm")[0])
-                            except Exception:
-                                pass
+        accepted_frames = [aligned_frames[i] for i in accepted_indices]
+        if not accepted_frames:
+            logger.warning("  [!] Warning: No frames met acceptance criteria; falling back to frame 0.")
+            accepted_frames = aligned_frames[:1]
+            accepted_indices = [0]
 
-                        if fit < min_fit_fusion:
-                            logger.debug(f"  frame {i}: pose accepted, EXCLUDED from fusion (fitness {fit:.2f} < {min_fit_fusion:.2f} fusion threshold)")
-                            continue
-                        if lm_res is not None and lm_res > max_lm_res_fusion:
-                            logger.debug(f"  frame {i}: pose accepted, EXCLUDED from fusion (landmark residual {lm_res:.1f}mm > {max_lm_res_fusion:.1f}mm fusion threshold)")
-                            continue
+        return accepted_frames, accepted_indices
 
-                accepted_indices.append(i)
-
-            accepted_frames = [aligned_frames[i] for i in accepted_indices]
-            if not accepted_frames:
-                logger.warning("  [!] Warning: No frames met acceptance criteria; falling back to frame 0.")
-                accepted_frames = aligned_frames[:1]
-                accepted_indices = [0]
-        else:
-            accepted_frames = aligned_frames
-            accepted_indices = list(range(len(aligned_frames)))
-
-        n_skipped = len(aligned_frames) - len(accepted_frames)
-        skip_msg = f" (excluded {n_skipped} rejected frame{'s' if n_skipped != 1 else ''})" if n_skipped > 0 else ""
-        logger.info(f"  Fusing {len(accepted_frames)} accepted frame(s){skip_msg} ...")
-
-        # Volumetric TSDF or Point Cloud Concatenation
+    def _reconstruct_volume(
+        self,
+        accepted_frames: list[o3d.geometry.PointCloud],
+        accepted_indices: list[int],
+        raw_frames: list | None,
+        poses: list[np.ndarray] | None,
+    ) -> tuple[o3d.geometry.PointCloud, str]:
+        """Perform 3D reconstruction via volumetric TSDF integration or point cloud concatenation."""
         if (
             self.cfg.fusion_method == "tsdf"
             and raw_frames is not None
@@ -1176,15 +1208,15 @@ class ScanPipeline:
             fusion_name = "POINT CLOUD"
 
         logger.info(f"  Reconstruction:\n    method: {fusion_name}\n    points: {len(fused.points):,}")
+        return fused, fusion_name
 
+    def _save_and_display_stage4(self, fused: o3d.geometry.PointCloud, fusion_name: str) -> None:
+        """Save stage4 reconstructed point cloud and optionally display preview."""
         if hasattr(self, "scan_folder") and self.scan_folder is not None:
             o3d.io.write_point_cloud(str(self.scan_folder / "stage4_output.ply"), fused)
             logger.info(f"  Saved: {self.scan_folder / 'stage4_output.ply'}")
 
         if self.cfg.show_stage_windows:
-            # TASK 3: Display-only downsampled copy for the live preview window.
-            # The saved stage4_output.ply, fused.ply, and the returned fused cloud passed
-            # into Stage 5 measurement strictly stay at full resolution for maximum accuracy.
             display_pcd = prepare_display_geometry(
                 fused,
                 voxel_size_m=self.cfg.stage3_4_display_voxel_size_m,
@@ -1203,6 +1235,50 @@ class ScanPipeline:
             o3d.io.write_point_cloud(str(out), fused)
             logger.info(f"  Saved: {out}")
 
+    def fuse(
+        self,
+        aligned_frames: list[o3d.geometry.PointCloud],
+        diagnostics: list[tuple[float, float, bool]] | None = None,
+        raw_frames: list | None = None,
+        poses: list[np.ndarray] | None = None,
+    ) -> o3d.geometry.PointCloud:
+        """
+        Merge registered frames into one clean point cloud.
+
+        Only frames with accepted=True in diagnostics are included in the final fusion.
+        Supports volumetric TSDF integration for human RGB-D frames.
+
+        Parameters
+        ----------
+        aligned_frames:
+            Registered per-frame clouds from :meth:`register`.
+        diagnostics:
+            Optional registration diagnostics tuples (fitness, rmse, accepted).
+        raw_frames:
+            Optional original raw / isolated frames (e.g. RGBDFrame instances).
+        poses:
+            Optional list of 4x4 camera poses.
+
+        Returns
+        -------
+        o3d.geometry.PointCloud
+            Fused, denoised reconstruction.
+        """
+        logger.info("\n" + "=" * 60)
+        logger.info("  Stage 4: Fusing aligned frames ...")
+        logger.info("=" * 60)
+
+        accepted_frames, accepted_indices = self._filter_fusion_eligible_frames(
+            aligned_frames, diagnostics
+        )
+        n_skipped = len(aligned_frames) - len(accepted_frames)
+        skip_msg = f" (excluded {n_skipped} rejected frame{'s' if n_skipped != 1 else ''})" if n_skipped > 0 else ""
+        logger.info(f"  Fusing {len(accepted_frames)} accepted frame(s){skip_msg} ...")
+
+        fused, fusion_name = self._reconstruct_volume(
+            accepted_frames, accepted_indices, raw_frames, poses
+        )
+        self._save_and_display_stage4(fused, fusion_name)
         return fused
 
     # ------------------------------------------------------------------
