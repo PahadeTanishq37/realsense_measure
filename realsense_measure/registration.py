@@ -2030,28 +2030,34 @@ def build_pose_graph_rgbd(
     print(f"  Average loop-closure edges per frame: {avg_loop_per_frame:.2f}")
 
     if accepted_pairs:
+        min_face_fit = getattr(cfg, "min_face_pair_fitness_for_fusion", 0.75)
+        max_face_rmse = getattr(cfg, "max_face_pair_rmse_for_fusion_mm", 4.0)
+        min_fit_fusion = getattr(cfg, "min_fitness_for_fusion", 0.60)
+        max_colored_rmse_mm = getattr(cfg, "max_colored_icp_rmse_m", 0.006) * 1000.0
+        min_accept_fit = getattr(cfg, "min_accept_fitness", 0.50) if getattr(cfg, "min_accept_fitness", None) is not None else 0.45
+
         fits = [p["fitness"] for p in accepted_pairs]
         rmses = [p["rmse_mm"] for p in accepted_pairs if p["rmse_mm"] < 990.0]
         n_pairs = len(accepted_pairs)
 
-        fit_high = sum(1 for f in fits if f >= 0.75)
-        fit_mod = sum(1 for f in fits if 0.60 <= f < 0.75)
-        fit_border = sum(1 for f in fits if f < 0.60)
+        fit_high = sum(1 for f in fits if f >= min_face_fit)
+        fit_mod = sum(1 for f in fits if min_fit_fusion <= f < min_face_fit)
+        fit_border = sum(1 for f in fits if f < min_fit_fusion)
 
-        rmse_tight = sum(1 for r in rmses if r <= 4.0)
-        rmse_mod = sum(1 for r in rmses if 4.0 < r <= 6.0)
-        rmse_border = sum(1 for r in rmses if r > 6.0)
+        rmse_tight = sum(1 for r in rmses if r <= max_face_rmse)
+        rmse_mod = sum(1 for r in rmses if max_face_rmse < r <= max_colored_rmse_mm)
+        rmse_border = sum(1 for r in rmses if r > max_colored_rmse_mm)
 
         print(f"\n  Accepted Pair Fitness Distribution (total accepted pairs: {n_pairs}):")
-        print(f"    High (>= 0.75):        {fit_high:3d} ({fit_high/n_pairs*100.0:5.1f}%) [comfortable alignment]")
-        print(f"    Moderate [0.60, 0.75): {fit_mod:3d} ({fit_mod/n_pairs*100.0:5.1f}%) [moderate alignment]")
-        print(f"    Borderline (< 0.60):   {fit_border:3d} ({fit_border/n_pairs*100.0:5.1f}%) [near acceptance threshold]")
+        print(f"    High (>= {min_face_fit:.2f}):        {fit_high:3d} ({fit_high/n_pairs*100.0:5.1f}%) [comfortable alignment]")
+        print(f"    Moderate [{min_fit_fusion:.2f}, {min_face_fit:.2f}): {fit_mod:3d} ({fit_mod/n_pairs*100.0:5.1f}%) [moderate alignment]")
+        print(f"    Borderline (< {min_fit_fusion:.2f}):   {fit_border:3d} ({fit_border/n_pairs*100.0:5.1f}%) [near acceptance threshold]")
         print(f"    Fitness: mean={np.mean(fits):.3f}, median={np.median(fits):.3f}, min={np.min(fits):.3f}, max={np.max(fits):.3f}")
 
         print(f"\n  Accepted Pair RMSE Distribution:")
-        print(f"    Tight (<= 4.0 mm):     {rmse_tight:3d} ({rmse_tight/n_pairs*100.0:5.1f}%) [clears strict face threshold]")
-        print(f"    Moderate (4.0-6.0 mm): {rmse_mod:3d} ({rmse_mod/n_pairs*100.0:5.1f}%)")
-        print(f"    Borderline (> 6.0 mm): {rmse_border:3d} ({rmse_border/n_pairs*100.0:5.1f}%) [near max RMSE limit]")
+        print(f"    Tight (<= {max_face_rmse:.1f} mm):     {rmse_tight:3d} ({rmse_tight/n_pairs*100.0:5.1f}%) [clears strict face threshold]")
+        print(f"    Moderate ({max_face_rmse:.1f}-{max_colored_rmse_mm:.1f} mm): {rmse_mod:3d} ({rmse_mod/n_pairs*100.0:5.1f}%)")
+        print(f"    Borderline (> {max_colored_rmse_mm:.1f} mm): {rmse_border:3d} ({rmse_border/n_pairs*100.0:5.1f}%) [near max RMSE limit]")
         if rmses:
             print(f"    RMSE: mean={np.mean(rmses):.2f}mm, median={np.median(rmses):.2f}mm, min={np.min(rmses):.2f}mm, max={np.max(rmses):.2f}mm")
 
@@ -2060,14 +2066,14 @@ def build_pose_graph_rgbd(
             n_fp = len(face_pairs)
             fp_fits = [p["fitness"] for p in face_pairs]
             fp_rmses = [p["rmse_mm"] for p in face_pairs if p["rmse_mm"] < 990.0]
-            fp_clear_75 = sum(1 for f in fp_fits if f >= 0.75)
-            fp_between_45_75 = sum(1 for f in fp_fits if 0.45 <= f < 0.75)
+            fp_clear = sum(1 for f in fp_fits if f >= min_face_fit)
+            fp_border = sum(1 for f in fp_fits if min_accept_fit <= f < min_face_fit)
             print(f"\n  Face-Region Pairs specifically (both frames upper face/head, n={n_fp}):")
-            print(f"    Clears strict threshold (>= 0.75): {fp_clear_75:3d} ({fp_clear_75/n_fp*100.0:5.1f}%)")
-            print(f"    Borderline [0.45, 0.75):           {fp_between_45_75:3d} ({fp_between_45_75/n_fp*100.0:5.1f}%) [excluded from face fusion]")
+            print(f"    Clears strict threshold (>= {min_face_fit:.2f}): {fp_clear:3d} ({fp_clear/n_fp*100.0:5.1f}%)")
+            print(f"    Borderline [{min_accept_fit:.2f}, {min_face_fit:.2f}):           {fp_border:3d} ({fp_border/n_fp*100.0:5.1f}%) [excluded from face fusion]")
             if fp_rmses:
-                fp_rmse_le_4 = sum(1 for r in fp_rmses if r <= 4.0)
-                print(f"    RMSE <= 4.0 mm:                    {fp_rmse_le_4:3d} ({fp_rmse_le_4/n_fp*100.0:5.1f}%)")
+                fp_rmse_le = sum(1 for r in fp_rmses if r <= max_face_rmse)
+                print(f"    RMSE <= {max_face_rmse:.1f} mm:                    {fp_rmse_le:3d} ({fp_rmse_le/n_fp*100.0:5.1f}%)")
         else:
             print("\n  Face-Region Pairs specifically: 0 accepted upper-to-upper pairs detected (frames in lower/neutral region)")
     print("=" * 65 + "\n")
