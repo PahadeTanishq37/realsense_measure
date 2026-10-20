@@ -34,6 +34,8 @@ Use a finer voxel grid for higher-resolution scans (slower)::
 from __future__ import annotations
 
 import argparse
+import logging
+import os
 import sys
 from pathlib import Path
 
@@ -135,6 +137,12 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="disable MediaPipe face landmark detection during capture HUD tracking and registration",
     )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="enable verbose/debug logging output",
+    )
 
     return parser
 
@@ -142,6 +150,11 @@ def _build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.DEBUG if (args.verbose or os.getenv("LOG_LEVEL", "").upper() == "DEBUG") else logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
 
     # ---- build configuration -------------------------------------------
     cfg = PipelineConfig(output_dir=Path(args.out))

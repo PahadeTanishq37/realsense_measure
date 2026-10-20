@@ -39,6 +39,9 @@ improving robustness for objects where each capture adds new geometry.
 from __future__ import annotations
 
 import copy
+import logging
+
+logger = logging.getLogger(__name__)
 
 import numpy as np
 import open3d as o3d
@@ -667,7 +670,7 @@ def register_frame_pair_landmark_guided(
                     src_pts, dst_pts, weights=weights, cfg=cfg
                 )
                 if not is_conditioned:
-                    print(f"      [landmarks] Kabsch skipped: {cond_reason} -- falling back to FPFH")
+                    logger.warning(f"      [landmarks] Kabsch skipped: {cond_reason} -- falling back to FPFH")
                     transform, fitness, rmse = register_frame_pair(source_pcd, target_pcd, cfg)
                     return transform, fitness, rmse, "fpfh_fallback", float("nan")
 
@@ -695,7 +698,7 @@ def register_frame_pair_landmark_guided(
                 seed_dense_fitness = float(eval_res.fitness)
 
                 if seed_dense_fitness < min_dense_fit:
-                    print(
+                    logger.warning(
                         f"      [landmarks] Kabsch seed rejected: dense-surface fitness "
                         f"{seed_dense_fitness:.2f} < {min_dense_fit:.2f} threshold (residual was {residual_mm:.1f}mm) "
                         f"-- falling through to Tier 2"
@@ -734,7 +737,7 @@ def register_frame_pair_landmark_guided(
                         face_fitness = float(eval_face.fitness)
 
                         if face_fitness < min_face_fit:
-                            print(
+                            logger.warning(
                                 f"      [landmarks] Kabsch seed rejected: local face-region fitness "
                                 f"{face_fitness:.2f} < {min_face_fit:.2f} threshold (residual was {residual_mm:.1f}mm) "
                                 f"-- falling through to Tier 2"
@@ -761,14 +764,14 @@ def register_frame_pair_landmark_guided(
                             rot_disagree = float(compute_rotation_deg(init_T[:3, :3] @ T_fpfh[:3, :3].T))
 
                             if trans_disagree > max_trans_disagree or rot_disagree > max_rot_disagree:
-                                print(
+                                logger.warning(
                                     f"      [landmarks] Kabsch disagrees with independent FPFH check "
                                     f"(trans {trans_disagree:.3f}m, rot {rot_disagree:.1f}deg) "
                                     f"-- falling through to Tier 2"
                                 )
                                 return np.eye(4), 0.0, float("inf"), "fpfh_crosscheck_failed", float(residual_mm)
                     except Exception as e:
-                        print(
+                        logger.warning(
                             f"      [fusion-fallback] FPFH cross-check failed with "
                             f"{type(e).__name__}: {e}"
                         )
@@ -804,7 +807,7 @@ def register_frame_pair_landmark_guided(
                         colored_criteria,
                     )
                 except Exception as e:
-                    print(
+                    logger.warning(
                         f"      [fusion-fallback] Colored ICP refinement for landmark seed failed with "
                         f"{type(e).__name__}: {e} -- falling back to point-to-plane ICP"
                     )
@@ -817,13 +820,13 @@ def register_frame_pair_landmark_guided(
                     float(residual_mm),
                 )
             else:
-                print(f"      [landmarks] Kabsch residual too high: {residual_mm:.1f}mm > {residual_accept_mm:.1f}mm")
+                logger.debug(f"      [landmarks] Kabsch residual too high: {residual_mm:.1f}mm > {residual_accept_mm:.1f}mm")
         else:
-            print(f"      [landmarks] Insufficient common landmarks: {len(common)} < 4 (src={len(src_lm)}, dst={len(dst_lm)})")
+            logger.debug(f"      [landmarks] Insufficient common landmarks: {len(common)} < 4 (src={len(src_lm)}, dst={len(dst_lm)})")
     else:
         src_n = len(src_lm) if src_lm is not None else 0
         dst_n = len(dst_lm) if dst_lm is not None else 0
-        print(f"      [landmarks] Face not detected on both frames (src={src_n}, dst={dst_n})")
+        logger.debug(f"      [landmarks] Face not detected on both frames (src={src_n}, dst={dst_n})")
 
     transform, fitness, rmse = register_frame_pair(source_pcd, target_pcd, cfg)
     return transform, fitness, rmse, "fpfh_fallback", float("nan")
@@ -855,7 +858,7 @@ def register_against_candidates(
         try:
             transform, fitness, rmse = register_frame_pair(new_frame, candidate, cfg)
         except Exception as e:
-            print(
+            logger.warning(
                 f"  [fusion-fallback] Candidate {idx} registration failed with "
                 f"{type(e).__name__}: {e}"
             )
@@ -983,7 +986,7 @@ def build_pose_graph(
             try:
                 T, fit, rmse = register_frame_pair(frames[i], frames[j], cfg)
             except Exception as e:
-                print(
+                logger.warning(
                     f"  [fusion-fallback] Pose-graph pair registration ({i} -> {j}) failed with "
                     f"{type(e).__name__}: {e}"
                 )
@@ -1060,7 +1063,7 @@ def register_sequence_multiway(
     n_before = len(pose_graph.edges)
     if len(pose_graph.nodes) > 1:
         optimize_pose_graph(pose_graph, cfg)
-    print(
+    logger.info(
         f"  Pose graph: {len(pose_graph.nodes)} of {len(frames)} frames in graph, "
         f"{n_before} edges ({n_odom} primary + {n_loop} loop-closure), "
         f"{len(pose_graph.edges)} survived pruning."
@@ -1274,14 +1277,14 @@ def register_rgbd_pair(
                 if lm_rot <= cfg.max_rotation_deg_per_frame and lm_trans <= (cfg.max_translation_m_per_frame * 1000.0):
                     init_trans = lm_T
         except Exception as e:
-            print(
+            logger.warning(
                 f"  [fusion-fallback] Landmark-guided stage for pair {pair_str} failed with "
                 f"{type(e).__name__}: {e}"
             )
 
     # Check overlap before invoking RGB-D odometry or Colored ICP
     if not overlap_ok:
-        print(f"[overlap-check] pair {pair_str} SKIPPED colored-icp ({overlap_skip_reason}) -- trying FPFH fallback")
+        logger.warning(f"[overlap-check] pair {pair_str} SKIPPED colored-icp ({overlap_skip_reason}) -- trying FPFH fallback")
         colored_status = f"SKIPPED ({overlap_skip_reason})"
         T_colored = init_trans
         fit_colored = 0.0
@@ -1387,7 +1390,7 @@ def register_rgbd_pair(
                 )
             colored_status = "FAIL: " + ", ".join(issues)
         except RuntimeError as exc:
-            print(f"[colored-icp] no correspondences for pair {pair_str}, falling through to FPFH tier")
+            logger.warning(f"[colored-icp] no correspondences for pair {pair_str}, falling through to FPFH tier")
             colored_status = f"ERROR ({exc})"
             T_colored = init_trans
             fit_colored = 0.0
@@ -1395,7 +1398,7 @@ def register_rgbd_pair(
             rot_colored = 0.0
             trans_colored = 0.0
         except Exception as exc:
-            print(
+            logger.warning(
                 f"  [fusion-fallback] Colored ICP stage for pair {pair_str} failed with "
                 f"{type(exc).__name__}: {exc}"
             )
@@ -1421,7 +1424,7 @@ def register_rgbd_pair(
         ):
             src_center_y = float(src_pcd.get_axis_aligned_bounding_box().get_center()[1])
             region_str = "lower (neck/shoulder)" if src_center_y > 0.0 else "upper (face/head)"
-            print(f"[registration-diagnostic] pair {pair_str} FPFH fallback SUCCEEDED (region: {region_str}, bbox_center_y={src_center_y:+.3f}m)")
+            logger.debug(f"[registration-diagnostic] pair {pair_str} FPFH fallback SUCCEEDED (region: {region_str}, bbox_center_y={src_center_y:+.3f}m)")
             return PairRegistrationResult(
                 fb_T,
                 fb_fit,
@@ -1434,7 +1437,7 @@ def register_rgbd_pair(
                 residual_mm=None,
             )
     except Exception as exc:
-        print(
+        logger.warning(
             f"  [fusion-fallback] Geometric FPFH fallback for pair {pair_str} failed with "
             f"{type(exc).__name__}: {exc}"
         )
@@ -1442,7 +1445,7 @@ def register_rgbd_pair(
     src_center_y = float(src_pcd.get_axis_aligned_bounding_box().get_center()[1])
     region_str = "lower (neck/shoulder)" if src_center_y > 0.0 else "upper (face/head)"
     fail_reason = f"Colored ICP failed ({colored_status}); Fallback also failed"
-    print(
+    logger.debug(
         f"[registration-diagnostic] pair {pair_str} REJECTED / LOW-FITNESS "
         f"(region: {region_str}, bbox_center_y={src_center_y:+.3f}m) -- {fail_reason}"
     )
@@ -1646,17 +1649,17 @@ def build_pose_graph_rgbd(
 
             # Print pair log with exact tier and score
             if accepted and not exceeds_jump:
-                print(f"    pair {i:02d} -> {j:02d}: tier={method} {reason} ACCEPTED")
+                logger.debug(f"    pair {i:02d} -> {j:02d}: tier={method} {reason} ACCEPTED")
                 candidates.append((j, T, fit, rmse, rot, trans, method, reason, res_residual))
             elif accepted and exceeds_jump:
-                print(
+                logger.debug(
                     f"    pair {i:02d} -> {j:02d}: tier={method} {reason} "
                     f"REJECTED -- pose jump ({jump_trans_m:.2f}m/{jump_rot_deg:.1f}deg) exceeds plausible motion "
                     f"(bound {effective_translation_bound:.2f}m/{effective_rotation_bound:.1f}deg, scaled for {frames_since_accepted} "
                     f"frames since last accept)"
                 )
             else:
-                print(f"    pair {i:02d} -> {j:02d}: tier=none REJECTED ({reason})")
+                logger.debug(f"    pair {i:02d} -> {j:02d}: tier=none REJECTED ({reason})")
 
         if not candidates:
             # If candidates were rejected due to excessive pose jump, this is a physical motion violation,
@@ -1678,7 +1681,7 @@ def build_pose_graph_rgbd(
                 )
                 rejection_reasons[i] = rejection_msg
                 frame_states[i] = "REJECTED"
-                print(
+                logger.debug(
                     f"    frame {i:02d}: tier={mis['method']} {score_str}\n"
                     f"              {rejection_msg}"
                 )
@@ -1694,7 +1697,7 @@ def build_pose_graph_rgbd(
                 best_methods[i] = "none"
                 best_scores[i] = ""
                 best_residuals[i] = None
-                print(f"    frame {i:02d}: tier=none REJECTED")
+                logger.debug(f"    frame {i:02d}: tier=none REJECTED")
                 frame_states[i] = "REJECTED"
                 continue
 
@@ -1733,7 +1736,7 @@ def build_pose_graph_rgbd(
                 best_residuals[i] = None
                 rejection_reasons[i] = f"local bridge link {i}->{pred_idx} failed ({reason_loc})"
                 frame_states[i] = "REJECTED"
-                print(f"    frame {i:02d}: local bridge link {i}->{pred_idx} REJECTED ({reason_loc})")
+                logger.debug(f"    frame {i:02d}: local bridge link {i}->{pred_idx} REJECTED ({reason_loc})")
                 continue
 
             # Local link succeeded: check kinematic jump of composed transform from anchor
@@ -1769,7 +1772,7 @@ def build_pose_graph_rgbd(
                 )
                 rejection_reasons[i] = rejection_msg
                 frame_states[i] = "REJECTED"
-                print(f"    frame {i:02d}: {rejection_msg}")
+                logger.debug(f"    frame {i:02d}: {rejection_msg}")
                 continue
 
             # Kinematic check passed!
@@ -1796,7 +1799,7 @@ def build_pose_graph_rgbd(
                 best_residuals[i] = getattr(res_local, "residual_mm", None)
                 frames_since_accepted += 1
                 last_rel_trans = None
-                print(f"    frame {i:02d}: tier={meth_loc} PROVISIONAL_BRIDGE (hop={hop}, buffered={len(bridge_buffer)}/{max_buf_size})")
+                logger.debug(f"    frame {i:02d}: tier={meth_loc} PROVISIONAL_BRIDGE (hop={hop}, buffered={len(bridge_buffer)}/{max_buf_size})")
                 continue
             else:
                 # Buffer capacity reached (or continuing unanchored chain).
@@ -1848,7 +1851,7 @@ def build_pose_graph_rgbd(
                 composed_to_anchor[i] = T_to_anchor_cand
                 frames_since_accepted += 1
                 last_rel_trans = None
-                print(f"    frame {i:02d}: tier={meth_loc} UNANCHORED_ODOMETRY (hop={hop}, node={node_id})")
+                logger.debug(f"    frame {i:02d}: tier={meth_loc} UNANCHORED_ODOMETRY (hop={hop}, node={node_id})")
                 continue
 
         # Prioritize sequential candidate (prev_accepted_idx) if it succeeded and meets quality criteria
@@ -1884,7 +1887,7 @@ def build_pose_graph_rgbd(
                 max_rot_cross = getattr(cfg, "max_bridge_crosscheck_rot_deg", 10.0)
 
                 if trans_disagree <= max_trans_cross and rot_disagree <= max_rot_cross:
-                    print(f"    frame {i:02d}: independent bridge cross-check PASSED (trans disagree {trans_disagree*1000.0:.1f}mm <= {max_trans_cross*1000.0:.1f}mm, rot {rot_disagree:.1f}deg <= {max_rot_cross:.1f}deg)")
+                    logger.debug(f"    frame {i:02d}: independent bridge cross-check PASSED (trans disagree {trans_disagree*1000.0:.1f}mm <= {max_trans_cross*1000.0:.1f}mm, rot {rot_disagree:.1f}deg <= {max_rot_cross:.1f}deg)")
                     for b in bridge_buffer:
                         b_idx = b["frame_idx"]
                         b_pose = poses[b["anchor_idx"]] @ b["T_to_anchor"]
@@ -1906,7 +1909,7 @@ def build_pose_graph_rgbd(
                     bridge_buffer.clear()
                     frame_state_i = "TERMINAL_RECOVERED"
                 else:
-                    print(f"    frame {i:02d}: independent bridge cross-check FAILED (trans disagree {trans_disagree*1000.0:.1f}mm > {max_trans_cross*1000.0:.1f}mm or rot {rot_disagree:.1f}deg > {max_rot_cross:.1f}deg)")
+                    logger.debug(f"    frame {i:02d}: independent bridge cross-check FAILED (trans disagree {trans_disagree*1000.0:.1f}mm > {max_trans_cross*1000.0:.1f}mm or rot {rot_disagree:.1f}deg > {max_rot_cross:.1f}deg)")
                     bridge_buffer.clear()
                     diagnostics[i] = (fit_best, rmse_best, False)
                     best_methods[i] = method_best
@@ -1947,7 +1950,7 @@ def build_pose_graph_rgbd(
             try:
                 lm_res_val = float(reason_best.split("residual=")[1].split("mm")[0])
             except Exception as e:
-                print(
+                logger.warning(
                     f"    [fusion-fallback] Parsing landmark residual for frame {i} failed with "
                     f"{type(e).__name__}: {e}"
                 )
@@ -1956,18 +1959,18 @@ def build_pose_graph_rgbd(
 
         if best_is_face_pair:
             if fit_best < min_face_fit:
-                print(f"    frame {i:02d}: pose accepted, EXCLUDED from fusion (face-pair fitness {fit_best:.2f} < {min_face_fit:.2f} threshold)")
+                logger.debug(f"    frame {i:02d}: pose accepted, EXCLUDED from fusion (face-pair fitness {fit_best:.2f} < {min_face_fit:.2f} threshold)")
             elif rmse_best_mm > max_face_rmse:
-                print(f"    frame {i:02d}: pose accepted, EXCLUDED from fusion (face-pair rmse {rmse_best_mm:.1f}mm > {max_face_rmse:.1f}mm threshold)")
+                logger.debug(f"    frame {i:02d}: pose accepted, EXCLUDED from fusion (face-pair rmse {rmse_best_mm:.1f}mm > {max_face_rmse:.1f}mm threshold)")
             else:
-                print(f"    frame {i:02d}: tier={method_best} {reason_best} ACCEPTED")
+                logger.debug(f"    frame {i:02d}: tier={method_best} {reason_best} ACCEPTED")
         else:
             if fit_best < min_fit_fusion:
-                print(f"    frame {i:02d}: pose accepted, EXCLUDED from fusion (fitness {fit_best:.2f} < {min_fit_fusion:.2f} fusion threshold)")
+                logger.debug(f"    frame {i:02d}: pose accepted, EXCLUDED from fusion (fitness {fit_best:.2f} < {min_fit_fusion:.2f} fusion threshold)")
             elif lm_res_val is not None and lm_res_val > max_res_fusion:
-                print(f"    frame {i:02d}: pose accepted, EXCLUDED from fusion (landmark residual {lm_res_val:.1f}mm > {max_res_fusion:.1f}mm fusion threshold)")
+                logger.debug(f"    frame {i:02d}: pose accepted, EXCLUDED from fusion (landmark residual {lm_res_val:.1f}mm > {max_res_fusion:.1f}mm fusion threshold)")
             else:
-                print(f"    frame {i:02d}: tier={method_best} {reason_best} ACCEPTED")
+                logger.debug(f"    frame {i:02d}: tier={method_best} {reason_best} ACCEPTED")
 
         pose_i = poses[j_best] @ T_best
         node_id = len(pose_graph.nodes)
@@ -2031,12 +2034,12 @@ def build_pose_graph_rgbd(
     total_accepted_frames = len(accepted_idx)
     avg_loop_per_frame = (n_loop / max(1, total_accepted_frames))
 
-    print("\n" + "=" * 65)
-    print("RGB-D POSE GRAPH & LOOP CLOSURE DIAGNOSTICS (Face & Cloud Metrics)")
-    print("=" * 65)
-    print(f"  Total accepted frames: {total_accepted_frames} of {n}")
-    print(f"  Total loop-closure edges formed: {n_loop}")
-    print(f"  Average loop-closure edges per frame: {avg_loop_per_frame:.2f}")
+    logger.info("\n" + "=" * 65)
+    logger.info("RGB-D POSE GRAPH & LOOP CLOSURE DIAGNOSTICS (Face & Cloud Metrics)")
+    logger.info("=" * 65)
+    logger.info(f"  Total accepted frames: {total_accepted_frames} of {n}")
+    logger.info(f"  Total loop-closure edges formed: {n_loop}")
+    logger.info(f"  Average loop-closure edges per frame: {avg_loop_per_frame:.2f}")
 
     if accepted_pairs:
         min_face_fit = getattr(cfg, "min_face_pair_fitness_for_fusion", 0.75)
@@ -2057,18 +2060,18 @@ def build_pose_graph_rgbd(
         rmse_mod = sum(1 for r in rmses if max_face_rmse < r <= max_colored_rmse_mm)
         rmse_border = sum(1 for r in rmses if r > max_colored_rmse_mm)
 
-        print(f"\n  Accepted Pair Fitness Distribution (total accepted pairs: {n_pairs}):")
-        print(f"    High (>= {min_face_fit:.2f}):        {fit_high:3d} ({fit_high/n_pairs*100.0:5.1f}%) [comfortable alignment]")
-        print(f"    Moderate [{min_fit_fusion:.2f}, {min_face_fit:.2f}): {fit_mod:3d} ({fit_mod/n_pairs*100.0:5.1f}%) [moderate alignment]")
-        print(f"    Borderline (< {min_fit_fusion:.2f}):   {fit_border:3d} ({fit_border/n_pairs*100.0:5.1f}%) [near acceptance threshold]")
-        print(f"    Fitness: mean={np.mean(fits):.3f}, median={np.median(fits):.3f}, min={np.min(fits):.3f}, max={np.max(fits):.3f}")
+        logger.info(f"\n  Accepted Pair Fitness Distribution (total accepted pairs: {n_pairs}):")
+        logger.info(f"    High (>= {min_face_fit:.2f}):        {fit_high:3d} ({fit_high/n_pairs*100.0:5.1f}%) [comfortable alignment]")
+        logger.info(f"    Moderate [{min_fit_fusion:.2f}, {min_face_fit:.2f}): {fit_mod:3d} ({fit_mod/n_pairs*100.0:5.1f}%) [moderate alignment]")
+        logger.info(f"    Borderline (< {min_fit_fusion:.2f}):   {fit_border:3d} ({fit_border/n_pairs*100.0:5.1f}%) [near acceptance threshold]")
+        logger.info(f"    Fitness: mean={np.mean(fits):.3f}, median={np.median(fits):.3f}, min={np.min(fits):.3f}, max={np.max(fits):.3f}")
 
-        print(f"\n  Accepted Pair RMSE Distribution:")
-        print(f"    Tight (<= {max_face_rmse:.1f} mm):     {rmse_tight:3d} ({rmse_tight/n_pairs*100.0:5.1f}%) [clears strict face threshold]")
-        print(f"    Moderate ({max_face_rmse:.1f}-{max_colored_rmse_mm:.1f} mm): {rmse_mod:3d} ({rmse_mod/n_pairs*100.0:5.1f}%)")
-        print(f"    Borderline (> {max_colored_rmse_mm:.1f} mm): {rmse_border:3d} ({rmse_border/n_pairs*100.0:5.1f}%) [near max RMSE limit]")
+        logger.info(f"\n  Accepted Pair RMSE Distribution:")
+        logger.info(f"    Tight (<= {max_face_rmse:.1f} mm):     {rmse_tight:3d} ({rmse_tight/n_pairs*100.0:5.1f}%) [clears strict face threshold]")
+        logger.info(f"    Moderate ({max_face_rmse:.1f}-{max_colored_rmse_mm:.1f} mm): {rmse_mod:3d} ({rmse_mod/n_pairs*100.0:5.1f}%)")
+        logger.info(f"    Borderline (> {max_colored_rmse_mm:.1f} mm): {rmse_border:3d} ({rmse_border/n_pairs*100.0:5.1f}%) [near max RMSE limit]")
         if rmses:
-            print(f"    RMSE: mean={np.mean(rmses):.2f}mm, median={np.median(rmses):.2f}mm, min={np.min(rmses):.2f}mm, max={np.max(rmses):.2f}mm")
+            logger.info(f"    RMSE: mean={np.mean(rmses):.2f}mm, median={np.median(rmses):.2f}mm, min={np.min(rmses):.2f}mm, max={np.max(rmses):.2f}mm")
 
         face_pairs = [p for p in accepted_pairs if p.get("is_face_pair", False)]
         if face_pairs:
@@ -2077,15 +2080,15 @@ def build_pose_graph_rgbd(
             fp_rmses = [p["rmse_mm"] for p in face_pairs if p["rmse_mm"] < 990.0]
             fp_clear = sum(1 for f in fp_fits if f >= min_face_fit)
             fp_border = sum(1 for f in fp_fits if min_accept_fit <= f < min_face_fit)
-            print(f"\n  Face-Region Pairs specifically (both frames upper face/head, n={n_fp}):")
-            print(f"    Clears strict threshold (>= {min_face_fit:.2f}): {fp_clear:3d} ({fp_clear/n_fp*100.0:5.1f}%)")
-            print(f"    Borderline [{min_accept_fit:.2f}, {min_face_fit:.2f}):           {fp_border:3d} ({fp_border/n_fp*100.0:5.1f}%) [excluded from face fusion]")
+            logger.info(f"\n  Face-Region Pairs specifically (both frames upper face/head, n={n_fp}):")
+            logger.info(f"    Clears strict threshold (>= {min_face_fit:.2f}): {fp_clear:3d} ({fp_clear/n_fp*100.0:5.1f}%)")
+            logger.info(f"    Borderline [{min_accept_fit:.2f}, {min_face_fit:.2f}):           {fp_border:3d} ({fp_border/n_fp*100.0:5.1f}%) [excluded from face fusion]")
             if fp_rmses:
                 fp_rmse_le = sum(1 for r in fp_rmses if r <= max_face_rmse)
-                print(f"    RMSE <= {max_face_rmse:.1f} mm:                    {fp_rmse_le:3d} ({fp_rmse_le/n_fp*100.0:5.1f}%)")
+                logger.info(f"    RMSE <= {max_face_rmse:.1f} mm:                    {fp_rmse_le:3d} ({fp_rmse_le/n_fp*100.0:5.1f}%)")
         else:
-            print("\n  Face-Region Pairs specifically: 0 accepted upper-to-upper pairs detected (frames in lower/neutral region)")
-    print("=" * 65 + "\n")
+            logger.info("\n  Face-Region Pairs specifically: 0 accepted upper-to-upper pairs detected (frames in lower/neutral region)")
+    logger.info("=" * 65 + "\n")
 
     return BuildPoseGraphResult(
         (pose_graph, node_of, diagnostics, n_odom, n_loop, pair_logs, poses, best_methods, best_scores, rejection_reasons),
@@ -2138,7 +2141,7 @@ def register_sequence_rgbd_human(
             "tier_summary_str": "0 landmark, 0 colored_icp, 0 fpfh_fallback, 0 rejected",
         }
 
-    print("\n  Running Human RGB-D Pairwise Registration with Landmark Guidance, Colored ICP & Bounded Search...")
+    logger.info("\n  Running Human RGB-D Pairwise Registration with Landmark Guidance, Colored ICP & Bounded Search...")
     pg_res = build_pose_graph_rgbd(frames, cfg)
     pose_graph, node_of, diagnostics, n_odom, n_loop, pair_logs, unopt_poses, best_methods, best_scores, rejection_reasons = pg_res
 
@@ -2162,10 +2165,10 @@ def register_sequence_rgbd_human(
             tgt_node = node_of.get(lc["target"])
             if (src_node, tgt_node) in surviving_edges:
                 unanchored_promoted = True
-                print(f"  Unanchored chain {unanchored_chain} PROMOTED to fusion eligibility via survived loop closure {lc['source']}->{lc['target']}")
+                logger.info(f"  Unanchored chain {unanchored_chain} PROMOTED to fusion eligibility via survived loop closure {lc['source']}->{lc['target']}")
                 break
 
-    print(
+    logger.info(
         f"  Pose graph: {len(pose_graph.nodes)} of {len(frames)} frames in graph, "
         f"{n_before} edges ({n_odom} primary + {n_loop} loop-closure), "
         f"{len(pose_graph.edges)} survived pruning."
@@ -2267,7 +2270,7 @@ def register_sequence_rgbd_human(
                 try:
                     res_val = float(score_str.split("residual=")[1].split("mm")[0])
                 except Exception as e:
-                    print(
+                    logger.warning(
                         f"    [fusion-fallback] Parsing landmark residual for frame {i} summary failed with "
                         f"{type(e).__name__}: {e}"
                     )

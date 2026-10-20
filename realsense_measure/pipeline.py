@@ -9,6 +9,9 @@ result before the pipeline advances to the next step.
 from __future__ import annotations
 
 import json
+import logging
+
+logger = logging.getLogger(__name__)
 from pathlib import Path
 import shutil
 import time
@@ -322,7 +325,7 @@ class ScanPipeline:
         self._clean_output_dir()
         self.target = get_target(cfg.target.name)
         self.scan_folder = get_next_scan_folder()
-        print(f"  Saving organized stage outputs to: {self.scan_folder}/")
+        logger.info(f"  Saving organized stage outputs to: {self.scan_folder}/")
 
     def _clean_output_dir(self) -> None:
         """
@@ -340,7 +343,7 @@ class ScanPipeline:
                     elif item.is_dir():
                         shutil.rmtree(item)
                 except Exception as e:
-                    print(f"  [!] Warning: Failed to remove old output item {item.name}: {e}")
+                    logger.warning(f"  [!] Warning: Failed to remove old output item {item.name}: {e}")
         out_dir.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
@@ -361,7 +364,7 @@ class ScanPipeline:
         try:
             cam = RealSenseCamera(self.cfg.camera).start()
         except StreamNegotiationError as exc:
-            print(f"\n  [ERROR] RealSense camera stream negotiation failed: {exc}")
+            logger.error(f"\n  [ERROR] RealSense camera stream negotiation failed: {exc}")
             raise
         is_human_mode = (self.cfg.registration.registration_mode == "rgbd_human") or (self.cfg.target.name in ("head", "body"))
 
@@ -374,31 +377,31 @@ class ScanPipeline:
         captured_centroids: list[np.ndarray] = []
         last_centroid: np.ndarray | None = None
 
-        print("\n" + "=" * 60)
-        print("  Stage 1: Capture")
+        logger.info("\n" + "=" * 60)
+        logger.info("  Stage 1: Capture")
         if is_human_mode:
-            print("  MODE: HUMAN 180° SCAN (RGB-D Odometry + Colored ICP)")
-            print("  OPERATOR GUIDANCE:")
-            print("    * Keep the subject still (subject rigidity is assumed).")
-            print("    * Move camera slowly in a smooth ~180° arc around the front.")
-            print("    * Maintain substantial overlap between consecutive views.")
-            print("    * Keep the subject's face/head approximately centered.")
-            print("    * Avoid sudden camera rotations or translations.")
-            print("    * Complete the 180° sweep smoothly.")
-            print(f"  AUTO-CAPTURE interval: {capture_interval:.2f}s")
-            print("  ENTER = finish (requires 2+ frames) | ESC = abort")
+            logger.info("  MODE: HUMAN 180° SCAN (RGB-D Odometry + Colored ICP)")
+            logger.info("  OPERATOR GUIDANCE:")
+            logger.info("    * Keep the subject still (subject rigidity is assumed).")
+            logger.info("    * Move camera slowly in a smooth ~180° arc around the front.")
+            logger.info("    * Maintain substantial overlap between consecutive views.")
+            logger.info("    * Keep the subject's face/head approximately centered.")
+            logger.info("    * Avoid sudden camera rotations or translations.")
+            logger.info("    * Complete the 180° sweep smoothly.")
+            logger.info(f"  AUTO-CAPTURE interval: {capture_interval:.2f}s")
+            logger.info("  ENTER = finish (requires 2+ frames) | ESC = abort")
         else:
-            print("  MODE: BOX / OBJECT SCAN (Point Cloud)")
+            logger.info("  MODE: BOX / OBJECT SCAN (Point Cloud)")
             if self.cfg.camera.auto_capture:
-                print(f"  AUTO-CAPTURE: move camera around object (interval: "
+                logger.info(f"  AUTO-CAPTURE: move camera around object (interval: "
                       f"{capture_interval:.2f}s)")
-                print("  TIP: for small or irregular objects, --manual-capture "
+                logger.info("  TIP: for small or irregular objects, --manual-capture "
                       "(press SPACE per angle) gives much more consistent results "
                       "than auto-capture.")
-                print("  ENTER = finish (requires 2+ frames) | ESC = abort")
+                logger.info("  ENTER = finish (requires 2+ frames) | ESC = abort")
             else:
-                print("  MANUAL CAPTURE: SPACE = capture frame | ENTER = finish | ESC = abort")
-        print("=" * 60)
+                logger.info("  MANUAL CAPTURE: SPACE = capture frame | ENTER = finish | ESC = abort")
+        logger.info("=" * 60)
 
         start_capture_time = time.time()
         last_capture_time = 0.0  # triggers capture on the first valid frame
@@ -413,7 +416,7 @@ class ScanPipeline:
 
         manual_roi: tuple[int, int, int, int] | None = None
         if self.cfg.target.use_manual_roi and not is_human_mode:
-            print("\n  [MANUAL ROI MODE] Acquiring initial frame for ROI selection...")
+            logger.info("\n  [MANUAL ROI MODE] Acquiring initial frame for ROI selection...")
             init_color, init_depth = None, None
             for _ in range(40):
                 init_color, init_depth, _ = cam.read_with_colorized()
@@ -421,13 +424,13 @@ class ScanPipeline:
                     break
                 time.sleep(0.05)
             if init_color is not None:
-                print("  --> Drag a rectangle around the target object in the window, then press SPACE or ENTER.")
+                logger.info("  --> Drag a rectangle around the target object in the window, then press SPACE or ENTER.")
                 manual_roi = select_roi_on_frame(init_color)
                 if manual_roi is not None:
                     rx, ry, rw, rh = manual_roi
-                    print(f"  --> Manual ROI locked: x={rx}, y={ry}, w={rw}, h={rh} px\n")
+                    logger.info(f"  --> Manual ROI locked: x={rx}, y={ry}, w={rw}, h={rh} px\n")
                 else:
-                    print("  [!] Manual ROI selection cancelled -- falling back to full-frame.\n")
+                    logger.warning("  [!] Manual ROI selection cancelled -- falling back to full-frame.\n")
 
         window_name = "Stage 1: Human 180 deg Capture" if is_human_mode else "Stage 1: D455f Capture (RGB | Depth)"
         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
@@ -440,7 +443,7 @@ class ScanPipeline:
                     # Pump GUI messages and check abort so window never freezes during frame drop
                     k = cv2.waitKey(1) & 0xFF
                     if k == 27:
-                        print("  Capture aborted by user.")
+                        logger.info("  Capture aborted by user.")
                         raise KeyboardInterrupt
                     time.sleep(0.005)
                     continue  # dropped frame — just retry
@@ -553,7 +556,7 @@ class ScanPipeline:
 
                         if is_duplicate:
                             if now - last_skip_warn_time >= 1.0:
-                                print("  ... camera hasn't moved enough, still waiting ...")
+                                logger.debug("  ... camera hasn't moved enough, still waiting ...")
                                 last_skip_warn_time = now
                         else:
                             if is_human_mode:
@@ -565,7 +568,7 @@ class ScanPipeline:
                                 )
                                 n_pts = len(rgbd_frame.pcd.points)
                                 if n_pts < self.cfg.target.min_object_points:
-                                    print(f"  Frame discarded: only {n_pts} pts in range -- check distance to subject (0.4m - 1.2m)")
+                                    logger.debug(f"  Frame discarded: only {n_pts} pts in range -- check distance to subject (0.4m - 1.2m)")
                                 else:
                                     if raw_frames:
                                         prev_frame = raw_frames[-1]
@@ -574,7 +577,7 @@ class ScanPipeline:
                                         max_jump_t = getattr(self.cfg.registration, "max_pose_jump_translation_m", 0.15)
                                         max_jump_r = getattr(self.cfg.registration, "max_pose_jump_rotation_deg", 45.0)
                                         if est_t_m > max_jump_t or est_r_deg > max_jump_r:
-                                            print(
+                                            logger.info(
                                                 f"  [!] WARNING: large motion since last frame "
                                                 f"({est_t_m * 100:.0f}cm, {est_r_deg:.0f}deg) "
                                                 f"-- consider moving slower through this section, or reduce "
@@ -587,13 +590,13 @@ class ScanPipeline:
                                     last_n_pts = n_pts
                                     last_capture_time = now
                                     last_captured_depth = depth_m.copy()
-                                    print(f"  Captured human frame {len(raw_frames):2d}: {n_pts:>6} pts with RGB-D [OK]")
+                                    logger.debug(f"  Captured human frame {len(raw_frames):2d}: {n_pts:>6} pts with RGB-D [OK]")
                             else:
                                 pcd = cam.to_point_cloud(color_bgr, depth_m, roi=manual_roi)
                                 iso_test = isolate_object(pcd, self.cfg.preprocess, self.cfg.target, last_centroid=last_centroid)
                                 n_obj_pts = len(iso_test.points)
                                 if n_obj_pts < self.cfg.target.min_object_points:
-                                    print(f"  Frame discarded: isolated to only {n_obj_pts} pts "
+                                    logger.debug(f"  Frame discarded: isolated to only {n_obj_pts} pts "
                                           f"(need >= {self.cfg.target.min_object_points}) -- "
                                           f"this angle didn't capture usable object data, keep moving")
                                 else:
@@ -614,11 +617,11 @@ class ScanPipeline:
                                     last_captured_depth = depth_m.copy()
 
                                     if is_outlier:
-                                        print(f"  Captured frame {len(raw_frames):2d}: {n_obj_pts:>5} object "
+                                        logger.debug(f"  Captured frame {len(raw_frames):2d}: {n_obj_pts:>5} object "
                                               f"pts, but {dev*100:.0f} cm from your other frames -- "
                                               f"[WARNING] this may not be the same object, keep it centered")
                                     else:
-                                        print(f"  Captured frame {len(raw_frames):2d}: "
+                                        logger.debug(f"  Captured frame {len(raw_frames):2d}: "
                                               f"{last_n_pts:>7} raw pts -> {n_obj_pts:>5} object pts [OK]")
 
                 # ---- Manual capture handling ---------------------------
@@ -632,7 +635,7 @@ class ScanPipeline:
                         )
                         n_pts = len(rgbd_frame.pcd.points)
                         if n_pts < self.cfg.target.min_object_points:
-                            print(f"  Frame discarded: only {n_pts} pts in range -- check distance to subject")
+                            logger.debug(f"  Frame discarded: only {n_pts} pts in range -- check distance to subject")
                         else:
                             if raw_frames:
                                 prev_frame = raw_frames[-1]
@@ -641,7 +644,7 @@ class ScanPipeline:
                                 max_jump_t = getattr(self.cfg.registration, "max_pose_jump_translation_m", 0.15)
                                 max_jump_r = getattr(self.cfg.registration, "max_pose_jump_rotation_deg", 45.0)
                                 if est_t_m > max_jump_t or est_r_deg > max_jump_r:
-                                    print(
+                                    logger.info(
                                         f"  [!] WARNING: large motion since last frame "
                                         f"({est_t_m * 100:.0f}cm, {est_r_deg:.0f}deg) "
                                         f"-- consider moving slower through this section, or reduce "
@@ -653,13 +656,13 @@ class ScanPipeline:
                             raw_frames.append(rgbd_frame)
                             last_n_pts = n_pts
                             last_captured_depth = depth_m.copy()
-                            print(f"  Captured human frame {len(raw_frames):2d}: {n_pts:>6} pts with RGB-D [OK]")
+                            logger.debug(f"  Captured human frame {len(raw_frames):2d}: {n_pts:>6} pts with RGB-D [OK]")
                     else:
                         pcd = cam.to_point_cloud(color_bgr, depth_m, roi=manual_roi)
                         iso_test = isolate_object(pcd, self.cfg.preprocess, self.cfg.target, last_centroid=last_centroid)
                         n_obj_pts = len(iso_test.points)
                         if n_obj_pts < self.cfg.target.min_object_points:
-                            print(f"  Frame discarded: isolated to only {n_obj_pts} pts "
+                            logger.debug(f"  Frame discarded: isolated to only {n_obj_pts} pts "
                                   f"(need >= {self.cfg.target.min_object_points}) -- "
                                   f"this angle didn't capture usable object data, try adjusting angle")
                         else:
@@ -679,32 +682,32 @@ class ScanPipeline:
                             last_captured_depth = depth_m.copy()
 
                             if is_outlier:
-                                print(f"  Captured frame {len(raw_frames):2d}: {n_obj_pts:>5} object "
+                                logger.debug(f"  Captured frame {len(raw_frames):2d}: {n_obj_pts:>5} object "
                                       f"pts, but {dev*100:.0f} cm from your other frames -- "
                                       f"[WARNING] this may not be the same object, keep it centered")
                             else:
-                                print(f"  Captured frame {len(raw_frames):2d}: "
+                                logger.debug(f"  Captured frame {len(raw_frames):2d}: "
                                       f"{last_n_pts:>7} raw pts -> {n_obj_pts:>5} object pts [OK]")
 
                 # ---- Finish / Abort keys -------------------------------
                 if key == 13:  # ENTER — finish
                     if len(raw_frames) < 2:
-                        print("  ⚠  Need at least 2 frames before finishing. "
+                        logger.warning("  ⚠  Need at least 2 frames before finishing. "
                               "Keep capturing.")
                     else:
                         elapsed = time.time() - start_capture_time
                         n_frames = len(raw_frames)
                         avg_interval = elapsed / n_frames if n_frames > 0 else 0.0
-                        print(f"\n  Capture complete — {n_frames} frames captured in "
+                        logger.info(f"\n  Capture complete — {n_frames} frames captured in "
                               f"{elapsed:.1f}s (effective avg interval: {avg_interval:.2f}s/frame).")
                         break
 
                 elif key == 27:  # ESC — abort
-                    print("  Capture aborted by user.")
+                    logger.info("  Capture aborted by user.")
                     raise KeyboardInterrupt
 
         except DeviceDisconnectedError as exc:
-            print(f"\n  [ERROR] RealSense camera disconnected during capture: {exc}")
+            logger.error(f"\n  [ERROR] RealSense camera disconnected during capture: {exc}")
             raise
         finally:
             cam.stop()
@@ -733,9 +736,9 @@ class ScanPipeline:
         list[PointCloud | RGBDFrame]
             Isolated, cleaned per-frame objects.
         """
-        print("\n" + "=" * 60)
-        print("  Stage 2: Isolating object per frame ...")
-        print("=" * 60)
+        logger.info("\n" + "=" * 60)
+        logger.info("  Stage 2: Isolating object per frame ...")
+        logger.info("=" * 60)
 
         pre_cfg = self.cfg.preprocess
         target_cfg = self.cfg.target
@@ -751,12 +754,12 @@ class ScanPipeline:
                 iso = isolate_object(pcd, pre_cfg, target_cfg, last_centroid=last_iso_centroid)
                 n_after = len(iso.points)
                 if n_after < target_cfg.min_object_points:
-                    print(f"  frame {i:02d}: {n_before:>7} pts -> {n_after:>6} pts -- "
+                    logger.debug(f"  frame {i:02d}: {n_before:>7} pts -> {n_after:>6} pts -- "
                           f"DISCARDED (< {target_cfg.min_object_points} pts, unusable object data)")
                     continue
                 last_iso_centroid = np.asarray(iso.points).mean(axis=0)
                 f.pcd = iso
-                print(f"  frame {i:02d}: {n_before:>7} pts -> {n_after:>6} pts [ACCEPTED]")
+                logger.debug(f"  frame {i:02d}: {n_before:>7} pts -> {n_after:>6} pts [ACCEPTED]")
                 isolated_rgbd.append(f)
 
             # Positional consistency: drop frames whose centroid jumps away
@@ -766,7 +769,7 @@ class ScanPipeline:
                 target_name=target_cfg.name,
             )
             for idx, dist in rejected_pos:
-                print(f"  isolated #{idx:02d}: centroid {dist:.2f} m deviation -- "
+                logger.debug(f"  isolated #{idx:02d}: centroid {dist:.2f} m deviation -- "
                       f"DISCARDED (likely background, not the object)")
             isolated_rgbd = [isolated_rgbd[i] for i in keep]
 
@@ -786,7 +789,7 @@ class ScanPipeline:
                 for i, f in enumerate(isolated_rgbd):
                     out = self.cfg.output_dir / f"frame_{i:02d}_isolated.ply"
                     o3d.io.write_point_cloud(str(out), f.pcd)
-                    print(f"  Saved: {out}")
+                    logger.info(f"  Saved: {out}")
 
             return isolated_rgbd
 
@@ -798,11 +801,11 @@ class ScanPipeline:
             iso = isolate_object(frame, pre_cfg, target_cfg, last_centroid=last_iso_centroid)
             n_after = len(iso.points)
             if n_after < target_cfg.min_object_points:
-                print(f"  frame {i:02d}: {n_before:>7} pts -> {n_after:>6} pts -- "
+                logger.debug(f"  frame {i:02d}: {n_before:>7} pts -> {n_after:>6} pts -- "
                       f"DISCARDED (< {target_cfg.min_object_points} pts, unusable object data)")
                 continue
             last_iso_centroid = np.asarray(iso.points).mean(axis=0)
-            print(f"  frame {i:02d}: {n_before:>7} pts -> {n_after:>6} pts [ACCEPTED]")
+            logger.debug(f"  frame {i:02d}: {n_before:>7} pts -> {n_after:>6} pts [ACCEPTED]")
             isolated.append(iso)
 
         # Positional consistency: a background blob can be object-sized, so size
@@ -813,7 +816,7 @@ class ScanPipeline:
             target_name=target_cfg.name,
         )
         for idx, dist in rejected_pos:
-            print(f"  isolated #{idx:02d}: centroid {dist:.2f} m from median position -- "
+            logger.debug(f"  isolated #{idx:02d}: centroid {dist:.2f} m from median position -- "
                   f"DISCARDED (likely background, not the object)")
         isolated = [isolated[i] for i in keep]
 
@@ -833,7 +836,7 @@ class ScanPipeline:
             for i, pcd in enumerate(isolated):
                 out = self.cfg.output_dir / f"frame_{i:02d}_isolated.ply"
                 o3d.io.write_point_cloud(str(out), pcd)
-                print(f"  Saved: {out}")
+                logger.info(f"  Saved: {out}")
 
         return isolated
 
@@ -857,14 +860,14 @@ class ScanPipeline:
         poses:
             List of 4x4 camera poses (or None in sequential pointcloud mode).
         """
-        print("\n" + "=" * 60)
+        logger.info("\n" + "=" * 60)
         is_human_mode = (self.cfg.registration.registration_mode == "rgbd_human") or (
             self.cfg.target.name in ("head", "body") and self.cfg.registration.registration_mode != "pointcloud"
         )
 
         if is_human_mode:
-            print("  Stage 3: Registering human frames (RGB-D Odometry + Colored ICP + Pose Graph) ...")
-            print("=" * 60)
+            logger.info("  Stage 3: Registering human frames (RGB-D Odometry + Colored ICP + Pose Graph) ...")
+            logger.info("=" * 60)
             aligned, diagnostics, poses, summary_stats = register_sequence_rgbd_human(
                 isolated_frames, self.cfg.registration
             )
@@ -875,12 +878,12 @@ class ScanPipeline:
             rejection_reasons = summary_stats.get("rejection_reasons", {})
             fusion_eligible = summary_stats.get("fusion_eligible", {})
             fusion_reasons = summary_stats.get("fusion_reasons", {})
-            print("\n" + "=" * 60)
-            print("HUMAN RGB-D REGISTRATION SUMMARY (Method Diagnostics)")
-            print("-----------------------------------------------------")
+            logger.info("\n" + "=" * 60)
+            logger.info("HUMAN RGB-D REGISTRATION SUMMARY (Method Diagnostics)")
+            logger.info("-----------------------------------------------------")
             for i, diag in enumerate(diagnostics):
                 if i == 0:
-                    print(f"    frame 00: reference frame (origin) [ACCEPTED]")
+                    logger.debug(f"    frame 00: reference frame (origin) [ACCEPTED]")
                 elif diag is not None:
                     fit, rmse, acc = diag
                     method = frame_methods.get(i, "none")
@@ -888,17 +891,17 @@ class ScanPipeline:
                     if acc:
                         if not fusion_eligible.get(i, True):
                             reason_ex = fusion_reasons.get(i, "")
-                            print(f"    frame {i:02d}: pose accepted, EXCLUDED from fusion ({reason_ex})")
+                            logger.debug(f"    frame {i:02d}: pose accepted, EXCLUDED from fusion ({reason_ex})")
                         else:
-                            print(f"    frame {i:02d}: tier={method} {score_str} ACCEPTED")
+                            logger.debug(f"    frame {i:02d}: tier={method} {score_str} ACCEPTED")
                     elif i in rejection_reasons:
-                        print(
+                        logger.info(
                             f"    frame {i:02d}: tier={method} {score_str}\n"
                             f"              REJECTED -- {rejection_reasons[i]}"
                         )
                     else:
-                        print(f"    frame {i:02d}: tier=none REJECTED")
-            print("=" * 60)
+                        logger.debug(f"    frame {i:02d}: tier=none REJECTED")
+            logger.info("=" * 60)
 
             n_accepted = summary_stats.get("accepted", sum(1 for d in diagnostics if d is not None and d[2]))
             n_total = summary_stats.get("captured", len(isolated_frames))
@@ -910,15 +913,15 @@ class ScanPipeline:
                 f"{sum(1 for m in frame_methods.values() if m == 'fpfh_fallback')} fpfh_fallback, "
                 f"{n_rejected} rejected"
             )
-            print(f"\n  Registration tier summary: {tier_summary}")
-            print(f"  Registration summary: {n_accepted} of {n_total} frames accepted into the reconstruction"
+            logger.info(f"\n  Registration tier summary: {tier_summary}")
+            logger.info(f"  Registration summary: {n_accepted} of {n_total} frames accepted into the reconstruction"
                   f" ({n_rejected} rejected -- excluded from fusion).")
             if n_total > 0 and (n_accepted / n_total) < 0.60:
-                print("  Tip: low acceptance ratio (< 60%). Try moving the camera more slowly for higher frame overlap.")
+                logger.warning("  Tip: low acceptance ratio (< 60%). Try moving the camera more slowly for higher frame overlap.")
 
             # Pairwise inspection visualization
             if self.cfg.registration.show_registration_pairs and self.cfg.show_stage_windows:
-                print("\n  Displaying pairwise registration inspection windows...")
+                logger.info("\n  Displaying pairwise registration inspection windows...")
                 for idx in range(min(2, len(isolated_frames) - 1)):
                     if isinstance(isolated_frames[idx], RGBDFrame) and isinstance(isolated_frames[idx + 1], RGBDFrame):
                         T_src_to_tgt = np.linalg.inv(poses[idx + 1]) @ poses[idx]
@@ -931,7 +934,7 @@ class ScanPipeline:
 
             # Camera trajectory visualization
             if self.cfg.registration.show_camera_trajectory and self.cfg.show_stage_windows:
-                print("\n  Displaying estimated camera trajectory...")
+                logger.info("\n  Displaying estimated camera trajectory...")
                 traj_geoms = draw_camera_trajectory(poses, scale=0.04)
                 if traj_geoms:
                     acc_clouds = [f for f, d in zip(aligned, diagnostics) if d is not None and d[2]]
@@ -943,13 +946,13 @@ class ScanPipeline:
                 for frame in colored_aligned_frames:
                     combined += frame
                 o3d.io.write_point_cloud(str(self.scan_folder / "stage3_output.ply"), combined)
-                print(f"  Saved: {self.scan_folder / 'stage3_output.ply'}")
+                logger.info(f"  Saved: {self.scan_folder / 'stage3_output.ply'}")
 
             if self.cfg.show_stage_windows:
                 rejected_indices = [i for i, d in enumerate(diagnostics) if d is not None and not d[2]]
                 if rejected_indices:
-                    print(f"\n  [!] Note: Stage 3 visualization displays all frames including rejected frame(s) {rejected_indices}.")
-                    print("      Rejected frames are excluded from Stage 4 fusion.")
+                    logger.warning(f"\n  [!] Note: Stage 3 visualization displays all frames including rejected frame(s) {rejected_indices}.")
+                    logger.info("      Rejected frames are excluded from Stage 4 fusion.")
                 screenshot_path = (self.scan_folder / "stage3_output.png") if (hasattr(self, "scan_folder") and self.scan_folder is not None) else None
                 # TASK 3: Display-only downsampled copy: saved stage3_output.ply stays full resolution
                 display_frames = prepare_display_geometry(
@@ -966,10 +969,10 @@ class ScanPipeline:
 
         # Standard box / pointcloud path:
         if self.cfg.registration.use_multiway:
-            print("  Stage 3: Registering frames (Pose Graph Multiway Registration) ...")
+            logger.info("  Stage 3: Registering frames (Pose Graph Multiway Registration) ...")
         else:
-            print("  Stage 3: Registering frames (Sequential FPFH+RANSAC -> ICP) ...")
-        print("=" * 60)
+            logger.info("  Stage 3: Registering frames (Sequential FPFH+RANSAC -> ICP) ...")
+        logger.info("=" * 60)
 
         if self.cfg.registration.use_multiway:
             aligned, diagnostics = register_sequence_multiway(isolated_frames, self.cfg.registration)
@@ -984,15 +987,15 @@ class ScanPipeline:
             status = "ACCEPTED" if accepted else "REJECTED -- excluded from fusion, consider recapturing this angle"
             if not accepted:
                 rejected_indices.append(i)
-            print(f"  frame {i:02d}: fitness={fitness:.4f}  "
+            logger.debug(f"  frame {i:02d}: fitness={fitness:.4f}  "
                   f"rmse={rmse * 1000:.3f} mm  {status}")
 
         n_accepted = sum(1 for d in diagnostics if d is not None and d[2])
         n_total = len(diagnostics)
-        print(f"\n  Registration summary: {n_accepted} of {n_total} frames accepted into the reconstruction.")
+        logger.info(f"\n  Registration summary: {n_accepted} of {n_total} frames accepted into the reconstruction.")
         if n_total > 0 and (n_accepted / n_total) < 0.70:
-            print("  Tip: low acceptance ratio (< 70%). Try moving the camera more slowly")
-            print("       or reducing --interval for higher frame overlap.")
+            logger.warning("  Tip: low acceptance ratio (< 70%). Try moving the camera more slowly")
+            logger.info("       or reducing --interval for higher frame overlap.")
 
         if self.cfg.attempt_loop_closure:
             accepted_indices = [idx for idx, (*_, acc) in enumerate(diagnostics) if acc]
@@ -1003,12 +1006,12 @@ class ScanPipeline:
                         isolated_frames[last_idx], isolated_frames[0], self.cfg.registration
                     )
                     if loop_fitness >= self.cfg.registration.min_accept_fitness:
-                        print(f"\n  Loop closure check: fitness={loop_fitness:.4f} (rmse={loop_rmse * 1000:.2f} mm) -- looks like a consistent full orbit.")
+                        logger.info(f"\n  Loop closure check: fitness={loop_fitness:.4f} (rmse={loop_rmse * 1000:.2f} mm) -- looks like a consistent full orbit.")
                     else:
-                        print(f"\n  [!] Loop closure check: low overlap (fitness={loop_fitness:.4f}) with initial frame.")
-                        print("      Drift may have accumulated over the full orbit.")
+                        logger.warning(f"\n  [!] Loop closure check: low overlap (fitness={loop_fitness:.4f}) with initial frame.")
+                        logger.info("      Drift may have accumulated over the full orbit.")
                 except Exception as exc:
-                    print(f"\n  [!] Loop closure check skipped: {exc}")
+                    logger.warning(f"\n  [!] Loop closure check skipped: {exc}")
 
         colored_aligned_frames = color_frames_distinctly(aligned)
         if hasattr(self, "scan_folder") and self.scan_folder is not None:
@@ -1016,11 +1019,11 @@ class ScanPipeline:
             for frame in colored_aligned_frames:
                 combined += frame
             o3d.io.write_point_cloud(str(self.scan_folder / "stage3_output.ply"), combined)
-            print(f"  Saved: {self.scan_folder / 'stage3_output.ply'}")
+            logger.info(f"  Saved: {self.scan_folder / 'stage3_output.ply'}")
 
         if self.cfg.show_stage_windows:
             if rejected_indices:
-                print(f"\n  [!] Note: Visualizing all frames including rejected frame(s) {rejected_indices}.")
+                logger.warning(f"\n  [!] Note: Visualizing all frames including rejected frame(s) {rejected_indices}.")
             screenshot_path = (self.scan_folder / "stage3_output.png") if (hasattr(self, "scan_folder") and self.scan_folder is not None) else None
             # TASK 3: Display-only downsampled copy: saved stage3_output.ply stays full resolution
             display_frames = prepare_display_geometry(
@@ -1068,9 +1071,9 @@ class ScanPipeline:
         o3d.geometry.PointCloud
             Fused, denoised reconstruction.
         """
-        print("\n" + "=" * 60)
-        print("  Stage 4: Fusing aligned frames ...")
-        print("=" * 60)
+        logger.info("\n" + "=" * 60)
+        logger.info("  Stage 4: Fusing aligned frames ...")
+        logger.info("=" * 60)
 
         if diagnostics is not None:
             # diagnostics entries can be None for frames rejected before pose-graph assignment
@@ -1103,7 +1106,7 @@ class ScanPipeline:
                     if fusion_eligible and i in fusion_eligible:
                         if not fusion_eligible[i]:
                             reason_ex = fusion_reasons.get(i, "stricter fusion gate")
-                            print(f"  frame {i}: pose accepted, EXCLUDED from fusion ({reason_ex})")
+                            logger.debug(f"  frame {i}: pose accepted, EXCLUDED from fusion ({reason_ex})")
                             continue
                     else:
                         fit = d[0]
@@ -1116,17 +1119,17 @@ class ScanPipeline:
                                 pass
 
                         if fit < min_fit_fusion:
-                            print(f"  frame {i}: pose accepted, EXCLUDED from fusion (fitness {fit:.2f} < {min_fit_fusion:.2f} fusion threshold)")
+                            logger.debug(f"  frame {i}: pose accepted, EXCLUDED from fusion (fitness {fit:.2f} < {min_fit_fusion:.2f} fusion threshold)")
                             continue
                         if lm_res is not None and lm_res > max_lm_res_fusion:
-                            print(f"  frame {i}: pose accepted, EXCLUDED from fusion (landmark residual {lm_res:.1f}mm > {max_lm_res_fusion:.1f}mm fusion threshold)")
+                            logger.debug(f"  frame {i}: pose accepted, EXCLUDED from fusion (landmark residual {lm_res:.1f}mm > {max_lm_res_fusion:.1f}mm fusion threshold)")
                             continue
 
                 accepted_indices.append(i)
 
             accepted_frames = [aligned_frames[i] for i in accepted_indices]
             if not accepted_frames:
-                print("  [!] Warning: No frames met acceptance criteria; falling back to frame 0.")
+                logger.warning("  [!] Warning: No frames met acceptance criteria; falling back to frame 0.")
                 accepted_frames = aligned_frames[:1]
                 accepted_indices = [0]
         else:
@@ -1135,7 +1138,7 @@ class ScanPipeline:
 
         n_skipped = len(aligned_frames) - len(accepted_frames)
         skip_msg = f" (excluded {n_skipped} rejected frame{'s' if n_skipped != 1 else ''})" if n_skipped > 0 else ""
-        print(f"  Fusing {len(accepted_frames)} accepted frame(s){skip_msg} ...")
+        logger.info(f"  Fusing {len(accepted_frames)} accepted frame(s){skip_msg} ...")
 
         # Volumetric TSDF or Point Cloud Concatenation
         if (
@@ -1145,7 +1148,7 @@ class ScanPipeline:
             and isinstance(raw_frames[0], RGBDFrame)
             and poses is not None
         ):
-            print("  Reconstruction mode: TSDF Volumetric Integration")
+            logger.info("  Reconstruction mode: TSDF Volumetric Integration")
             acc_raw = [raw_frames[i] for i in accepted_indices]
             acc_poses = [poses[i] for i in accepted_indices]
             is_human_mode = (self.cfg.registration.registration_mode == "rgbd_human") or (self.cfg.target.name in ("head", "body"))
@@ -1159,7 +1162,7 @@ class ScanPipeline:
             )
             fusion_name = "TSDF"
         else:
-            print("  Reconstruction mode: Point Cloud Concatenation")
+            logger.info("  Reconstruction mode: Point Cloud Concatenation")
             is_human_mode = (self.cfg.registration.registration_mode == "rgbd_human") or (self.cfg.target.name in ("head", "body"))
             human_voxel_size = 0.002 if is_human_mode else None
             fused = fuse_point_clouds(
@@ -1172,11 +1175,11 @@ class ScanPipeline:
             )
             fusion_name = "POINT CLOUD"
 
-        print(f"  Reconstruction:\n    method: {fusion_name}\n    points: {len(fused.points):,}")
+        logger.info(f"  Reconstruction:\n    method: {fusion_name}\n    points: {len(fused.points):,}")
 
         if hasattr(self, "scan_folder") and self.scan_folder is not None:
             o3d.io.write_point_cloud(str(self.scan_folder / "stage4_output.ply"), fused)
-            print(f"  Saved: {self.scan_folder / 'stage4_output.ply'}")
+            logger.info(f"  Saved: {self.scan_folder / 'stage4_output.ply'}")
 
         if self.cfg.show_stage_windows:
             # TASK 3: Display-only downsampled copy for the live preview window.
@@ -1198,7 +1201,7 @@ class ScanPipeline:
         if self.cfg.save_intermediate:
             out = self.cfg.output_dir / "fused.ply"
             o3d.io.write_point_cloud(str(out), fused)
-            print(f"  Saved: {out}")
+            logger.info(f"  Saved: {out}")
 
         return fused
 
@@ -1223,22 +1226,22 @@ class ScanPipeline:
         dict
             JSON-serialisable measurement result.
         """
-        print("\n" + "=" * 60)
-        print("  Stage 5: Segmenting and measuring ...")
-        print("=" * 60)
+        logger.info("\n" + "=" * 60)
+        logger.info("  Stage 5: Segmenting and measuring ...")
+        logger.info("=" * 60)
 
         segmented = self.target.segment(fused_pcd)
-        print(f"  Segmented cloud: {len(segmented.points):>7} points")
+        logger.info(f"  Segmented cloud: {len(segmented.points):>7} points")
 
         # Fast shape-plausibility pre-check (e.g. for BoxTarget or HeadTarget)
         if hasattr(self.target, "is_plausible_box"):
             is_plausible, reason = self.target.is_plausible_box(segmented)
             if not is_plausible:
-                print("\n" + "!" * 60)
-                print("  [!] NOT BOX SHAPED -- MEASUREMENT REFUSED")
-                print("  " + "=" * 56)
-                print(f"  Reason: {reason}")
-                print("!" * 60)
+                logger.info("\n" + "!" * 60)
+                logger.error("  [!] NOT BOX SHAPED -- MEASUREMENT REFUSED")
+                logger.info("  " + "=" * 56)
+                logger.info(f"  Reason: {reason}")
+                logger.info("!" * 60)
                 return {
                     "target": "box",
                     "status": "not_box_shaped",
@@ -1247,11 +1250,11 @@ class ScanPipeline:
         elif hasattr(self.target, "is_plausible_head"):
             is_plausible, reason = self.target.is_plausible_head(segmented)
             if not is_plausible:
-                print("\n" + "!" * 60)
-                print("  [!] NOT HEAD SHAPED -- MEASUREMENT REFUSED")
-                print("  " + "=" * 56)
-                print(f"  Reason: {reason}")
-                print("!" * 60)
+                logger.info("\n" + "!" * 60)
+                logger.error("  [!] NOT HEAD SHAPED -- MEASUREMENT REFUSED")
+                logger.info("  " + "=" * 56)
+                logger.info(f"  Reason: {reason}")
+                logger.info("!" * 60)
                 return {
                     "target": "head",
                     "status": "not_head_shaped",
@@ -1267,46 +1270,46 @@ class ScanPipeline:
         if result.get("target") == "head" or "cranial_envelope_3d" in result:
             cranial = result.get("cranial_envelope_3d", {})
             status = result.get("status", "unverified")
-            print(f"\n  Target : HEAD (3D Geometric Cranial Envelope)")
-            print(f"  Status : {status.upper()}")
-            print(f"  Breadth: {cranial.get('breadth_mm', 0.0):>7.1f} mm  (Left-Right lateral width)")
-            print(f"  Length : {cranial.get('length_mm', 0.0):>7.1f} mm  (Anterior-Posterior depth)")
-            print(f"  Height : {cranial.get('height_mm', 0.0):>7.1f} mm  (Superior-Inferior height)")
+            logger.info(f"\n  Target : HEAD (3D Geometric Cranial Envelope)")
+            logger.info(f"  Status : {status.upper()}")
+            logger.info(f"  Breadth: {cranial.get('breadth_mm', 0.0):>7.1f} mm  (Left-Right lateral width)")
+            logger.info(f"  Length : {cranial.get('length_mm', 0.0):>7.1f} mm  (Anterior-Posterior depth)")
+            logger.info(f"  Height : {cranial.get('height_mm', 0.0):>7.1f} mm  (Superior-Inferior height)")
             vol = result.get("volume_m3") or result.get("oriented_bbox", {}).get("volume_m3")
             est_vol = result.get("oriented_bbox", {}).get("estimated_volume_m3")
             if vol is not None:
-                print(f"  Volume : {vol * 1e6:.1f} cm^3 (validated cranial envelope volume)")
+                logger.info(f"  Volume : {vol * 1e6:.1f} cm^3 (validated cranial envelope volume)")
             elif est_vol is not None:
-                print(f"  Volume : UNVERIFIED (estimated: {est_vol * 1e6:.1f} cm^3 -- diagnostic only)")
+                logger.info(f"  Volume : UNVERIFIED (estimated: {est_vol * 1e6:.1f} cm^3 -- diagnostic only)")
             else:
-                print("  Volume : UNVERIFIED (null)")
+                logger.info("  Volume : UNVERIFIED (null)")
             diags = result.get("diagnostics", [])
             if diags:
-                print("  Diagnostics:")
+                logger.info("  Diagnostics:")
                 for d in diags:
-                    print(f"    - {d}")
+                    logger.info(f"    - {d}")
         else:
             planarity = result.get("planarity_check")
             if planarity:
-                print("\n  " + "-" * 50)
-                print("  PLANARITY CHECK (Face RMS Deviations):")
+                logger.info("\n  " + "-" * 50)
+                logger.info("  PLANARITY CHECK (Face RMS Deviations):")
                 rms_list = planarity.get("rms_deviation_mm", [])
                 if len(rms_list) == 6:
-                    print(f"    Axis 0 faces (near/far): {rms_list[0]:.2f} mm | {rms_list[1]:.2f} mm")
-                    print(f"    Axis 1 faces (near/far): {rms_list[2]:.2f} mm | {rms_list[3]:.2f} mm")
-                    print(f"    Axis 2 faces (near/far): {rms_list[4]:.2f} mm | {rms_list[5]:.2f} mm")
+                    logger.info(f"    Axis 0 faces (near/far): {rms_list[0]:.2f} mm | {rms_list[1]:.2f} mm")
+                    logger.info(f"    Axis 1 faces (near/far): {rms_list[2]:.2f} mm | {rms_list[3]:.2f} mm")
+                    logger.info(f"    Axis 2 faces (near/far): {rms_list[4]:.2f} mm | {rms_list[5]:.2f} mm")
                 else:
-                    print(f"    RMS deviations         : {rms_list}")
-                print(f"    Max Face RMS Deviation : {planarity.get('max_rms_mm', 0.0):.2f} mm (limit: 4.0 mm)")
+                    logger.info(f"    RMS deviations         : {rms_list}")
+                logger.info(f"    Max Face RMS Deviation : {planarity.get('max_rms_mm', 0.0):.2f} mm (limit: 4.0 mm)")
 
                 warning = planarity.get("warning")
                 if warning:
-                    print("\n  " + "!" * 58)
-                    print(f"  [!] WARNING: {warning.upper()}")
-                    print("  " + "!" * 58)
+                    logger.info("\n  " + "!" * 58)
+                    logger.warning(f"  [!] WARNING: {warning.upper()}")
+                    logger.info("  " + "!" * 58)
                 else:
-                    print("    Box Shape Validation   : PASS (Rigid planar box)")
-                print("  " + "-" * 50)
+                    logger.info("    Box Shape Validation   : PASS (Rigid planar box)")
+                logger.info("  " + "-" * 50)
 
             obb_info = result.get("oriented_bbox", {})
             meas_dims_m = sorted(
@@ -1334,7 +1337,7 @@ class ScanPipeline:
 
             ref_comp = result.get("reference_comparison", {})
 
-            print(f"\n  Target : {result.get('target', '?')}")
+            logger.info(f"\n  Target : {result.get('target', '?')}")
 
             def _fmt_dim_line(label: str, key: str) -> str:
                 val_mm = obb_info.get(f"{key}_m", 0.0) * 1000.0
@@ -1347,27 +1350,27 @@ class ScanPipeline:
                     line += f"  (ref: {ref_mm:5.1f} mm | error: {err_mm:4.1f} mm, {err_pct:4.1f}%)"
                 return line
 
-            print(_fmt_dim_line("Length", "length"))
-            print(_fmt_dim_line("Width", "width"))
-            print(_fmt_dim_line("Height", "height"))
+            logger.info(_fmt_dim_line("Length", "length"))
+            logger.info(_fmt_dim_line("Width", "width"))
+            logger.info(_fmt_dim_line("Height", "height"))
             vol = obb_info.get("volume_m3")
             est_vol = obb_info.get("estimated_volume_m3")
             if vol is not None:
-                print(f"  Volume : {vol * 1e6:.1f} cm^3 (validated)")
+                logger.info(f"  Volume : {vol * 1e6:.1f} cm^3 (validated)")
             elif est_vol is not None:
-                print(f"  Volume : UNVERIFIED (estimated: {est_vol * 1e6:.1f} cm^3 -- underlying dimensions unverified)")
+                logger.info(f"  Volume : UNVERIFIED (estimated: {est_vol * 1e6:.1f} cm^3 -- underlying dimensions unverified)")
             else:
-                print("  Volume : UNVERIFIED")
+                logger.info("  Volume : UNVERIFIED")
             aabb_ext = result.get("axis_aligned_bbox_extent_m", [])
             if aabb_ext:
                 ext_mm = [f"{v * 1000:.1f}" for v in aabb_ext]
-                print(f"  AABB   : {' x '.join(ext_mm)} mm (axis-aligned reference)")
+                logger.info(f"  AABB   : {' x '.join(ext_mm)} mm (axis-aligned reference)")
 
         obb_ls = obb_lineset(obb) if obb is not None else None
 
         if hasattr(self, "scan_folder") and self.scan_folder is not None:
             o3d.io.write_point_cloud(str(self.scan_folder / "stage5_output.ply"), segmented)
-            print(f"  Saved: {self.scan_folder / 'stage5_output.ply'}")
+            logger.info(f"  Saved: {self.scan_folder / 'stage5_output.ply'}")
 
         if self.cfg.show_stage_windows and obb is not None:
             # TASK 1 & 2: Display-only downsampled copy for interactive Stage 5 window.
@@ -1392,17 +1395,17 @@ class ScanPipeline:
         meas_path = self.cfg.output_dir / "measurement.json"
         with meas_path.open("w", encoding="utf-8") as fp:
             json.dump(result, fp, indent=2)
-        print(f"\n  Saved measurement: {meas_path}")
+        logger.info(f"\n  Saved measurement: {meas_path}")
 
         seg_path = self.cfg.output_dir / "segmented_object.ply"
         o3d.io.write_point_cloud(str(seg_path), segmented)
-        print(f"  Saved segmented cloud: {seg_path}")
+        logger.info(f"  Saved segmented cloud: {seg_path}")
 
         if hasattr(self, "scan_folder") and self.scan_folder is not None and meas_path.exists():
             target_meas = self.scan_folder / "measurement.json"
             if meas_path.resolve() != target_meas.resolve():
                 shutil.copy(meas_path, target_meas)
-                print(f"  Saved: {target_meas}")
+                logger.info(f"  Saved: {target_meas}")
 
         return result
 
@@ -1490,20 +1493,20 @@ class ScanPipeline:
             # Human full-body reconstruction: print a clean summary
             n_accepted = sum(1 for d in (diagnostics or []) if d is not None and d[2])
             n_total    = len(diagnostics) if diagnostics else 0
-            print("\n" + "=" * 60)
-            print("  HUMAN BODY RECONSTRUCTION COMPLETE")
-            print("  ============================")
-            print(f"  Fusion mode    : {self.cfg.fusion_method.upper()}")
-            print(f"  Frames total   : {n_total}")
-            print(f"  Frames accepted: {n_accepted}")
-            print(f"  Frames rejected: {n_total - n_accepted}")
-            print(f"  Final points   : {len(fused.points):,}")
-            print("=" * 60)
+            logger.info("\n" + "=" * 60)
+            logger.info("  HUMAN BODY RECONSTRUCTION COMPLETE")
+            logger.info("  ============================")
+            logger.info(f"  Fusion mode    : {self.cfg.fusion_method.upper()}")
+            logger.info(f"  Frames total   : {n_total}")
+            logger.info(f"  Frames accepted: {n_accepted}")
+            logger.info(f"  Frames rejected: {n_total - n_accepted}")
+            logger.info(f"  Final points   : {len(fused.points):,}")
+            logger.info("=" * 60)
 
             out = self.cfg.output_dir / "human_reconstruction.ply"
             import open3d as o3d
             o3d.io.write_point_cloud(str(out), fused)
-            print(f"  Saved: {out}")
+            logger.info(f"  Saved: {out}")
 
             result = {
                 "target": self.cfg.target.name,
@@ -1520,13 +1523,13 @@ class ScanPipeline:
             if not is_sufficient:
                 n_accepted = sum(1 for d in (diagnostics or []) if d is not None and d[2])
                 n_total    = len(diagnostics) if diagnostics else 0
-                print("\n" + "!" * 60)
-                print("  [!] SCAN INSUFFICIENT -- MEASUREMENT REFUSED")
-                print("  " + "=" * 56)
-                print("  The scan did not meet the minimum data sufficiency criteria:")
+                logger.info("\n" + "!" * 60)
+                logger.error("  [!] SCAN INSUFFICIENT -- MEASUREMENT REFUSED")
+                logger.info("  " + "=" * 56)
+                logger.info("  The scan did not meet the minimum data sufficiency criteria:")
                 for r in reasons:
-                    print(f"    - {r}")
-                print("!" * 60)
+                    logger.info(f"    - {r}")
+                logger.info("!" * 60)
 
                 result = {
                     "target": self.cfg.target.name,
@@ -1539,8 +1542,8 @@ class ScanPipeline:
             else:
                 result = self.measure(fused)
 
-        print("\n" + "=" * 60)
-        print(f"  Done. Outputs written to: {self.cfg.output_dir.resolve()}")
-        print("=" * 60 + "\n")
+        logger.info("\n" + "=" * 60)
+        logger.info(f"  Done. Outputs written to: {self.cfg.output_dir.resolve()}")
+        logger.info("=" * 60 + "\n")
 
         return result
