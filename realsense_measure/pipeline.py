@@ -18,7 +18,11 @@ import numpy as np
 import open3d as o3d
 
 from camera.frame import RGBDFrame
-from camera.realsense_capture import RealSenseCamera
+from camera.realsense_capture import (
+    DeviceDisconnectedError,
+    RealSenseCamera,
+    StreamNegotiationError,
+)
 from config import HeadCaptureConfig, PipelineConfig
 from landmarks import detect_face_landmarks_3d, project_landmarks_3d_to_pixel
 from preprocessing import isolate_object, reject_positional_outliers
@@ -354,7 +358,11 @@ class ScanPipeline:
             In rgbd_human mode: synchronized RGBDFrame instances containing color,
             depth, point clouds with normals, timestamps, and intrinsics.
         """
-        cam = RealSenseCamera(self.cfg.camera).start()
+        try:
+            cam = RealSenseCamera(self.cfg.camera).start()
+        except StreamNegotiationError as exc:
+            print(f"\n  [ERROR] RealSense camera stream negotiation failed: {exc}")
+            raise
         is_human_mode = (self.cfg.registration.registration_mode == "rgbd_human") or (self.cfg.target.name in ("head", "body"))
 
         # In human mode, use the configured human_capture_interval_s (default 3.0s) unless overridden
@@ -695,6 +703,9 @@ class ScanPipeline:
                     print("  Capture aborted by user.")
                     raise KeyboardInterrupt
 
+        except DeviceDisconnectedError as exc:
+            print(f"\n  [ERROR] RealSense camera disconnected during capture: {exc}")
+            raise
         finally:
             cam.stop()
             cv2.destroyAllWindows()

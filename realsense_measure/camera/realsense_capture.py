@@ -25,6 +25,34 @@ except ImportError:
 from config import CameraConfig, DepthVisConfig
 
 
+# ---------------------------------------------------------------------------
+# Camera Lifecycle Exceptions & Sentinels
+# ---------------------------------------------------------------------------
+
+class CameraError(RuntimeError):
+    """Base exception for RealSense camera errors."""
+    pass
+
+
+class DeviceDisconnectedError(CameraError):
+    """Raised when the RealSense camera device is disconnected, unplugged, or lost."""
+    pass
+
+
+class StreamNegotiationError(CameraError):
+    """Raised when requested stream configuration (resolution/fps) cannot be negotiated."""
+    pass
+
+
+class CameraNotStartedError(CameraError):
+    """Raised when an operation is attempted on an unstarted or uninitialized camera."""
+    pass
+
+
+# Distinct sentinel for callers that check sentinel returns instead of catching exceptions
+DEVICE_DISCONNECTED = object()
+
+
 
 class RealSenseCamera:
     """
@@ -106,6 +134,24 @@ class RealSenseCamera:
     # Lifecycle
     # ------------------------------------------------------------------
 
+    def is_device_connected(self) -> bool:
+        """Check whether the RealSense device is still physically connected."""
+        if rs is None:
+            return False
+        if self._profile is not None:
+            try:
+                dev = self._profile.get_device()
+                # Querying device info verifies device connection over USB
+                _ = dev.get_info(rs.camera_info.name)
+                return True
+            except Exception:
+                pass
+        try:
+            ctx = rs.context()
+            return len(ctx.query_devices()) > 0
+        except Exception:
+            return False
+
     def start(self) -> "RealSenseCamera":
         """
         Start the RealSense pipeline and populate calibration attributes.
@@ -117,32 +163,52 @@ class RealSenseCamera:
         Returns
         -------
         RealSenseCamera
+
+        Raises
+        ------
+        StreamNegotiationError:
+            If stream negotiation fails (unsupported resolution/fps or device error).
         """
-        self._profile = self.pipeline.start(self.rs_config)
+        try:
+            self._profile = self.pipeline.start(self.rs_config)
 
-        # ---- depth scale (converts raw u16 units to metres) -------------
-        depth_sensor = (
-            self._profile
-            .get_device()
-            .first_depth_sensor()
-        )
-        self.depth_scale = depth_sensor.get_depth_scale()
+            # ---- depth scale (converts raw u16 units to metres) -------------
+            depth_sensor = (
+                self._profile
+                .get_device()
+                .first_depth_sensor()
+            )
+            self.depth_scale = depth_sensor.get_depth_scale()
 
-        # ---- colour-stream intrinsics → Open3D format -------------------
-        stream_profile = (
-            self._profile
-            .get_stream(rs.stream.color)
-            .as_video_stream_profile()
-        )
-        intr = stream_profile.get_intrinsics()
-        self.intrinsics_o3d = o3d.camera.PinholeCameraIntrinsic(
-            width=intr.width,
-            height=intr.height,
-            fx=intr.fx,
-            fy=intr.fy,
-            cx=intr.ppx,
-            cy=intr.ppy,
-        )
+            # ---- colour-stream intrinsics → Open3D format -------------------
+            stream_profile = (
+                self._profile
+                .get_stream(rs.stream.color)
+                .as_video_stream_profile()
+            )
+            intr = stream_profile.get_intrinsics()
+            self.intrinsics_o3d = o3d.camera.PinholeCameraIntrinsic(
+                width=intr.width,
+                height=intr.height,
+                fx=intr.fx,
+                fy=intr.fy,
+                cx=intr.ppx,
+                cy=intr.ppy,
+            )
+        except Exception as exc:
+            # Clean up and reset attributes so depth_scale/intrinsics_o3d are never left half-set
+            if self._profile is not None:
+                try:
+                    self.pipeline.stop()
+                except Exception:
+                    pass
+            self._profile = None
+            self.depth_scale = None
+            self.intrinsics_o3d = None
+            raise StreamNegotiationError(
+                f"Failed to negotiate and start RealSense stream with requested configuration "
+                f"(resolution={self.cfg.width}x{self.cfg.height}, fps={self.cfg.fps}): {exc}"
+            ) from exc
 
         print("\n  RealSense D455 Camera Calibration:")
         print(f"    RGB resolution:   {intr.width}x{intr.height}")
@@ -167,8 +233,16 @@ class RealSenseCamera:
         return self
 
     def stop(self) -> None:
-        """Stop the RealSense pipeline and release device resources."""
-        self.pipeline.stop()
+        """Stop the RealSense pipeline and release device resources safely."""
+        if self._profile is not None:
+            try:
+                self.pipeline.stop()
+            except Exception:
+                pass
+            finally:
+                self._profile = None
+                self.depth_scale = None
+                self.intrinsics_o3d = None
 
     # Context-manager support so the camera can be used in a `with` block.
     def __enter__(self) -> "RealSenseCamera":
@@ -228,6 +302,64 @@ class RealSenseCamera:
 
         return frame
 
+    def _wait_for_frames(self, timeout_ms: int = 2000) -> "rs.composite_frame | None":
+        """
+        Wait for frames from the RealSense pipeline with disconnect detection.
+
+        Distinguishes a normal frame drop / timeout (returns None) from a genuine
+        device disconnect or hardware error (raises DeviceDisconnectedError).
+
+        Returns
+        -------
+        rs.composite_frame | None
+            Frame set if acquired, or None on a normal timeout / dropped frame.
+
+        Raises
+        ------
+        CameraNotStartedError
+            If camera has not been started.
+        DeviceDisconnectedError
+            If camera disconnected, unplugged, or encountered fatal hardware error.
+        """
+        if self._profile is None or self.pipeline is None:
+            raise CameraNotStartedError(
+                "RealSense camera is not started. Call start() before reading frames."
+            )
+
+        try:
+            return self.pipeline.wait_for_frames(timeout_ms=timeout_ms)
+        except Exception as exc:
+            msg = str(exc).lower()
+            is_timeout_msg = any(term in msg for term in ("didn't arrive", "timed out", "timeout"))
+            is_disconnect_msg = any(
+                term in msg for term in (
+                    "disconnect", "no device", "device not connected",
+                    "backend-error", "hardware error", "resource busy",
+                    "resource unavailable", "input/output error", "failed to set power",
+                    "access denied", "device removed", "broken pipe"
+                )
+            )
+
+            # 1. Explicit disconnect / hardware loss indicators
+            if is_disconnect_msg:
+                raise DeviceDisconnectedError(f"RealSense camera disconnected: {exc}") from exc
+
+            # 2. Timeout message: verify if device is actually still connected
+            if is_timeout_msg:
+                if not self.is_device_connected():
+                    raise DeviceDisconnectedError(
+                        f"RealSense camera disconnected (timeout with no device connected: {exc})"
+                    ) from exc
+                # Genuine frame drop on a connected camera -> signal dropped frame
+                return None
+
+            # 3. Broader pyrealsense2 / OS exceptions (e.g. communication failure)
+            if not self.is_device_connected():
+                raise DeviceDisconnectedError(f"RealSense camera disconnected: {exc}") from exc
+
+            # Fatal device / driver error
+            raise DeviceDisconnectedError(f"RealSense camera error: {exc}") from exc
+
     # ------------------------------------------------------------------
     # Public frame API
     # ------------------------------------------------------------------
@@ -250,10 +382,21 @@ class RealSenseCamera:
         depth_m:
             HxW float32 array of depth values in metres (0 where invalid),
             or ``None`` on a dropped frame.
+
+        Raises
+        ------
+        CameraNotStartedError:
+            If start() was not called or depth_scale is uninitialized.
+        DeviceDisconnectedError:
+            If the RealSense device disconnected.
         """
-        try:
-            frames = self.pipeline.wait_for_frames(timeout_ms=2000)
-        except RuntimeError:
+        if self._profile is None or self.depth_scale is None:
+            raise CameraNotStartedError(
+                "RealSense camera is not started or depth scale is uninitialized. Call start() before reading."
+            )
+
+        frames = self._wait_for_frames(timeout_ms=2000)
+        if frames is None:
             return None, None
 
         aligned = self.align.process(frames)
@@ -345,10 +488,21 @@ class RealSenseCamera:
             HxW float32 depth in metres, or None on a dropped frame.
         depth_color_bgr:
             HxWx3 uint8 SDK-colorized depth image, or None on a dropped frame.
+
+        Raises
+        ------
+        CameraNotStartedError:
+            If start() was not called or depth_scale is uninitialized.
+        DeviceDisconnectedError:
+            If the RealSense device disconnected.
         """
-        try:
-            frames = self.pipeline.wait_for_frames(timeout_ms=2000)
-        except RuntimeError:
+        if self._profile is None or self.depth_scale is None:
+            raise CameraNotStartedError(
+                "RealSense camera is not started or depth scale is uninitialized. Call start() before reading."
+            )
+
+        frames = self._wait_for_frames(timeout_ms=2000)
+        if frames is None:
             return None, None, None
 
         aligned = self.align.process(frames)
@@ -378,7 +532,7 @@ class RealSenseCamera:
             import cv2  # local import — only needed when shapes diverge
             h, w = color_bgr.shape[:2]
             depth_m        = cv2.resize(depth_m,        (w, h),
-                                        interpolation=cv2.INTER_NEAREST)
+                                         interpolation=cv2.INTER_NEAREST)
             depth_color_bgr = cv2.resize(depth_color_bgr, (w, h),
                                          interpolation=cv2.INTER_NEAREST)
 
@@ -407,7 +561,18 @@ class RealSenseCamera:
         o3d.geometry.PointCloud
             Coloured point cloud in the camera's coordinate frame, flipped
             to Open3D's display convention (Y-up, Z-toward-viewer).
+
+        Raises
+        ------
+        CameraNotStartedError:
+            If intrinsics_o3d is None (camera unstarted or start failed).
         """
+        if self.intrinsics_o3d is None:
+            raise CameraNotStartedError(
+                "Camera intrinsics (intrinsics_o3d) are uninitialized. "
+                "Ensure start() completed successfully before calling to_point_cloud()."
+            )
+
         # BGR → RGB (Open3D expects RGB)
         color_rgb = np.ascontiguousarray(color_bgr[:, :, ::-1])
 
@@ -473,7 +638,18 @@ class RealSenseCamera:
         -------
         RGBDFrame
             Complete frame ready for pipeline processing.
+
+        Raises
+        ------
+        CameraNotStartedError:
+            If intrinsics_o3d is None (camera unstarted or start failed).
         """
+        if self.intrinsics_o3d is None:
+            raise CameraNotStartedError(
+                "Camera intrinsics (intrinsics_o3d) are uninitialized. "
+                "Ensure start() completed successfully before calling create_rgbd_frame()."
+            )
+
         import time
         from camera.frame import RGBDFrame
 
