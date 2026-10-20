@@ -761,8 +761,11 @@ def register_frame_pair_landmark_guided(
                                     f"-- falling through to Tier 2"
                                 )
                                 return np.eye(4), 0.0, float("inf"), "fpfh_crosscheck_failed", float(residual_mm)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        print(
+                            f"      [fusion-fallback] FPFH cross-check failed with "
+                            f"{type(e).__name__}: {e}"
+                        )
 
                 # Tightened Colored ICP refinement specifically for landmark seed
                 src_temp = copy.deepcopy(source_pcd)
@@ -789,7 +792,11 @@ def register_frame_pair_landmark_guided(
                         TransformationEstimationForColoredICP(lambda_geometric=cfg.colored_icp_lambda_geom),
                         colored_criteria,
                     )
-                except Exception:
+                except Exception as e:
+                    print(
+                        f"      [fusion-fallback] Colored ICP refinement for landmark seed failed with "
+                        f"{type(e).__name__}: {e} -- falling back to point-to-plane ICP"
+                    )
                     icp_result = _icp_refine(source_pcd, target_pcd, init_T, cfg)
                 return (
                     icp_result.transformation,
@@ -831,12 +838,16 @@ def register_against_candidates(
         return None
 
     best: tuple[np.ndarray, float, float] | None = None
-    for candidate in candidates:
+    for idx, candidate in enumerate(candidates):
         if candidate is None or len(candidate.points) < 10:
             continue
         try:
             transform, fitness, rmse = register_frame_pair(new_frame, candidate, cfg)
-        except Exception:
+        except Exception as e:
+            print(
+                f"  [fusion-fallback] Candidate {idx} registration failed with "
+                f"{type(e).__name__}: {e}"
+            )
             continue
         if best is None or fitness > best[1]:
             best = (transform, fitness, rmse)
@@ -960,7 +971,11 @@ def build_pose_graph(
         for j in window:
             try:
                 T, fit, rmse = register_frame_pair(frames[i], frames[j], cfg)
-            except Exception:
+            except Exception as e:
+                print(
+                    f"  [fusion-fallback] Pose-graph pair registration ({i} -> {j}) failed with "
+                    f"{type(e).__name__}: {e}"
+                )
                 continue
             results.append((j, T, fit, rmse))
 
@@ -1199,8 +1214,11 @@ def register_rgbd_pair(
                 # Seed downstream refinement with coarse landmark transform if not immediately accepted
                 if lm_rot <= cfg.max_rotation_deg_per_frame and lm_trans <= (cfg.max_translation_m_per_frame * 1000.0):
                     init_trans = lm_T
-        except Exception:
-            pass
+        except Exception as e:
+            print(
+                f"  [fusion-fallback] Landmark-guided stage for pair {pair_str} failed with "
+                f"{type(e).__name__}: {e}"
+            )
 
     # Check overlap before invoking RGB-D odometry or Colored ICP
     if not overlap_ok:
@@ -1315,6 +1333,10 @@ def register_rgbd_pair(
             rot_colored = 0.0
             trans_colored = 0.0
         except Exception as exc:
+            print(
+                f"  [fusion-fallback] Colored ICP stage for pair {pair_str} failed with "
+                f"{type(exc).__name__}: {exc}"
+            )
             colored_status = f"ERROR ({exc})"
             T_colored = init_trans
             fit_colored = 0.0
@@ -1349,7 +1371,10 @@ def register_rgbd_pair(
                 f"fitness={fb_fit:.2f} (src={fb_fit_src:.2f}) rmse={fb_rmse * 1000.0:.1f}mm",
             )
     except Exception as exc:
-        pass
+        print(
+            f"  [fusion-fallback] Geometric FPFH fallback for pair {pair_str} failed with "
+            f"{type(exc).__name__}: {exc}"
+        )
 
     src_center_y = float(src_pcd.get_axis_aligned_bounding_box().get_center()[1])
     region_str = "lower (neck/shoulder)" if src_center_y > 0.0 else "upper (face/head)"
@@ -1839,8 +1864,11 @@ def build_pose_graph_rgbd(
         if "residual=" in reason_best:
             try:
                 lm_res_val = float(reason_best.split("residual=")[1].split("mm")[0])
-            except Exception:
-                pass
+            except Exception as e:
+                print(
+                    f"    [fusion-fallback] Parsing landmark residual for frame {i} failed with "
+                    f"{type(e).__name__}: {e}"
+                )
 
         rmse_best_mm = rmse_best * 1000.0 if np.isfinite(rmse_best) else 999.0
 
@@ -2145,8 +2173,11 @@ def register_sequence_rgbd_human(
             if "residual=" in score_str:
                 try:
                     res_val = float(score_str.split("residual=")[1].split("mm")[0])
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(
+                        f"    [fusion-fallback] Parsing landmark residual for frame {i} summary failed with "
+                        f"{type(e).__name__}: {e}"
+                    )
 
             src_is_upper = is_upper_face_frame(frames[i], face_y_thresh)
             # Find primary candidate target for frame i
