@@ -42,6 +42,7 @@ import copy
 
 import numpy as np
 import open3d as o3d
+from scipy.spatial.distance import cdist
 from open3d.pipelines.odometry import (
     OdometryOption,
     RGBDOdometryJacobianFromColorTerm,
@@ -195,13 +196,14 @@ def evaluate_point_set_geometry(
     if not np.all(np.isfinite(pts_arr)):
         return False, f"{label} contains non-finite coordinates", {}
 
-    # Check for repeated / nearly coincident points
-    unique_pts: list[np.ndarray] = []
-    for p in pts_arr:
-        if not any(float(np.linalg.norm(p - u)) < min_unique_dist_m for u in unique_pts):
-            unique_pts.append(p)
+    # Check for repeated / nearly coincident points using vectorized pairwise distances
+    dists = cdist(pts_arr, pts_arr)
+    kept = np.zeros(n_pts, dtype=bool)
+    for i in range(n_pts):
+        if not np.any(kept & (dists[i] < min_unique_dist_m)):
+            kept[i] = True
 
-    n_unique = len(unique_pts)
+    n_unique = int(np.count_nonzero(kept))
     if n_unique < min_unique_count:
         return (
             False,
@@ -210,8 +212,6 @@ def evaluate_point_set_geometry(
         )
 
     # Maximum pairwise distance (spread / diameter)
-    diffs = pts_arr[:, None, :] - pts_arr[None, :, :]
-    dists = np.linalg.norm(diffs, axis=2)
     max_dist = float(np.max(dists))
     if max_dist < min_spread_m:
         return (

@@ -415,3 +415,35 @@ def test_10_disable_conditioning_gate_via_config(default_cfg, well_distributed_l
         register_frame_pair_landmark_guided(pcd, color, depth, pcd, color, depth, intr, default_cfg)
 
     assert mock_rigid.call_count == 1, "Kabsch should be called when check is explicitly disabled"
+
+
+def test_11_vectorized_duplicate_detection_known_pair():
+    """
+    Case 11: Vectorized duplicate detection correctly identifies known duplicate pairs.
+    Tests known duplicate points closer than min_unique_dist_m to confirm exact semantics.
+    """
+    # 5 points with points 0 and 1 being known duplicates (< 0.5 mm apart)
+    pts_with_duplicate = np.array([
+        [0.000, 0.000, 0.60],
+        [0.0002, 0.0001, 0.60],  # duplicate of point 0 (< 5 mm)
+        [0.050, 0.000, 0.60],
+        [0.000, 0.050, 0.60],
+        [-0.050, 0.000, 0.60],
+    ])
+    is_valid, reason, metrics = evaluate_point_set_geometry(pts_with_duplicate, min_unique_dist_m=0.005)
+    assert is_valid, f"Expected 4 distinct landmarks to be valid, got: {reason}"
+    assert metrics["n_unique"] == 4.0
+
+    # 5 points with 3 duplicates of point 0 (only 3 unique points total, below min_unique_count=4)
+    pts_insufficient_unique = np.array([
+        [0.000, 0.000, 0.60],
+        [0.0001, 0.0000, 0.60],  # dup of 0
+        [0.0000, 0.0002, 0.60],  # dup of 0
+        [0.050, 0.000, 0.60],    # unique pt 2
+        [0.000, 0.050, 0.60],    # unique pt 3
+    ])
+    is_valid_bad, reason_bad, metrics_bad = evaluate_point_set_geometry(pts_insufficient_unique, min_unique_dist_m=0.005)
+    assert not is_valid_bad
+    assert "insufficient unique landmarks" in reason_bad
+    assert metrics_bad["n_unique"] == 3.0
+
