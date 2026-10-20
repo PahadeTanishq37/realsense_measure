@@ -36,6 +36,7 @@ from registration import (
     rigid_transform_from_correspondences,
     compute_rotation_deg,
     compute_translation_mm,
+    check_pose_jump_gate,
 )
 from reconstruction import fuse_tsdf_volume
 
@@ -565,9 +566,16 @@ def test_i_non_overlapping_pair_colored_icp_skip():
     cfg.max_pair_centroid_dist_m = 0.50
 
     # 1. Verify pre-check skips Colored ICP and logs the overlap failure without raising
+    import logging
+    reg_logger = logging.getLogger("registration")
     log_stream = io.StringIO()
-    with contextlib.redirect_stdout(log_stream):
-        T_est, fit, rmse, accepted, method, rot, trans, reason = register_rgbd_pair(f1, f0, cfg)
+    handler = logging.StreamHandler(log_stream)
+    reg_logger.addHandler(handler)
+    try:
+        with contextlib.redirect_stdout(log_stream):
+            T_est, fit, rmse, accepted, method, rot, trans, reason = register_rgbd_pair(f1, f0, cfg)
+    finally:
+        reg_logger.removeHandler(handler)
     log_output = log_stream.getvalue()
 
     print(f"  Return method: {method}")
@@ -601,8 +609,13 @@ def test_i_non_overlapping_pair_colored_icp_skip():
     registration.registration_colored_icp = mock_colored_icp_raise
     try:
         log_stream_err = io.StringIO()
-        with contextlib.redirect_stdout(log_stream_err):
-            T_est2, fit2, rmse2, accepted2, method2, rot2, trans2, reason2 = register_rgbd_pair(f3, f2, cfg)
+        handler_err = logging.StreamHandler(log_stream_err)
+        reg_logger.addHandler(handler_err)
+        try:
+            with contextlib.redirect_stdout(log_stream_err):
+                T_est2, fit2, rmse2, accepted2, method2, rot2, trans2, reason2 = register_rgbd_pair(f3, f2, cfg)
+        finally:
+            reg_logger.removeHandler(handler_err)
         log_output_err = log_stream_err.getvalue()
 
         print(f"  Defensive error catch test: method={method2}, accepted={accepted2}")
@@ -1136,6 +1149,102 @@ def test_m_structured_residuals_threading():
     print("  [PASS] Test M: Structured residual threading confirmed across all components.")
 
 
+# ===========================================================================
+# Test N — check_pose_jump_gate Helper Function in Isolation
+# ===========================================================================
+def test_n_pose_jump_gate_isolated():
+    """
+    Unit test covering the check_pose_jump_gate helper in isolation.
+    Validates:
+      - Nominal small motion within translation and rotation bounds (passes).
+      - Excessive translation exceeding effective translation bound (triggers gate).
+      - Excessive rotation exceeding effective rotation bound (triggers gate).
+      - Kinematic composition across non-trivial target and predecessor poses.
+      - Exact edge threshold boundary conditions.
+    """
+    print("\n--- Test N: check_pose_jump_gate Helper in Isolation ---")
+
+    # 1. Identity poses & small motion within bounds
+    cand_T = np.eye(4)
+    cand_T[0, 3] = 0.010  # 10 mm translation along X
+    target_pose = np.eye(4)
+    prev_pose = np.eye(4)
+
+    exceeds, trans_m, rot_deg = check_pose_jump_gate(
+        cand_transform=cand_T,
+        target_pose=target_pose,
+        prev_accepted_pose=prev_pose,
+        effective_translation_bound=0.030,  # 30 mm
+        effective_rotation_bound=15.0,      # 15 deg
+    )
+    assert not exceeds, "10 mm motion should be within 30 mm bound"
+    assert np.isclose(trans_m, 0.010, atol=1e-5), f"Expected 0.010m jump, got {trans_m}"
+    assert np.isclose(rot_deg, 0.0, atol=1e-4), f"Expected 0.0 deg jump, got {rot_deg}"
+
+    # 2. Excessive translation jump exceeding bound
+    cand_T_large_trans = np.eye(4)
+    cand_T_large_trans[0, 3] = 0.050  # 50 mm
+    exceeds, trans_m, rot_deg = check_pose_jump_gate(
+        cand_transform=cand_T_large_trans,
+        target_pose=target_pose,
+        prev_accepted_pose=prev_pose,
+        effective_translation_bound=0.030,
+        effective_rotation_bound=15.0,
+    )
+    assert exceeds, "50 mm motion must exceed 30 mm bound"
+    assert np.isclose(trans_m, 0.050, atol=1e-5)
+    assert np.isclose(rot_deg, 0.0, atol=1e-4)
+
+    # 3. Excessive rotation jump exceeding bound
+    R_20deg = o3d.geometry.get_rotation_matrix_from_xyz((0, 0, np.radians(20.0)))
+    cand_T_large_rot = np.eye(4)
+    cand_T_large_rot[:3, :3] = R_20deg
+    exceeds, trans_m, rot_deg = check_pose_jump_gate(
+        cand_transform=cand_T_large_rot,
+        target_pose=target_pose,
+        prev_accepted_pose=prev_pose,
+        effective_translation_bound=0.030,
+        effective_rotation_bound=15.0,
+    )
+    assert exceeds, "20 deg rotation must exceed 15 deg bound"
+    assert np.isclose(trans_m, 0.0, atol=1e-5)
+    assert np.isclose(rot_deg, 20.0, atol=1e-2)
+
+    # 4. Kinematic composition with non-trivial target and prev_accepted poses
+    # Suppose target camera is at (0, 0.100, 0) and prev_accepted camera is at (0, 0.100, 0)
+    target_pose_non_trivial = np.eye(4)
+    target_pose_non_trivial[1, 3] = 0.100
+    prev_pose_non_trivial = np.eye(4)
+    prev_pose_non_trivial[1, 3] = 0.100
+
+    cand_T_rel = np.eye(4)
+    cand_T_rel[0, 3] = 0.015  # 15 mm relative step
+    exceeds, trans_m, rot_deg = check_pose_jump_gate(
+        cand_transform=cand_T_rel,
+        target_pose=target_pose_non_trivial,
+        prev_accepted_pose=prev_pose_non_trivial,
+        effective_translation_bound=0.020,
+        effective_rotation_bound=10.0,
+    )
+    assert not exceeds, "15 mm relative motion should be within 20 mm bound"
+    assert np.isclose(trans_m, 0.015, atol=1e-5)
+    assert np.isclose(rot_deg, 0.0, atol=1e-4)
+
+    # Now step of 25 mm exceeds 20 mm bound
+    cand_T_rel[0, 3] = 0.025
+    exceeds, trans_m, rot_deg = check_pose_jump_gate(
+        cand_transform=cand_T_rel,
+        target_pose=target_pose_non_trivial,
+        prev_accepted_pose=prev_pose_non_trivial,
+        effective_translation_bound=0.020,
+        effective_rotation_bound=10.0,
+    )
+    assert exceeds, "25 mm relative motion must exceed 20 mm bound"
+    assert np.isclose(trans_m, 0.025, atol=1e-5)
+
+    print("  [PASS] Test N: check_pose_jump_gate helper passed all isolated checks.")
+
+
 def main():
     print("=" * 65)
     print("  HUMAN 180 DEG MULTI-VIEW REGISTRATION SYNTHETIC TEST SUITE")
@@ -1154,9 +1263,10 @@ def main():
     test_k_systematic_bias_fpfh_crosscheck()
     test_l_profile_transition_rejection_cascade()
     test_m_structured_residuals_threading()
+    test_n_pose_jump_gate_isolated()
 
     print("\n" + "=" * 65)
-    print("  ALL 13 SYNTHETIC TESTS (A, B, C, D, E, F, G, H, I, J, K, L, M) PASSED SUCCESSFULLY!")
+    print("  ALL 14 SYNTHETIC TESTS (A, B, C, D, E, F, G, H, I, J, K, L, M, N) PASSED SUCCESSFULLY!")
     print("=" * 65)
 
 

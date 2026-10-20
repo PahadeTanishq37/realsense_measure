@@ -1495,6 +1495,540 @@ def _call_register_pair(src, dst, cfg, initial_guess=None, is_bridge=False):
     return register_rgbd_pair(src, dst, cfg, initial_guess=initial_guess, is_bridge=is_bridge)
 
 
+def check_pose_jump_gate(
+    cand_transform: np.ndarray,
+    target_pose: np.ndarray,
+    prev_accepted_pose: np.ndarray,
+    effective_translation_bound: float,
+    effective_rotation_bound: float,
+) -> tuple[bool, float, float]:
+    """
+    Check if a candidate pairwise transform causes an unphysically large pose jump
+    relative to the previously accepted camera pose.
+
+    Returns
+    -------
+    (exceeds_jump, jump_trans_m, jump_rot_deg)
+    """
+    cand_pose = target_pose @ cand_transform
+    delta_pose = np.linalg.inv(prev_accepted_pose) @ cand_pose
+    jump_trans_m = float(np.linalg.norm(delta_pose[:3, 3]))
+    jump_rot_deg = float(compute_rotation_deg(delta_pose[:3, :3]))
+    exceeds_jump = (jump_trans_m > effective_translation_bound or jump_rot_deg > effective_rotation_bound)
+    return exceeds_jump, jump_trans_m, jump_rot_deg
+
+
+def find_candidate_pairs(
+    i: int,
+    frames: list[RGBDFrame],
+    accepted_idx: list[int],
+    poses: dict[int, np.ndarray],
+    cfg: RegistrationConfig,
+    last_rel_trans: np.ndarray | None,
+    frames_since_accepted: int,
+    effective_translation_bound: float,
+    effective_rotation_bound: float,
+    face_y_thresh: float,
+) -> tuple[list[tuple], list[dict], list[dict]]:
+    """
+    Find candidate pairs for frame i against preceding accepted frames in the search window.
+
+    Returns
+    -------
+    (candidates, misleading_candidates, pair_logs)
+    """
+    src_is_upper = is_upper_face_frame(frames[i], face_y_thresh)
+    src_cy = (
+        float(frames[i].pcd.get_axis_aligned_bounding_box().get_center()[1])
+        if (hasattr(frames[i], "pcd") and frames[i].pcd is not None and frames[i].pcd.has_points())
+        else 0.0
+    )
+
+    window = accepted_idx[-(cfg.search_accepted_window + 1):]
+    target_indices = []
+    for idx in reversed(window):
+        if idx not in target_indices:
+            target_indices.append(idx)
+    if 0 not in target_indices:
+        target_indices.append(0)
+
+    candidates = []
+    misleading_candidates = []
+    pair_logs = []
+
+    prev_accepted_idx = accepted_idx[-1]
+    prev_accepted_pose = poses[prev_accepted_idx]
+
+    for j in target_indices:
+        tgt_is_upper = is_upper_face_frame(frames[j], face_y_thresh)
+        tgt_cy = (
+            float(frames[j].pcd.get_axis_aligned_bounding_box().get_center()[1])
+            if (hasattr(frames[j], "pcd") and frames[j].pcd is not None and frames[j].pcd.has_points())
+            else 0.0
+        )
+        is_face_pair = (src_is_upper and tgt_is_upper)
+
+        init_guess = np.eye(4)
+        if j == prev_accepted_idx and frames_since_accepted == 0 and last_rel_trans is not None:
+            rot_p = compute_rotation_deg(last_rel_trans)
+            trans_p_mm = compute_translation_mm(last_rel_trans)
+            if rot_p <= cfg.max_rotation_deg_per_frame and trans_p_mm <= (cfg.max_translation_m_per_frame * 1000.0):
+                init_guess = last_rel_trans.copy()
+
+        res = _call_register_pair(frames[i], frames[j], cfg, initial_guess=init_guess, is_bridge=False)
+        T, fit, rmse, accepted, method, rot, trans, reason = res
+        res_residual = getattr(res, "residual_mm", None)
+        if res_residual is None and "residual=" in reason:
+            try:
+                res_residual = float(reason.split("residual=")[1].split("mm")[0])
+            except Exception:
+                pass
+
+        # Post-registration physical-plausibility check (scaled by frames elapsed)
+        exceeds_jump, jump_trans_m, jump_rot_deg = (False, 0.0, 0.0)
+        if accepted:
+            exceeds_jump, jump_trans_m, jump_rot_deg = check_pose_jump_gate(
+                T, poses[j], prev_accepted_pose,
+                effective_translation_bound, effective_rotation_bound,
+            )
+            if exceeds_jump:
+                misleading_candidates.append({
+                    "target": j,
+                    "T": T,
+                    "fitness": fit,
+                    "rmse": rmse,
+                    "rot": rot,
+                    "trans": trans,
+                    "method": method,
+                    "residual_mm": res_residual,
+                    "score_str": reason,
+                    "jump_trans_m": jump_trans_m,
+                    "jump_rot_deg": jump_rot_deg,
+                    "allowed_trans_m": effective_translation_bound,
+                    "allowed_rot_deg": effective_rotation_bound,
+                    "frames_since_accepted": frames_since_accepted,
+                })
+
+        pair_logs.append({
+            "source": i,
+            "target": j,
+            "success": accepted and not exceeds_jump,
+            "method": method,
+            "fitness": fit,
+            "rmse_mm": rmse * 1000.0 if np.isfinite(rmse) else 999.0,
+            "rotation_deg": rot,
+            "translation_mm": trans,
+            "residual_mm": res_residual,
+            "reason": (
+                f"pose jump ({jump_trans_m:.2f}m/{jump_rot_deg:.1f}deg) > allowed ({effective_translation_bound:.2f}m/{effective_rotation_bound:.1f}deg)"
+                if exceeds_jump else reason
+            ),
+            "jump_trans_m": jump_trans_m,
+            "jump_rot_deg": jump_rot_deg,
+            "is_face_pair": is_face_pair,
+            "src_center_y": src_cy,
+            "tgt_center_y": tgt_cy,
+        })
+
+        if accepted and not exceeds_jump:
+            logger.debug(f"    pair {i:02d} -> {j:02d}: tier={method} {reason} ACCEPTED")
+            candidates.append((j, T, fit, rmse, rot, trans, method, reason, res_residual))
+        elif accepted and exceeds_jump:
+            logger.debug(
+                f"    pair {i:02d} -> {j:02d}: tier={method} {reason} "
+                f"REJECTED -- pose jump ({jump_trans_m:.2f}m/{jump_rot_deg:.1f}deg) exceeds plausible motion "
+                f"(bound {effective_translation_bound:.2f}m/{effective_rotation_bound:.1f}deg, scaled for {frames_since_accepted} "
+                f"frames since last accept)"
+            )
+        else:
+            logger.debug(f"    pair {i:02d} -> {j:02d}: tier=none REJECTED ({reason})")
+
+    return candidates, misleading_candidates, pair_logs
+
+
+def recover_bridge_buffer(
+    i: int,
+    frames: list[RGBDFrame],
+    accepted_idx: list[int],
+    poses: dict[int, np.ndarray],
+    pose_graph: PoseGraph,
+    node_of: dict[int, int],
+    cfg: RegistrationConfig,
+    bridge_buffer: list[dict],
+    active_unanchored_chain: list[int],
+    promotable_unanchored_chain: list[int],
+    all_unanchored_nodes: list[int],
+    bridge_edges_info: list[tuple[int, int, int]],
+    frame_hops: dict[int, int],
+    composed_to_anchor: dict[int, np.ndarray],
+    diagnostics: list,
+    best_methods: dict[int, str],
+    best_scores: dict[int, str],
+    best_residuals: dict[int, float | None],
+    rejection_reasons: dict[int, str],
+    frame_states: dict[int, str],
+    pair_logs: list[dict],
+) -> None:
+    """
+    Attempt bounded recovery using bridge buffer or unanchored odometry when all window candidates fail.
+    """
+    enable_recovery = getattr(cfg, "enable_bounded_recovery", True)
+    if not enable_recovery:
+        best_prev = pair_logs[-1] if pair_logs else {}
+        diagnostics[i] = (best_prev.get("fitness", 0.0), best_prev.get("rmse_mm", float("inf")) / 1000.0, False)
+        best_methods[i] = "none"
+        best_scores[i] = ""
+        best_residuals[i] = None
+        logger.debug(f"    frame {i:02d}: tier=none REJECTED")
+        frame_states[i] = "REJECTED"
+        return
+
+    # Determine predecessor to link against
+    if bridge_buffer:
+        pred_idx = bridge_buffer[-1]["frame_idx"]
+        anchor_idx = bridge_buffer[-1]["anchor_idx"]
+        hop = bridge_buffer[-1]["hop"] + 1
+        prev_T_to_anchor = bridge_buffer[-1]["T_to_anchor"]
+    elif active_unanchored_chain:
+        pred_idx = active_unanchored_chain[-1]
+        anchor_idx = accepted_idx[-1]
+        hop = frame_hops.get(pred_idx, len(active_unanchored_chain)) + 1
+        prev_T_to_anchor = composed_to_anchor.get(pred_idx, np.eye(4))
+    else:
+        pred_idx = accepted_idx[-1]
+        anchor_idx = pred_idx
+        hop = 1
+        prev_T_to_anchor = np.eye(4)
+
+    # Attempt local registration against predecessor
+    res_local = _call_register_pair(frames[i], frames[pred_idx], cfg, is_bridge=True)
+    T_loc, fit_loc, rmse_loc, acc_loc, meth_loc, rot_loc, trans_loc, reason_loc = res_local
+
+    if not acc_loc:
+        bridge_buffer.clear()
+        active_unanchored_chain.clear()
+        promotable_unanchored_chain.clear()
+        diagnostics[i] = (fit_loc, rmse_loc, False)
+        best_methods[i] = "none"
+        best_scores[i] = ""
+        best_residuals[i] = None
+        rejection_reasons[i] = f"local bridge link {i}->{pred_idx} failed ({reason_loc})"
+        frame_states[i] = "REJECTED"
+        logger.debug(f"    frame {i:02d}: local bridge link {i}->{pred_idx} REJECTED ({reason_loc})")
+        return
+
+    # Local link succeeded: check kinematic jump of composed transform from anchor
+    T_to_anchor_cand = prev_T_to_anchor @ T_loc
+    cand_pose = poses[anchor_idx] @ T_to_anchor_cand
+
+    effective_trans_bound = min(
+        cfg.max_pose_jump_translation_m * (1 + hop),
+        cfg.max_pose_jump_translation_m * 6.0
+    )
+    effective_rot_bound = min(
+        cfg.max_pose_jump_rotation_deg * (1 + hop),
+        cfg.max_pose_jump_rotation_deg * 6.0
+    )
+
+    exceeds_jump, jump_trans_m, jump_rot_deg = check_pose_jump_gate(
+        T_to_anchor_cand, poses[anchor_idx], poses[anchor_idx],
+        effective_trans_bound, effective_rot_bound
+    )
+
+    if exceeds_jump:
+        bridge_buffer.clear()
+        active_unanchored_chain.clear()
+        promotable_unanchored_chain.clear()
+        diagnostics[i] = (fit_loc, rmse_loc, False)
+        best_methods[i] = meth_loc
+        best_scores[i] = reason_loc
+        best_residuals[i] = getattr(res_local, "residual_mm", None)
+        rejection_msg = (
+            f"REJECTED -- pose jump ({jump_trans_m:.2f}m/{jump_rot_deg:.1f}deg) exceeds plausible motion "
+            f"(bound {effective_trans_bound:.2f}m/{effective_rot_bound:.1f}deg, scaled for {hop} hops)"
+        )
+        rejection_reasons[i] = rejection_msg
+        frame_states[i] = "REJECTED"
+        logger.debug(f"    frame {i:02d}: {rejection_msg}")
+        return
+
+    # Kinematic check passed!
+    max_buf_size = getattr(cfg, "max_bridge_buffer_size", 2)
+    if len(bridge_buffer) < max_buf_size and not active_unanchored_chain:
+        bridge_buffer.append({
+            "frame_idx": i,
+            "target_idx": pred_idx,
+            "T_local": T_loc,
+            "T_to_anchor": T_to_anchor_cand,
+            "anchor_idx": anchor_idx,
+            "fitness": fit_loc,
+            "rmse": rmse_loc,
+            "method": meth_loc,
+            "reason": reason_loc,
+            "residual_mm": getattr(res_local, "residual_mm", None),
+            "hop": hop,
+        })
+        diagnostics[i] = (fit_loc, rmse_loc, False)
+        frame_states[i] = "PROVISIONAL_BRIDGE"
+        best_methods[i] = meth_loc
+        best_scores[i] = reason_loc
+        best_residuals[i] = getattr(res_local, "residual_mm", None)
+        logger.debug(f"    frame {i:02d}: tier={meth_loc} PROVISIONAL_BRIDGE (hop={hop}, buffered={len(bridge_buffer)}/{max_buf_size})")
+        return
+    else:
+        # Buffer capacity reached (or continuing unanchored chain).
+        for b in bridge_buffer:
+            b_idx = b["frame_idx"]
+            b_pose = poses[b["anchor_idx"]] @ b["T_to_anchor"]
+            b_node_id = len(pose_graph.nodes)
+            pose_graph.nodes.append(PoseGraphNode(b_pose))
+            node_of[b_idx] = b_node_id
+            poses[b_idx] = b_pose
+            diagnostics[b_idx] = (b["fitness"], b["rmse"], False)
+            frame_states[b_idx] = "PROMOTED_BRIDGE"
+            best_methods[b_idx] = b["method"]
+            best_scores[b_idx] = b["reason"]
+            best_residuals[b_idx] = b.get("residual_mm")
+            b_info = get_information_matrix(frames[b_idx].pcd, frames[b["target_idx"]].pcd, b["T_local"], cfg)
+            b_info_scaled = b_info * (1.0 / (1.0 + b["hop"]))
+            pose_graph.edges.append(
+                PoseGraphEdge(node_of[b_idx], node_of[b["target_idx"]], b["T_local"], b_info_scaled, uncertain=True)
+            )
+            bridge_edges_info.append((b_idx, b["target_idx"], b["hop"]))
+        bridge_buffer.clear()
+
+        pose_i = poses[pred_idx] @ T_loc
+        node_id = len(pose_graph.nodes)
+        pose_graph.nodes.append(PoseGraphNode(pose_i))
+        node_of[i] = node_id
+        poses[i] = pose_i
+        diagnostics[i] = (fit_loc, rmse_loc, True)
+        frame_states[i] = "UNANCHORED_ODOMETRY"
+        best_methods[i] = meth_loc
+        best_scores[i] = reason_loc
+        best_residuals[i] = getattr(res_local, "residual_mm", None)
+        info = get_information_matrix(frames[i].pcd, frames[pred_idx].pcd, T_loc, cfg)
+        info_scaled = info * (1.0 / (1.0 + hop))
+        pose_graph.edges.append(
+            PoseGraphEdge(node_id, node_of[pred_idx], T_loc, info_scaled, uncertain=True)
+        )
+        bridge_edges_info.append((i, pred_idx, hop))
+        active_unanchored_chain.append(i)
+        promotable_unanchored_chain.append(i)
+        all_unanchored_nodes.append(i)
+        frame_hops[i] = hop
+        composed_to_anchor[i] = T_to_anchor_cand
+        logger.debug(f"    frame {i:02d}: tier={meth_loc} UNANCHORED_ODOMETRY (hop={hop}, node={node_id})")
+        return
+
+
+def commit_accepted_pair(
+    i: int,
+    frames: list[RGBDFrame],
+    candidates: list[tuple],
+    prev_accepted_idx: int,
+    poses: dict[int, np.ndarray],
+    pose_graph: PoseGraph,
+    node_of: dict[int, int],
+    cfg: RegistrationConfig,
+    bridge_buffer: list[dict],
+    active_unanchored_chain: list[int],
+    promotable_unanchored_chain: list[int],
+    bridge_edges_info: list[tuple[int, int, int]],
+    potential_loop_closures: list[dict],
+    frame_hops: dict[int, int],
+    pair_logs: list[dict],
+    diagnostics: list,
+    best_methods: dict[int, str],
+    best_scores: dict[int, str],
+    best_residuals: dict[int, float | None],
+    rejection_reasons: dict[int, str],
+    frame_states: dict[int, str],
+    n_odom: int,
+    n_loop: int,
+    face_y_thresh: float,
+    frames_since_accepted: int = 0,
+) -> tuple[int, int, np.ndarray | None, bool]:
+    """
+    Commit an accepted candidate pair to the pose graph and update tracking state.
+
+    Returns
+    -------
+    (n_odom, n_loop, last_rel_trans, accepted)
+    """
+    seq_candidates = [c for c in candidates if c[0] == prev_accepted_idx]
+    if seq_candidates:
+        j_best, T_best, fit_best, rmse_best, rot_best, trans_best, method_best, reason_best, res_best = seq_candidates[0]
+        last_rel_trans = T_best.copy() if frames_since_accepted == 0 else None
+    else:
+        j_best, T_best, fit_best, rmse_best, rot_best, trans_best, method_best, reason_best, res_best = max(
+            candidates, key=lambda c: c[2]
+        )
+        last_rel_trans = None
+
+    frame_state_i = "DIRECT_ACCEPTED"
+    res_crosscheck = None
+    if bridge_buffer:
+        b_head = bridge_buffer[-1]
+        res_crosscheck = _call_register_pair(frames[i], frames[b_head["frame_idx"]], cfg, is_bridge=True)
+        if res_crosscheck[3]:
+            T_loc_cross = res_crosscheck[0]
+            T_comp_to_anchor = b_head["T_to_anchor"] @ T_loc_cross
+            anchor_idx = b_head["anchor_idx"]
+            if j_best == anchor_idx:
+                T_dir_to_anchor = T_best
+            else:
+                T_dir_to_anchor = np.linalg.inv(poses[anchor_idx]) @ poses[j_best] @ T_best
+
+            delta_T = np.linalg.inv(T_dir_to_anchor) @ T_comp_to_anchor
+            trans_disagree = float(np.linalg.norm(delta_T[:3, 3]))
+            rot_disagree = float(compute_rotation_deg(delta_T[:3, :3]))
+            max_trans_cross = getattr(cfg, "max_bridge_crosscheck_trans_m", 0.020)
+            max_rot_cross = getattr(cfg, "max_bridge_crosscheck_rot_deg", 10.0)
+
+            if trans_disagree <= max_trans_cross and rot_disagree <= max_rot_cross:
+                logger.debug(f"    frame {i:02d}: independent bridge cross-check PASSED (trans disagree {trans_disagree*1000.0:.1f}mm <= {max_trans_cross*1000.0:.1f}mm, rot {rot_disagree:.1f}deg <= {max_rot_cross:.1f}deg)")
+                for b in bridge_buffer:
+                    b_idx = b["frame_idx"]
+                    b_pose = poses[b["anchor_idx"]] @ b["T_to_anchor"]
+                    b_node_id = len(pose_graph.nodes)
+                    pose_graph.nodes.append(PoseGraphNode(b_pose))
+                    node_of[b_idx] = b_node_id
+                    poses[b_idx] = b_pose
+                    diagnostics[b_idx] = (b["fitness"], b["rmse"], False)
+                    frame_states[b_idx] = "PROMOTED_BRIDGE"
+                    best_methods[b_idx] = b["method"]
+                    best_scores[b_idx] = b["reason"]
+                    best_residuals[b_idx] = b.get("residual_mm")
+                    b_info = get_information_matrix(frames[b_idx].pcd, frames[b["target_idx"]].pcd, b["T_local"], cfg)
+                    b_info_scaled = b_info * (1.0 / (1.0 + b["hop"]))
+                    pose_graph.edges.append(
+                        PoseGraphEdge(node_of[b_idx], node_of[b["target_idx"]], b["T_local"], b_info_scaled, uncertain=True)
+                    )
+                    bridge_edges_info.append((b_idx, b["target_idx"], b["hop"]))
+                bridge_buffer.clear()
+                frame_state_i = "TERMINAL_RECOVERED"
+            else:
+                logger.debug(f"    frame {i:02d}: independent bridge cross-check FAILED (trans disagree {trans_disagree*1000.0:.1f}mm > {max_trans_cross*1000.0:.1f}mm or rot {rot_disagree:.1f}deg > {max_rot_cross:.1f}deg)")
+                bridge_buffer.clear()
+                diagnostics[i] = (fit_best, rmse_best, False)
+                best_methods[i] = method_best
+                best_scores[i] = reason_best
+                best_residuals[i] = res_best
+                rejection_reasons[i] = f"REJECTED -- independent bridge cross-check failed: trans disagree {trans_disagree*1000.0:.1f}mm > {max_trans_cross*1000.0:.1f}mm or rot {rot_disagree:.1f}deg > {max_rot_cross:.1f}deg"
+                frame_states[i] = "REJECTED"
+                return n_odom, n_loop, None, False
+        else:
+            bridge_buffer.clear()
+            frame_state_i = "DIRECT_ACCEPTED"
+    else:
+        frame_state_i = "DIRECT_ACCEPTED"
+
+    best_methods[i] = method_best
+    best_scores[i] = reason_best
+    best_residuals[i] = res_best
+    frame_states[i] = frame_state_i
+
+    # Mark primary candidate in pair_logs for frame i
+    for pl in pair_logs:
+        if pl["source"] == i:
+            pl["is_primary"] = (pl["target"] == j_best)
+
+    # Fusion eligibility check (secondary stricter gate for Stage 4 fusion)
+    min_fit_fusion = getattr(cfg, "min_fitness_for_fusion", 0.60)
+    max_res_fusion = getattr(cfg, "max_landmark_residual_for_fusion_mm", 5.0)
+    min_face_fit = getattr(cfg, "min_face_pair_fitness_for_fusion", 0.75)
+    max_face_rmse = getattr(cfg, "max_face_pair_rmse_for_fusion_mm", 4.0)
+
+    src_is_upper = is_upper_face_frame(frames[i], face_y_thresh)
+    best_tgt_is_upper = is_upper_face_frame(frames[j_best], face_y_thresh)
+    best_is_face_pair = (src_is_upper and best_tgt_is_upper)
+
+    lm_res_val = res_best
+    if lm_res_val is None and "residual=" in reason_best:
+        try:
+            lm_res_val = float(reason_best.split("residual=")[1].split("mm")[0])
+        except Exception as e:
+            logger.warning(
+                f"    [fusion-fallback] Parsing landmark residual for frame {i} failed with "
+                f"{type(e).__name__}: {e}"
+            )
+
+    rmse_best_mm = rmse_best * 1000.0 if np.isfinite(rmse_best) else 999.0
+
+    if best_is_face_pair:
+        if fit_best < min_face_fit:
+            logger.debug(f"    frame {i:02d}: pose accepted, EXCLUDED from fusion (face-pair fitness {fit_best:.2f} < {min_face_fit:.2f} threshold)")
+        elif rmse_best_mm > max_face_rmse:
+            logger.debug(f"    frame {i:02d}: pose accepted, EXCLUDED from fusion (face-pair rmse {rmse_best_mm:.1f}mm > {max_face_rmse:.1f}mm threshold)")
+        else:
+            logger.debug(f"    frame {i:02d}: tier={method_best} {reason_best} ACCEPTED")
+    else:
+        if fit_best < min_fit_fusion:
+            logger.debug(f"    frame {i:02d}: pose accepted, EXCLUDED from fusion (fitness {fit_best:.2f} < {min_fit_fusion:.2f} fusion threshold)")
+        elif lm_res_val is not None and lm_res_val > max_res_fusion:
+            logger.debug(f"    frame {i:02d}: pose accepted, EXCLUDED from fusion (landmark residual {lm_res_val:.1f}mm > {max_res_fusion:.1f}mm fusion threshold)")
+        else:
+            logger.debug(f"    frame {i:02d}: tier={method_best} {reason_best} ACCEPTED")
+
+    pose_i = poses[j_best] @ T_best
+    node_id = len(pose_graph.nodes)
+    pose_graph.nodes.append(PoseGraphNode(pose_i))
+    node_of[i] = node_id
+    poses[i] = pose_i
+
+    # Add edges: primary sequential candidate is certain (odometry);
+    # other non-consecutive candidates are uncertain (loop closures) and must satisfy min_loop_closure_fitness.
+    min_loop_fit = getattr(cfg, "min_loop_closure_fitness", 0.65)
+    for c in candidates:
+        j, T, fit, rmse, rot, trans, method, reason = c[:8]
+        certain = (j == j_best)
+        if not certain and fit < min_loop_fit:
+            continue
+        info = get_information_matrix(frames[i].pcd, frames[j].pcd, T, cfg)
+        pose_graph.edges.append(
+            PoseGraphEdge(node_id, node_of[j], T, info, uncertain=not certain)
+        )
+        if certain:
+            n_odom += 1
+        else:
+            n_loop += 1
+            if promotable_unanchored_chain and (i in promotable_unanchored_chain or j in promotable_unanchored_chain):
+                potential_loop_closures.append({"source": i, "target": j, "fitness": fit, "rmse": rmse})
+
+    # If terminal recovered, also add bridge edge to buffer head with uncertain=True and scaled info
+    if frame_state_i == "TERMINAL_RECOVERED" and res_crosscheck is not None and res_crosscheck[3]:
+        head_idx = b_head["frame_idx"]
+        b_hop = b_head["hop"] + 1
+        br_info = get_information_matrix(frames[i].pcd, frames[head_idx].pcd, res_crosscheck[0], cfg)
+        br_info_scaled = br_info * (1.0 / (1.0 + b_hop))
+        pose_graph.edges.append(
+            PoseGraphEdge(node_id, node_of[head_idx], res_crosscheck[0], br_info_scaled, uncertain=True)
+        )
+        bridge_edges_info.append((i, head_idx, b_hop))
+
+    # If active unanchored chain exists, check if frame i connects to the unanchored chain head
+    if active_unanchored_chain and active_unanchored_chain[-1] in node_of and i not in active_unanchored_chain:
+        last_u = active_unanchored_chain[-1]
+        res_u = _call_register_pair(frames[i], frames[last_u], cfg, is_bridge=True)
+        if res_u[3] and res_u[1] >= min_loop_fit:
+            u_hop = frame_hops.get(last_u, 1) + 1
+            u_info = get_information_matrix(frames[i].pcd, frames[last_u].pcd, res_u[0], cfg)
+            u_info_scaled = u_info * (1.0 / (1.0 + u_hop))
+            pose_graph.edges.append(
+                PoseGraphEdge(node_id, node_of[last_u], res_u[0], u_info_scaled, uncertain=True)
+            )
+            n_loop += 1
+            bridge_edges_info.append((i, last_u, u_hop))
+            potential_loop_closures.append({"source": i, "target": j_best, "fitness": fit_best, "rmse": rmse_best})
+        else:
+            promotable_unanchored_chain.clear()
+        active_unanchored_chain.clear()
+
+    diagnostics[i] = (fit_best, rmse_best, True)
+    return n_odom, n_loop, last_rel_trans, True
+
+
 def build_pose_graph_rgbd(
     frames: list[RGBDFrame],
     cfg: RegistrationConfig,
@@ -1537,30 +2071,8 @@ def build_pose_graph_rgbd(
     composed_to_anchor: dict[int, np.ndarray] = {0: np.eye(4)}
 
     for i in range(1, n):
-        # Region classification for source frame i
         face_y_thresh = getattr(cfg, "face_region_center_y_threshold_m", 0.0)
-        src_is_upper = is_upper_face_frame(frames[i], face_y_thresh)
-        src_cy = (
-            float(frames[i].pcd.get_axis_aligned_bounding_box().get_center()[1])
-            if (hasattr(frames[i], "pcd") and frames[i].pcd is not None and frames[i].pcd.has_points())
-            else 0.0
-        )
-
-        # Multi-candidate strategy: check preceding accepted frames in the search window
-        # AND frame 0 (the anchor reference) to pick whichever gives higher inlier fitness.
-        window = accepted_idx[-(cfg.search_accepted_window + 1):]
-        target_indices = []
-        for idx in reversed(window):
-            if idx not in target_indices:
-                target_indices.append(idx)
-        if 0 not in target_indices:
-            target_indices.append(0)
-
-        candidates = []
-        misleading_candidates = []
-
         prev_accepted_idx = accepted_idx[-1]
-        prev_accepted_pose = poses[prev_accepted_idx]
 
         effective_translation_bound = min(
             cfg.max_pose_jump_translation_m * (1 + frames_since_accepted),
@@ -1571,99 +2083,15 @@ def build_pose_graph_rgbd(
             cfg.max_pose_jump_rotation_deg * 6.0
         )
 
-        for j in target_indices:
-            tgt_is_upper = is_upper_face_frame(frames[j], face_y_thresh)
-            tgt_cy = (
-                float(frames[j].pcd.get_axis_aligned_bounding_box().get_center()[1])
-                if (hasattr(frames[j], "pcd") and frames[j].pcd is not None and frames[j].pcd.has_points())
-                else 0.0
-            )
-            is_face_pair = (src_is_upper and tgt_is_upper)
-
-            init_guess = np.eye(4)
-            if j == prev_accepted_idx and frames_since_accepted == 0 and last_rel_trans is not None:
-                rot_p = compute_rotation_deg(last_rel_trans)
-                trans_p_mm = compute_translation_mm(last_rel_trans)
-                if rot_p <= cfg.max_rotation_deg_per_frame and trans_p_mm <= (cfg.max_translation_m_per_frame * 1000.0):
-                    init_guess = last_rel_trans.copy()
-
-            res = _call_register_pair(frames[i], frames[j], cfg, initial_guess=init_guess, is_bridge=False)
-            T, fit, rmse, accepted, method, rot, trans, reason = res
-            res_residual = getattr(res, "residual_mm", None)
-            if res_residual is None and "residual=" in reason:
-                try:
-                    res_residual = float(reason.split("residual=")[1].split("mm")[0])
-                except Exception:
-                    pass
-
-            # Post-registration physical-plausibility check (scaled by frames elapsed)
-            exceeds_jump = False
-            jump_trans_m = 0.0
-            jump_rot_deg = 0.0
-
-            if accepted:
-                cand_pose = poses[j] @ T
-                delta_pose = np.linalg.inv(prev_accepted_pose) @ cand_pose
-                jump_trans_m = float(np.linalg.norm(delta_pose[:3, 3]))
-                jump_rot_deg = float(compute_rotation_deg(delta_pose[:3, :3]))
-
-                if jump_trans_m > effective_translation_bound or jump_rot_deg > effective_rotation_bound:
-                    exceeds_jump = True
-                    misleading_candidates.append({
-                        "target": j,
-                        "T": T,
-                        "fitness": fit,
-                        "rmse": rmse,
-                        "rot": rot,
-                        "trans": trans,
-                        "method": method,
-                        "residual_mm": res_residual,
-                        "score_str": reason,
-                        "jump_trans_m": jump_trans_m,
-                        "jump_rot_deg": jump_rot_deg,
-                        "allowed_trans_m": effective_translation_bound,
-                        "allowed_rot_deg": effective_rotation_bound,
-                        "frames_since_accepted": frames_since_accepted,
-                    })
-
-            pair_logs.append({
-                "source": i,
-                "target": j,
-                "success": accepted and not exceeds_jump,
-                "method": method,
-                "fitness": fit,
-                "rmse_mm": rmse * 1000.0 if np.isfinite(rmse) else 999.0,
-                "rotation_deg": rot,
-                "translation_mm": trans,
-                "residual_mm": res_residual,
-                "reason": (
-                    f"pose jump ({jump_trans_m:.2f}m/{jump_rot_deg:.1f}deg) > allowed ({effective_translation_bound:.2f}m/{effective_rotation_bound:.1f}deg)"
-                    if exceeds_jump else reason
-                ),
-                "jump_trans_m": jump_trans_m,
-                "jump_rot_deg": jump_rot_deg,
-                "is_face_pair": is_face_pair,
-                "src_center_y": src_cy,
-                "tgt_center_y": tgt_cy,
-            })
-
-            # Print pair log with exact tier and score
-            if accepted and not exceeds_jump:
-                logger.debug(f"    pair {i:02d} -> {j:02d}: tier={method} {reason} ACCEPTED")
-                candidates.append((j, T, fit, rmse, rot, trans, method, reason, res_residual))
-            elif accepted and exceeds_jump:
-                logger.debug(
-                    f"    pair {i:02d} -> {j:02d}: tier={method} {reason} "
-                    f"REJECTED -- pose jump ({jump_trans_m:.2f}m/{jump_rot_deg:.1f}deg) exceeds plausible motion "
-                    f"(bound {effective_translation_bound:.2f}m/{effective_rotation_bound:.1f}deg, scaled for {frames_since_accepted} "
-                    f"frames since last accept)"
-                )
-            else:
-                logger.debug(f"    pair {i:02d} -> {j:02d}: tier=none REJECTED ({reason})")
+        candidates, misleading_candidates, pair_logs_i = find_candidate_pairs(
+            i, frames, accepted_idx, poses, cfg,
+            last_rel_trans, frames_since_accepted,
+            effective_translation_bound, effective_rotation_bound,
+            face_y_thresh,
+        )
+        pair_logs.extend(pair_logs_i)
 
         if not candidates:
-            # If candidates were rejected due to excessive pose jump, this is a physical motion violation,
-            # not a tracking loss gap. Reject and do not attempt bridging.
             if misleading_candidates:
                 frames_since_accepted += 1
                 last_rel_trans = None
@@ -1687,347 +2115,33 @@ def build_pose_graph_rgbd(
                 )
                 continue
 
-            # All candidates in the window failed: check if bounded recovery is enabled
-            enable_recovery = getattr(cfg, "enable_bounded_recovery", True)
-            if not enable_recovery:
-                frames_since_accepted += 1
-                last_rel_trans = None
-                best_prev = pair_logs[-1] if pair_logs else {}
-                diagnostics[i] = (best_prev.get("fitness", 0.0), best_prev.get("rmse_mm", float("inf")) / 1000.0, False)
-                best_methods[i] = "none"
-                best_scores[i] = ""
-                best_residuals[i] = None
-                logger.debug(f"    frame {i:02d}: tier=none REJECTED")
-                frame_states[i] = "REJECTED"
-                continue
-
             # Bounded recovery path
-            # Determine predecessor to link against
-            if bridge_buffer:
-                pred_idx = bridge_buffer[-1]["frame_idx"]
-                anchor_idx = bridge_buffer[-1]["anchor_idx"]
-                hop = bridge_buffer[-1]["hop"] + 1
-                prev_T_to_anchor = bridge_buffer[-1]["T_to_anchor"]
-            elif active_unanchored_chain:
-                pred_idx = active_unanchored_chain[-1]
-                anchor_idx = accepted_idx[-1]
-                hop = frame_hops.get(pred_idx, len(active_unanchored_chain)) + 1
-                prev_T_to_anchor = composed_to_anchor.get(pred_idx, np.eye(4))
-            else:
-                pred_idx = accepted_idx[-1]
-                anchor_idx = pred_idx
-                hop = 1
-                prev_T_to_anchor = np.eye(4)
-
-            # Attempt local registration against predecessor
-            res_local = _call_register_pair(frames[i], frames[pred_idx], cfg, is_bridge=True)
-            T_loc, fit_loc, rmse_loc, acc_loc, meth_loc, rot_loc, trans_loc, reason_loc = res_local
-
-            if not acc_loc:
-                # Local link broken: clear buffer and terminate active unanchored chain to prevent reusing stale transforms
-                bridge_buffer.clear()
-                active_unanchored_chain.clear()
-                promotable_unanchored_chain.clear()
-                frames_since_accepted += 1
-                last_rel_trans = None
-                diagnostics[i] = (fit_loc, rmse_loc, False)
-                best_methods[i] = "none"
-                best_scores[i] = ""
-                best_residuals[i] = None
-                rejection_reasons[i] = f"local bridge link {i}->{pred_idx} failed ({reason_loc})"
-                frame_states[i] = "REJECTED"
-                logger.debug(f"    frame {i:02d}: local bridge link {i}->{pred_idx} REJECTED ({reason_loc})")
-                continue
-
-            # Local link succeeded: check kinematic jump of composed transform from anchor
-            T_to_anchor_cand = prev_T_to_anchor @ T_loc
-            cand_pose = poses[anchor_idx] @ T_to_anchor_cand
-            delta_pose = np.linalg.inv(poses[anchor_idx]) @ cand_pose
-            jump_trans_m = float(np.linalg.norm(delta_pose[:3, 3]))
-            jump_rot_deg = float(compute_rotation_deg(delta_pose[:3, :3]))
-
-            effective_trans_bound = min(
-                cfg.max_pose_jump_translation_m * (1 + hop),
-                cfg.max_pose_jump_translation_m * 6.0
+            recover_bridge_buffer(
+                i, frames, accepted_idx, poses, pose_graph, node_of, cfg,
+                bridge_buffer, active_unanchored_chain, promotable_unanchored_chain,
+                all_unanchored_nodes, bridge_edges_info, frame_hops, composed_to_anchor,
+                diagnostics, best_methods, best_scores, best_residuals, rejection_reasons,
+                frame_states, pair_logs,
             )
-            effective_rot_bound = min(
-                cfg.max_pose_jump_rotation_deg * (1 + hop),
-                cfg.max_pose_jump_rotation_deg * 6.0
-            )
-
-            if jump_trans_m > effective_trans_bound or jump_rot_deg > effective_rot_bound:
-                # Pose jump exceeds motion bounds: reject, clear buffer, and terminate unanchored chain
-                bridge_buffer.clear()
-                active_unanchored_chain.clear()
-                promotable_unanchored_chain.clear()
-                frames_since_accepted += 1
-                last_rel_trans = None
-                diagnostics[i] = (fit_loc, rmse_loc, False)
-                best_methods[i] = meth_loc
-                best_scores[i] = reason_loc
-                best_residuals[i] = getattr(res_local, "residual_mm", None)
-                rejection_msg = (
-                    f"REJECTED -- pose jump ({jump_trans_m:.2f}m/{jump_rot_deg:.1f}deg) exceeds plausible motion "
-                    f"(bound {effective_trans_bound:.2f}m/{effective_rot_bound:.1f}deg, scaled for {hop} hops)"
-                )
-                rejection_reasons[i] = rejection_msg
-                frame_states[i] = "REJECTED"
-                logger.debug(f"    frame {i:02d}: {rejection_msg}")
-                continue
-
-            # Kinematic check passed!
-            max_buf_size = getattr(cfg, "max_bridge_buffer_size", 2)
-            if len(bridge_buffer) < max_buf_size and not active_unanchored_chain:
-                # Store in bridge buffer as provisional bridge frame
-                bridge_buffer.append({
-                    "frame_idx": i,
-                    "target_idx": pred_idx,
-                    "T_local": T_loc,
-                    "T_to_anchor": T_to_anchor_cand,
-                    "anchor_idx": anchor_idx,
-                    "fitness": fit_loc,
-                    "rmse": rmse_loc,
-                    "method": meth_loc,
-                    "reason": reason_loc,
-                    "residual_mm": getattr(res_local, "residual_mm", None),
-                    "hop": hop,
-                })
-                diagnostics[i] = (fit_loc, rmse_loc, False)
-                frame_states[i] = "PROVISIONAL_BRIDGE"
-                best_methods[i] = meth_loc
-                best_scores[i] = reason_loc
-                best_residuals[i] = getattr(res_local, "residual_mm", None)
-                frames_since_accepted += 1
-                last_rel_trans = None
-                logger.debug(f"    frame {i:02d}: tier={meth_loc} PROVISIONAL_BRIDGE (hop={hop}, buffered={len(bridge_buffer)}/{max_buf_size})")
-                continue
-            else:
-                # Buffer capacity reached (or continuing unanchored chain).
-                # No independent reference overlap is possible: mark UNANCHORED_ODOMETRY
-                # 1. Promote provisional bridge buffer entries to pose graph as uncertain bridge nodes
-                for b in bridge_buffer:
-                    b_idx = b["frame_idx"]
-                    b_pose = poses[b["anchor_idx"]] @ b["T_to_anchor"]
-                    b_node_id = len(pose_graph.nodes)
-                    pose_graph.nodes.append(PoseGraphNode(b_pose))
-                    node_of[b_idx] = b_node_id
-                    poses[b_idx] = b_pose
-                    diagnostics[b_idx] = (b["fitness"], b["rmse"], False)
-                    frame_states[b_idx] = "PROMOTED_BRIDGE"
-                    best_methods[b_idx] = b["method"]
-                    best_scores[b_idx] = b["reason"]
-                    best_residuals[b_idx] = b.get("residual_mm")
-                    # Add bridge edge with uncertain=True and info scaled by 1/(1+h)
-                    # Heuristic scaling: 1 / (1 + h), where h is topological hop distance
-                    b_info = get_information_matrix(frames[b_idx].pcd, frames[b["target_idx"]].pcd, b["T_local"], cfg)
-                    b_info_scaled = b_info * (1.0 / (1.0 + b["hop"]))
-                    pose_graph.edges.append(
-                        PoseGraphEdge(node_of[b_idx], node_of[b["target_idx"]], b["T_local"], b_info_scaled, uncertain=True)
-                    )
-                    bridge_edges_info.append((b_idx, b["target_idx"], b["hop"]))
-                bridge_buffer.clear()
-
-                # 2. Add frame i to pose graph as UNANCHORED_ODOMETRY
-                pose_i = poses[pred_idx] @ T_loc
-                node_id = len(pose_graph.nodes)
-                pose_graph.nodes.append(PoseGraphNode(pose_i))
-                node_of[i] = node_id
-                poses[i] = pose_i
-                diagnostics[i] = (fit_loc, rmse_loc, True)
-                frame_states[i] = "UNANCHORED_ODOMETRY"
-                best_methods[i] = meth_loc
-                best_scores[i] = reason_loc
-                best_residuals[i] = getattr(res_local, "residual_mm", None)
-                info = get_information_matrix(frames[i].pcd, frames[pred_idx].pcd, T_loc, cfg)
-                info_scaled = info * (1.0 / (1.0 + hop))
-                pose_graph.edges.append(
-                    PoseGraphEdge(node_id, node_of[pred_idx], T_loc, info_scaled, uncertain=True)
-                )
-                bridge_edges_info.append((i, pred_idx, hop))
-                active_unanchored_chain.append(i)
-                promotable_unanchored_chain.append(i)
-                all_unanchored_nodes.append(i)
-                frame_hops[i] = hop
-                composed_to_anchor[i] = T_to_anchor_cand
-                frames_since_accepted += 1
-                last_rel_trans = None
-                logger.debug(f"    frame {i:02d}: tier={meth_loc} UNANCHORED_ODOMETRY (hop={hop}, node={node_id})")
-                continue
-
-        # Prioritize sequential candidate (prev_accepted_idx) if it succeeded and meets quality criteria
-        seq_candidates = [c for c in candidates if c[0] == prev_accepted_idx]
-        if seq_candidates:
-            j_best, T_best, fit_best, rmse_best, rot_best, trans_best, method_best, reason_best, res_best = seq_candidates[0]
-            last_rel_trans = T_best.copy() if frames_since_accepted == 0 else None
-        else:
-            j_best, T_best, fit_best, rmse_best, rot_best, trans_best, method_best, reason_best, res_best = max(
-                candidates, key=lambda c: c[2]
-            )
+            frames_since_accepted += 1
             last_rel_trans = None
+            continue
 
-        frame_state_i = "DIRECT_ACCEPTED"
-        res_crosscheck = None
-        if bridge_buffer:
-            # Independent geometric validation against bridge buffer
-            b_head = bridge_buffer[-1]
-            res_crosscheck = _call_register_pair(frames[i], frames[b_head["frame_idx"]], cfg, is_bridge=True)
-            if res_crosscheck[3]:
-                T_loc_cross = res_crosscheck[0]
-                T_comp_to_anchor = b_head["T_to_anchor"] @ T_loc_cross
-                anchor_idx = b_head["anchor_idx"]
-                if j_best == anchor_idx:
-                    T_dir_to_anchor = T_best
-                else:
-                    T_dir_to_anchor = np.linalg.inv(poses[anchor_idx]) @ poses[j_best] @ T_best
-
-                delta_T = np.linalg.inv(T_dir_to_anchor) @ T_comp_to_anchor
-                trans_disagree = float(np.linalg.norm(delta_T[:3, 3]))
-                rot_disagree = float(compute_rotation_deg(delta_T[:3, :3]))
-                max_trans_cross = getattr(cfg, "max_bridge_crosscheck_trans_m", 0.020)
-                max_rot_cross = getattr(cfg, "max_bridge_crosscheck_rot_deg", 10.0)
-
-                if trans_disagree <= max_trans_cross and rot_disagree <= max_rot_cross:
-                    logger.debug(f"    frame {i:02d}: independent bridge cross-check PASSED (trans disagree {trans_disagree*1000.0:.1f}mm <= {max_trans_cross*1000.0:.1f}mm, rot {rot_disagree:.1f}deg <= {max_rot_cross:.1f}deg)")
-                    for b in bridge_buffer:
-                        b_idx = b["frame_idx"]
-                        b_pose = poses[b["anchor_idx"]] @ b["T_to_anchor"]
-                        b_node_id = len(pose_graph.nodes)
-                        pose_graph.nodes.append(PoseGraphNode(b_pose))
-                        node_of[b_idx] = b_node_id
-                        poses[b_idx] = b_pose
-                        diagnostics[b_idx] = (b["fitness"], b["rmse"], False)
-                        frame_states[b_idx] = "PROMOTED_BRIDGE"
-                        best_methods[b_idx] = b["method"]
-                        best_scores[b_idx] = b["reason"]
-                        best_residuals[b_idx] = b.get("residual_mm")
-                        b_info = get_information_matrix(frames[b_idx].pcd, frames[b["target_idx"]].pcd, b["T_local"], cfg)
-                        b_info_scaled = b_info * (1.0 / (1.0 + b["hop"]))
-                        pose_graph.edges.append(
-                            PoseGraphEdge(node_of[b_idx], node_of[b["target_idx"]], b["T_local"], b_info_scaled, uncertain=True)
-                        )
-                        bridge_edges_info.append((b_idx, b["target_idx"], b["hop"]))
-                    bridge_buffer.clear()
-                    frame_state_i = "TERMINAL_RECOVERED"
-                else:
-                    logger.debug(f"    frame {i:02d}: independent bridge cross-check FAILED (trans disagree {trans_disagree*1000.0:.1f}mm > {max_trans_cross*1000.0:.1f}mm or rot {rot_disagree:.1f}deg > {max_rot_cross:.1f}deg)")
-                    bridge_buffer.clear()
-                    diagnostics[i] = (fit_best, rmse_best, False)
-                    best_methods[i] = method_best
-                    best_scores[i] = reason_best
-                    best_residuals[i] = res_best
-                    rejection_reasons[i] = f"REJECTED -- independent bridge cross-check failed: trans disagree {trans_disagree*1000.0:.1f}mm > {max_trans_cross*1000.0:.1f}mm or rot {rot_disagree:.1f}deg > {max_rot_cross:.1f}deg"
-                    frame_states[i] = "REJECTED"
-                    frames_since_accepted += 1
-                    continue
-            else:
-                bridge_buffer.clear()
-                frame_state_i = "DIRECT_ACCEPTED"
-        else:
-            frame_state_i = "DIRECT_ACCEPTED"
+        n_odom, n_loop, last_rel_trans, accepted = commit_accepted_pair(
+            i, frames, candidates, prev_accepted_idx, poses, pose_graph, node_of, cfg,
+            bridge_buffer, active_unanchored_chain, promotable_unanchored_chain,
+            bridge_edges_info, potential_loop_closures, frame_hops, pair_logs,
+            diagnostics, best_methods, best_scores, best_residuals, rejection_reasons,
+            frame_states, n_odom, n_loop, face_y_thresh,
+            frames_since_accepted=frames_since_accepted,
+        )
+        if not accepted:
+            frames_since_accepted += 1
+            last_rel_trans = None
+            continue
 
         frames_since_accepted = 0
-        best_methods[i] = method_best
-        best_scores[i] = reason_best
-        best_residuals[i] = res_best
-        frame_states[i] = frame_state_i
-
-        # Mark primary candidate in pair_logs for frame i
-        for pl in pair_logs:
-            if pl["source"] == i:
-                pl["is_primary"] = (pl["target"] == j_best)
-
-        # Fusion eligibility check (secondary stricter gate for Stage 4 fusion)
-        min_fit_fusion = getattr(cfg, "min_fitness_for_fusion", 0.60)
-        max_res_fusion = getattr(cfg, "max_landmark_residual_for_fusion_mm", 5.0)
-        min_face_fit = getattr(cfg, "min_face_pair_fitness_for_fusion", 0.75)
-        max_face_rmse = getattr(cfg, "max_face_pair_rmse_for_fusion_mm", 4.0)
-
-        best_tgt_is_upper = is_upper_face_frame(frames[j_best], face_y_thresh)
-        best_is_face_pair = (src_is_upper and best_tgt_is_upper)
-
-        lm_res_val = res_best
-        if lm_res_val is None and "residual=" in reason_best:
-            try:
-                lm_res_val = float(reason_best.split("residual=")[1].split("mm")[0])
-            except Exception as e:
-                logger.warning(
-                    f"    [fusion-fallback] Parsing landmark residual for frame {i} failed with "
-                    f"{type(e).__name__}: {e}"
-                )
-
-        rmse_best_mm = rmse_best * 1000.0 if np.isfinite(rmse_best) else 999.0
-
-        if best_is_face_pair:
-            if fit_best < min_face_fit:
-                logger.debug(f"    frame {i:02d}: pose accepted, EXCLUDED from fusion (face-pair fitness {fit_best:.2f} < {min_face_fit:.2f} threshold)")
-            elif rmse_best_mm > max_face_rmse:
-                logger.debug(f"    frame {i:02d}: pose accepted, EXCLUDED from fusion (face-pair rmse {rmse_best_mm:.1f}mm > {max_face_rmse:.1f}mm threshold)")
-            else:
-                logger.debug(f"    frame {i:02d}: tier={method_best} {reason_best} ACCEPTED")
-        else:
-            if fit_best < min_fit_fusion:
-                logger.debug(f"    frame {i:02d}: pose accepted, EXCLUDED from fusion (fitness {fit_best:.2f} < {min_fit_fusion:.2f} fusion threshold)")
-            elif lm_res_val is not None and lm_res_val > max_res_fusion:
-                logger.debug(f"    frame {i:02d}: pose accepted, EXCLUDED from fusion (landmark residual {lm_res_val:.1f}mm > {max_res_fusion:.1f}mm fusion threshold)")
-            else:
-                logger.debug(f"    frame {i:02d}: tier={method_best} {reason_best} ACCEPTED")
-
-        pose_i = poses[j_best] @ T_best
-        node_id = len(pose_graph.nodes)
-        pose_graph.nodes.append(PoseGraphNode(pose_i))
-        node_of[i] = node_id
-        poses[i] = pose_i
-
-        # Add edges: primary sequential candidate is certain (odometry);
-        # other non-consecutive candidates are uncertain (loop closures) and must satisfy min_loop_closure_fitness.
-        min_loop_fit = getattr(cfg, "min_loop_closure_fitness", 0.65)
-        for c in candidates:
-            j, T, fit, rmse, rot, trans, method, reason = c[:8]
-            certain = (j == j_best)
-            if not certain and fit < min_loop_fit:
-                continue
-            info = get_information_matrix(frames[i].pcd, frames[j].pcd, T, cfg)
-            pose_graph.edges.append(
-                PoseGraphEdge(node_id, node_of[j], T, info, uncertain=not certain)
-            )
-            if certain:
-                n_odom += 1
-            else:
-                n_loop += 1
-                if promotable_unanchored_chain and (i in promotable_unanchored_chain or j in promotable_unanchored_chain):
-                    potential_loop_closures.append({"source": i, "target": j, "fitness": fit, "rmse": rmse})
-
-        # If terminal recovered, also add bridge edge to buffer head with uncertain=True and scaled info
-        if frame_state_i == "TERMINAL_RECOVERED" and res_crosscheck is not None and res_crosscheck[3]:
-            head_idx = b_head["frame_idx"]
-            b_hop = b_head["hop"] + 1
-            br_info = get_information_matrix(frames[i].pcd, frames[head_idx].pcd, res_crosscheck[0], cfg)
-            br_info_scaled = br_info * (1.0 / (1.0 + b_hop))
-            pose_graph.edges.append(
-                PoseGraphEdge(node_id, node_of[head_idx], res_crosscheck[0], br_info_scaled, uncertain=True)
-            )
-            bridge_edges_info.append((i, head_idx, b_hop))
-
-        # If active unanchored chain exists, check if frame i connects to the unanchored chain head
-        if active_unanchored_chain and active_unanchored_chain[-1] in node_of and i not in active_unanchored_chain:
-            last_u = active_unanchored_chain[-1]
-            res_u = _call_register_pair(frames[i], frames[last_u], cfg, is_bridge=True)
-            if res_u[3] and res_u[1] >= min_loop_fit:
-                u_hop = frame_hops.get(last_u, 1) + 1
-                u_info = get_information_matrix(frames[i].pcd, frames[last_u].pcd, res_u[0], cfg)
-                u_info_scaled = u_info * (1.0 / (1.0 + u_hop))
-                pose_graph.edges.append(
-                    PoseGraphEdge(node_id, node_of[last_u], res_u[0], u_info_scaled, uncertain=True)
-                )
-                n_loop += 1
-                bridge_edges_info.append((i, last_u, u_hop))
-                potential_loop_closures.append({"source": i, "target": j_best, "fitness": fit_best, "rmse": rmse_best})
-            else:
-                promotable_unanchored_chain.clear()
-            active_unanchored_chain.clear()
-
         accepted_idx.append(i)
-        diagnostics[i] = (fit_best, rmse_best, True)
 
     # TASK 2: Diagnostic summary of loop-closure density and accepted-pair fitness/RMSE distribution
     accepted_pairs = [p for p in pair_logs if p.get("success", False)]
