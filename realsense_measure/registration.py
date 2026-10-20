@@ -479,17 +479,21 @@ def _icp_refine(
     -------
     open3d RegistrationResult with the refined transformation.
     """
-    src = copy.deepcopy(source)
-    tgt = copy.deepcopy(target)
-
-    if not src.has_normals():
+    if not source.has_normals():
+        src = o3d.geometry.PointCloud(source)
         src.estimate_normals(
             o3d.geometry.KDTreeSearchParamHybrid(radius=cfg.icp_max_dist_m * 2, max_nn=30)
         )
-    if not tgt.has_normals():
+    else:
+        src = source
+
+    if not target.has_normals():
+        tgt = o3d.geometry.PointCloud(target)
         tgt.estimate_normals(
             o3d.geometry.KDTreeSearchParamHybrid(radius=cfg.icp_max_dist_m * 2, max_nn=30)
         )
+    else:
+        tgt = target
 
     return registration_icp(
         src,
@@ -676,6 +680,8 @@ def register_frame_pair_landmark_guided(
                 tgt_down = target_pcd.voxel_down_sample(eval_voxel) if len(target_pcd.points) > 50 else target_pcd
 
                 if not tgt_down.has_normals():
+                    if tgt_down is target_pcd:
+                        tgt_down = o3d.geometry.PointCloud(target_pcd)
                     tgt_down.estimate_normals(
                         o3d.geometry.KDTreeSearchParamHybrid(radius=cfg.colored_icp_max_dist_m * 2.0, max_nn=30)
                     )
@@ -708,7 +714,7 @@ def register_frame_pair_landmark_guided(
                     else:
                         face_anchor = np.mean(dst_pts, axis=0)
 
-                    src_trans = copy.deepcopy(src_down).transform(init_T)
+                    src_trans = o3d.geometry.PointCloud(src_down).transform(init_T)
                     src_trans_pts = np.asarray(src_trans.points)
                     tgt_down_pts = np.asarray(tgt_down.points)
 
@@ -768,16 +774,21 @@ def register_frame_pair_landmark_guided(
                         )
 
                 # Tightened Colored ICP refinement specifically for landmark seed
-                src_temp = copy.deepcopy(source_pcd)
-                tgt_temp = copy.deepcopy(target_pcd)
-                if not src_temp.has_normals():
+                if not source_pcd.has_normals():
+                    src_temp = o3d.geometry.PointCloud(source_pcd)
                     src_temp.estimate_normals(
                         o3d.geometry.KDTreeSearchParamHybrid(radius=cfg.colored_icp_max_dist_m * 2.0, max_nn=30)
                     )
-                if not tgt_temp.has_normals():
+                else:
+                    src_temp = source_pcd
+
+                if not target_pcd.has_normals():
+                    tgt_temp = o3d.geometry.PointCloud(target_pcd)
                     tgt_temp.estimate_normals(
                         o3d.geometry.KDTreeSearchParamHybrid(radius=cfg.colored_icp_max_dist_m * 2.0, max_nn=30)
                     )
+                else:
+                    tgt_temp = target_pcd
                 try:
                     colored_criteria = ICPConvergenceCriteria(
                         max_iteration=50,
@@ -1184,8 +1195,8 @@ def register_rgbd_pair(
             residual_mm=None,
         )
 
-    src_pcd = copy.deepcopy(source_frame.pcd)
-    tgt_pcd = copy.deepcopy(target_frame.pcd)
+    src_pcd = source_frame.pcd
+    tgt_pcd = target_frame.pcd
     n_src = len(src_pcd.points)
     n_tgt = len(tgt_pcd.points)
 
@@ -1318,10 +1329,12 @@ def register_rgbd_pair(
 
         # 3. Colored ICP Refinement
         if not src_pcd.has_normals():
+            src_pcd = o3d.geometry.PointCloud(src_pcd)
             src_pcd.estimate_normals(
                 o3d.geometry.KDTreeSearchParamHybrid(radius=cfg.colored_icp_max_dist_m * 2.0, max_nn=30)
             )
         if not tgt_pcd.has_normals():
+            tgt_pcd = o3d.geometry.PointCloud(tgt_pcd)
             tgt_pcd.estimate_normals(
                 o3d.geometry.KDTreeSearchParamHybrid(radius=cfg.colored_icp_max_dist_m * 2.0, max_nn=30)
             )
