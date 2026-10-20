@@ -312,9 +312,8 @@ class ScanPipeline:
 
     def __init__(self, cfg: PipelineConfig) -> None:
         self.cfg = cfg
-        # If targeting human head or body without explicit registration override, default to rgbd_human
-        if cfg.target.name in ("head", "body") and cfg.registration.registration_mode == "pointcloud":
-            cfg.registration.registration_mode = "rgbd_human"
+        # If targeting human head or body without explicit registration override, resolve defaults
+        cfg.registration.resolve_defaults(cfg.target.name)
 
         self._clean_output_dir()
         self.target = get_target(cfg.target.name)

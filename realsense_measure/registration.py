@@ -541,6 +541,7 @@ def register_frame_pair(
         ICP inlier RMSE in metres.
     """
     # 1. Fast path: try ICP directly from identity
+    cfg.resolve_defaults()
     fast_icp = _icp_refine(source, target, np.eye(4), cfg)
     if float(fast_icp.fitness) >= cfg.icp_only_fitness_threshold:
         return (
@@ -873,6 +874,7 @@ def register_sequence(
         List of ``(fitness, rmse, accepted)`` tuples, one per frame.
         Frame 0 always gets ``(1.0, 0.0, True)``.
     """
+    cfg.resolve_defaults()
     if not frames:
         return [], []
 
@@ -942,6 +944,7 @@ def build_pose_graph(
     ``cfg.min_accept_fitness`` the frame is REJECTED: it gets no node and no
     edges, so it cannot corrupt the graph.
     """
+    cfg.resolve_defaults()
     n = len(frames)
     pose_graph = PoseGraph()
     pose_graph.nodes.append(PoseGraphNode(np.eye(4)))
@@ -1021,6 +1024,7 @@ def register_sequence_multiway(
     """
     Gated pose-graph registration (see :func:`build_pose_graph`).
     """
+    cfg.resolve_defaults()
     if not frames:
         return [], []
     if len(frames) == 1:
@@ -1101,6 +1105,7 @@ def register_rgbd_pair(
     -------
     (T, fitness, rmse, accepted, method_name, rot_deg, trans_mm, reason)
     """
+    cfg.resolve_defaults(target_name="head" if cfg.registration_mode == "rgbd_human" else "box")
     # Guard against empty / degenerate point clouds
     if (
         not hasattr(source_frame, "pcd") or len(source_frame.pcd.points) < 20
@@ -1411,6 +1416,7 @@ def build_pose_graph_rgbd(
     -------
     (pose_graph, node_of, diagnostics, n_odom, n_loop, pair_logs, poses, best_methods, best_scores, rejection_reasons)
     """
+    cfg.resolve_defaults(target_name="head")
     n = len(frames)
     pose_graph = PoseGraph()
     pose_graph.nodes.append(PoseGraphNode(np.eye(4)))
@@ -1991,6 +1997,7 @@ def register_sequence_rgbd_human(
     summary_stats:
         Dictionary of human registration metrics for the required report.
     """
+    cfg.resolve_defaults(target_name="head")
     if not frames:
         return [], [], [], {}
 

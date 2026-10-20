@@ -171,7 +171,7 @@ class RegistrationConfig:
 
     # Acceptance threshold: frames with fitness below this are considered
     # unreliable, excluded from fusion, and not merged into the growing reference.
-    min_accept_fitness: float = 0.35
+    min_accept_fitness: float | None = None
 
     # Fast-path ICP threshold: if identity-seeded ICP achieves this fitness,
     # skip expensive FPFH+RANSAC global registration.
@@ -180,7 +180,7 @@ class RegistrationConfig:
     # Registration strategy mode:
     # "pointcloud" : legacy geometric FPFH+RANSAC -> ICP (optimal for box)
     # "rgbd_human" : calibrated RGB-D odometry -> colored ICP -> quality gate -> pose graph (optimal for human face/head/body)
-    registration_mode: str = "pointcloud"
+    registration_mode: str | None = None
 
     # Facial landmark guidance (for "rgbd_human" mode)
     use_landmarks: bool = True                 # seed pairwise registration with 3D facial landmarks when available
@@ -223,7 +223,7 @@ class RegistrationConfig:
     max_pose_jump_rotation_deg: float = 45.0   # reject pose jump rotation > 45deg from previous accepted frame
     max_pose_jump_step_cap: int = 6            # maximum frame-skip multiplier cap for pose-jump bounds
     min_odometry_fitness: float = 0.35         # minimum inlier correspondence ratio for odometry
-    min_colored_icp_fitness: float = 0.45      # minimum inlier ratio for colored ICP
+    min_colored_icp_fitness: float | None = None
     min_loop_closure_fitness: float = 0.65     # minimum inlier fitness ratio for non-consecutive loop-closure edges (prevents weak cross-profile tension)
     max_colored_icp_rmse_m: float = 0.008      # maximum allowable inlier RMSE (8 mm)
     max_pair_centroid_dist_m: float = 0.50     # maximum centroid distance between candidate source and target frames to attempt Colored ICP
@@ -251,6 +251,24 @@ class RegistrationConfig:
     show_registration_pairs: bool = False      # display before/after pairwise alignment window
     show_camera_trajectory: bool = False       # display 3D camera trajectory with jump diagnostics
 
+    def resolve_defaults(self, target_name: str = "box") -> "RegistrationConfig":
+        """Apply box/head/body-specific values when fields are still None."""
+        if target_name in ("head", "body") or self.registration_mode == "rgbd_human":
+            if self.min_accept_fitness is None:
+                self.min_accept_fitness = 0.50
+            if self.min_colored_icp_fitness is None:
+                self.min_colored_icp_fitness = 0.50
+            if self.registration_mode is None:
+                self.registration_mode = "rgbd_human"
+        else:
+            if self.min_accept_fitness is None:
+                self.min_accept_fitness = 0.35
+            if self.min_colored_icp_fitness is None:
+                self.min_colored_icp_fitness = 0.45
+            if self.registration_mode is None:
+                self.registration_mode = "pointcloud"
+        return self
+
 
 
 
@@ -270,32 +288,41 @@ class TargetConfig:
     min_dimension_m: float = 0.02
 
     # Physical plausibility bounds for isolated object clusters (metres)
-    expected_min_size_m: float = 0.03   # smallest plausible dimension
-    expected_max_size_m: float = 0.60   # largest plausible dimension (well above object, below room clutter)
-    min_object_points: int = 150        # minimum points needed for a valid object capture
-    max_centroid_dev_m: float = 0.15   # reject frames whose object centroid is farther than this from the median centroid
+    expected_min_size_m: float | None = None   # smallest plausible dimension
+    expected_max_size_m: float | None = None   # largest plausible dimension (well above object, below room clutter)
+    min_object_points: int | None = None        # minimum points needed for a valid object capture
+    max_centroid_dev_m: float | None = None   # reject frames whose object centroid is farther than this from the median centroid
     use_manual_roi: bool = False       # interactively select 2D pixel ROI on first frame for cropped point cloud isolation
 
     def __post_init__(self) -> None:
-        """Set target-specific physical bounds and rejection tolerances if at defaults."""
+        """Set target-specific physical bounds and rejection tolerances if still None (sentinel)."""
         if self.name == "head":
-            if self.expected_min_size_m == 0.03:
+            if self.expected_min_size_m is None:
                 self.expected_min_size_m = 0.12
-            if self.expected_max_size_m == 0.60:
+            if self.expected_max_size_m is None:
                 self.expected_max_size_m = 0.55
-            if self.min_object_points == 150:
+            if self.min_object_points is None:
                 self.min_object_points = 200
-            if self.max_centroid_dev_m == 0.15:
+            if self.max_centroid_dev_m is None:
                 self.max_centroid_dev_m = 0.25
         elif self.name == "body":
-            if self.expected_min_size_m == 0.03:
+            if self.expected_min_size_m is None:
                 self.expected_min_size_m = 0.20
-            if self.expected_max_size_m == 0.60:
+            if self.expected_max_size_m is None:
                 self.expected_max_size_m = 1.20
-            if self.min_object_points == 150:
+            if self.min_object_points is None:
                 self.min_object_points = 300
-            if self.max_centroid_dev_m == 0.15:
+            if self.max_centroid_dev_m is None:
                 self.max_centroid_dev_m = 0.35
+        else:
+            if self.expected_min_size_m is None:
+                self.expected_min_size_m = 0.03
+            if self.expected_max_size_m is None:
+                self.expected_max_size_m = 0.60
+            if self.min_object_points is None:
+                self.min_object_points = 150
+            if self.max_centroid_dev_m is None:
+                self.max_centroid_dev_m = 0.15
 
 
 
@@ -337,8 +364,8 @@ class PipelineConfig:
 
     # Reconstruction fusion method: "pointcloud" (concatenation) or "tsdf" (volumetric TSDF integration)
     fusion_method: str = "pointcloud"
-    tsdf_voxel_length_m: float = 0.004   # 4 mm voxel size for TSDF volume
-    tsdf_trunc_m: float = 0.02           # 20 mm SDF truncation margin
+    tsdf_voxel_length_m: float | None = None   # default 0.004 (box) / 0.002 (human)
+    tsdf_trunc_m: float | None = None          # default 0.02 (box) / 4.0 * voxel_length (human)
 
     # Diagnostic full-orbit check
     attempt_loop_closure: bool = False   # check last vs first frame alignment after registration
@@ -356,18 +383,20 @@ class PipelineConfig:
         # Ensure output_dir is always a Path, even if a plain string was passed.
         self.output_dir = Path(self.output_dir)
 
-        # Human head/body mode: apply stricter registration quality gates (min_accept_fitness = 0.50)
-        # to ensure distorted or poorly aligned fallback frames get rejected rather than warping the result.
+        # Resolve registration target-specific defaults if still None
+        self.registration.resolve_defaults(self.target.name)
+
+        # Human head/body mode: apply finer TSDF voxel resolution if still None
         if self.target.name in ("head", "body") or self.registration.registration_mode == "rgbd_human":
-            if self.registration.min_accept_fitness == 0.35:
-                self.registration.min_accept_fitness = 0.50
-            if self.registration.min_colored_icp_fitness == 0.45:
-                self.registration.min_colored_icp_fitness = 0.50
-            if self.registration.registration_mode == "pointcloud":
-                self.registration.registration_mode = "rgbd_human"
-            # Finer TSDF voxel resolution for head/body fusion (1.5 - 2.0 mm) and tight truncation
-            if self.tsdf_voxel_length_m >= 0.003:
+            if self.tsdf_voxel_length_m is None:
                 self.tsdf_voxel_length_m = 0.002
-            self.tsdf_trunc_m = 4.0 * self.tsdf_voxel_length_m
+            if self.tsdf_trunc_m is None:
+                self.tsdf_trunc_m = 4.0 * self.tsdf_voxel_length_m
+        else:
+            if self.tsdf_voxel_length_m is None:
+                self.tsdf_voxel_length_m = 0.004
+            if self.tsdf_trunc_m is None:
+                self.tsdf_trunc_m = 0.02
 
         self.camera.head_capture = self.head_capture
+
