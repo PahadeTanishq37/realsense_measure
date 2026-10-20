@@ -1489,11 +1489,7 @@ class BuildPoseGraphResult(tuple):
 
 
 def _call_register_pair(src, dst, cfg, initial_guess=None, is_bridge=False):
-    import inspect
-    sig = inspect.signature(register_rgbd_pair)
-    if "is_bridge" in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
-        return register_rgbd_pair(src, dst, cfg, initial_guess=initial_guess, is_bridge=is_bridge)
-    return register_rgbd_pair(src, dst, cfg, initial_guess=initial_guess)
+    return register_rgbd_pair(src, dst, cfg, initial_guess=initial_guess, is_bridge=is_bridge)
 
 
 def build_pose_graph_rgbd(
