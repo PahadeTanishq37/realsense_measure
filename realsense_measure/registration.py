@@ -1101,6 +1101,52 @@ def compute_mutual_fitness(source_fitness: float, n_source: int, n_target: int) 
     return min(1.0, float(inliers / float(min_n)))
 
 
+class PairRegistrationResult(tuple):
+    """Result tuple from register_rgbd_pair, supporting backward-compatible 8-element unpacking:
+    (T, fitness, rmse, accepted, method_name, rot_deg, trans_mm, reason)
+    while exposing structured attributes including residual_mm."""
+
+    def __new__(
+        cls,
+        transformation,
+        fitness=None,
+        rmse=None,
+        accepted=None,
+        method=None,
+        rotation_deg=None,
+        translation_mm=None,
+        reason=None,
+        residual_mm=None,
+    ):
+        if isinstance(transformation, (tuple, list)) and fitness is None:
+            items = list(transformation)
+            if len(items) >= 9:
+                residual_mm = items[8]
+                items = items[:8]
+            t, f, rm, acc, meth, rot, tr, rea = items
+        else:
+            t = transformation
+            f = fitness
+            rm = rmse
+            acc = accepted
+            meth = method
+            rot = rotation_deg
+            tr = translation_mm
+            rea = reason
+
+        inst = super().__new__(cls, (t, f, rm, acc, meth, rot, tr, rea))
+        inst.transformation = t
+        inst.fitness = f
+        inst.rmse = rm
+        inst.accepted = acc
+        inst.method = meth
+        inst.rotation_deg = rot
+        inst.translation_mm = tr
+        inst.reason = rea
+        inst.residual_mm = residual_mm
+        return inst
+
+
 def register_rgbd_pair(
     source_frame: RGBDFrame,
     target_frame: RGBDFrame,
@@ -1126,7 +1172,7 @@ def register_rgbd_pair(
         not hasattr(source_frame, "pcd") or len(source_frame.pcd.points) < 20
         or not hasattr(target_frame, "pcd") or len(target_frame.pcd.points) < 20
     ):
-        return (
+        return PairRegistrationResult(
             np.eye(4),
             0.0,
             float("inf"),
@@ -1135,6 +1181,7 @@ def register_rgbd_pair(
             0.0,
             0.0,
             "Insufficient points in source or target frame (< 20 points)",
+            residual_mm=None,
         )
 
     src_pcd = copy.deepcopy(source_frame.pcd)
@@ -1201,7 +1248,7 @@ def register_rgbd_pair(
                     and lm_rot <= cfg.max_rotation_deg_per_frame
                     and lm_trans <= (cfg.max_translation_m_per_frame * 1000.0)
                 ):
-                    return (
+                    return PairRegistrationResult(
                         lm_T,
                         lm_fit,
                         lm_rmse,
@@ -1210,6 +1257,7 @@ def register_rgbd_pair(
                         lm_rot,
                         lm_trans,
                         f"fitness={lm_fit:.2f} (src={lm_fit_src:.2f}) residual={lm_res_mm:.1f}mm",
+                        residual_mm=float(lm_res_mm),
                     )
                 # Seed downstream refinement with coarse landmark transform if not immediately accepted
                 if lm_rot <= cfg.max_rotation_deg_per_frame and lm_trans <= (cfg.max_translation_m_per_frame * 1000.0):
@@ -1313,7 +1361,7 @@ def register_rgbd_pair(
                 issues.append(f"translation {trans_colored:.1f}mm > {cfg.max_translation_m_per_frame * 1000.0:.0f}mm")
 
             if not issues:
-                return (
+                return PairRegistrationResult(
                     T_colored,
                     fit_colored,
                     rmse_colored,
@@ -1322,6 +1370,7 @@ def register_rgbd_pair(
                     rot_colored,
                     trans_colored,
                     f"fitness={fit_colored:.2f} (src={fit_colored_src:.2f}) rmse={rmse_colored * 1000.0:.1f}mm",
+                    residual_mm=None,
                 )
             colored_status = "FAIL: " + ", ".join(issues)
         except RuntimeError as exc:
@@ -1360,7 +1409,7 @@ def register_rgbd_pair(
             src_center_y = float(src_pcd.get_axis_aligned_bounding_box().get_center()[1])
             region_str = "lower (neck/shoulder)" if src_center_y > 0.0 else "upper (face/head)"
             print(f"[registration-diagnostic] pair {pair_str} FPFH fallback SUCCEEDED (region: {region_str}, bbox_center_y={src_center_y:+.3f}m)")
-            return (
+            return PairRegistrationResult(
                 fb_T,
                 fb_fit,
                 fb_rmse,
@@ -1369,6 +1418,7 @@ def register_rgbd_pair(
                 fb_rot,
                 fb_trans,
                 f"fitness={fb_fit:.2f} (src={fb_fit_src:.2f}) rmse={fb_rmse * 1000.0:.1f}mm",
+                residual_mm=None,
             )
     except Exception as exc:
         print(
@@ -1383,7 +1433,7 @@ def register_rgbd_pair(
         f"[registration-diagnostic] pair {pair_str} REJECTED / LOW-FITNESS "
         f"(region: {region_str}, bbox_center_y={src_center_y:+.3f}m) -- {fail_reason}"
     )
-    return (
+    return PairRegistrationResult(
         T_colored,
         fit_colored,
         rmse_colored,
@@ -1392,6 +1442,7 @@ def register_rgbd_pair(
         rot_colored,
         trans_colored,
         fail_reason,
+        residual_mm=None,
     )
 
 
@@ -1413,12 +1464,14 @@ class BuildPoseGraphResult(tuple):
         unanchored_chain: list[int] | None = None,
         bridge_edges: list[tuple[int, int, int]] | None = None,
         potential_loop_closures: list[dict] | None = None,
+        residuals: dict[int, float | None] | None = None,
     ):
         inst = super().__new__(cls, items)
         inst.frame_states = frame_states or {}
         inst.unanchored_chain = unanchored_chain or []
         inst.bridge_edges = bridge_edges or []
         inst.potential_loop_closures = potential_loop_closures or []
+        inst.residuals = residuals or {}
         return inst
 
 
@@ -1452,6 +1505,7 @@ def build_pose_graph_rgbd(
     pair_logs: list[dict] = []
     best_methods: dict[int, str] = {0: "reference"}
     best_scores: dict[int, str] = {0: "(origin)"}
+    best_residuals: dict[int, float | None] = {0: None}
     rejection_reasons: dict[int, str] = {}
     n_odom = 0
     n_loop = 0
@@ -1523,6 +1577,12 @@ def build_pose_graph_rgbd(
 
             res = _call_register_pair(frames[i], frames[j], cfg, initial_guess=init_guess, is_bridge=False)
             T, fit, rmse, accepted, method, rot, trans, reason = res
+            res_residual = getattr(res, "residual_mm", None)
+            if res_residual is None and "residual=" in reason:
+                try:
+                    res_residual = float(reason.split("residual=")[1].split("mm")[0])
+                except Exception:
+                    pass
 
             # Post-registration physical-plausibility check (scaled by frames elapsed)
             exceeds_jump = False
@@ -1545,6 +1605,7 @@ def build_pose_graph_rgbd(
                         "rot": rot,
                         "trans": trans,
                         "method": method,
+                        "residual_mm": res_residual,
                         "score_str": reason,
                         "jump_trans_m": jump_trans_m,
                         "jump_rot_deg": jump_rot_deg,
@@ -1562,6 +1623,7 @@ def build_pose_graph_rgbd(
                 "rmse_mm": rmse * 1000.0 if np.isfinite(rmse) else 999.0,
                 "rotation_deg": rot,
                 "translation_mm": trans,
+                "residual_mm": res_residual,
                 "reason": (
                     f"pose jump ({jump_trans_m:.2f}m/{jump_rot_deg:.1f}deg) > allowed ({effective_translation_bound:.2f}m/{effective_rotation_bound:.1f}deg)"
                     if exceeds_jump else reason
@@ -1576,7 +1638,7 @@ def build_pose_graph_rgbd(
             # Print pair log with exact tier and score
             if accepted and not exceeds_jump:
                 print(f"    pair {i:02d} -> {j:02d}: tier={method} {reason} ACCEPTED")
-                candidates.append((j, T, fit, rmse, rot, trans, method, reason))
+                candidates.append((j, T, fit, rmse, rot, trans, method, reason, res_residual))
             elif accepted and exceeds_jump:
                 print(
                     f"    pair {i:02d} -> {j:02d}: tier={method} {reason} "
@@ -1598,6 +1660,7 @@ def build_pose_graph_rgbd(
                 best_methods[i] = mis["method"]
                 score_str = mis["score_str"]
                 best_scores[i] = score_str
+                best_residuals[i] = mis.get("residual_mm")
                 n_skip = mis["frames_since_accepted"]
                 rejection_msg = (
                     f"REJECTED -- pose jump ({mis['jump_trans_m']:.2f}m/{mis['jump_rot_deg']:.1f}deg) exceeds plausible motion "
@@ -1621,6 +1684,7 @@ def build_pose_graph_rgbd(
                 diagnostics[i] = (best_prev.get("fitness", 0.0), best_prev.get("rmse_mm", float("inf")) / 1000.0, False)
                 best_methods[i] = "none"
                 best_scores[i] = ""
+                best_residuals[i] = None
                 print(f"    frame {i:02d}: tier=none REJECTED")
                 frame_states[i] = "REJECTED"
                 continue
@@ -1657,6 +1721,7 @@ def build_pose_graph_rgbd(
                 diagnostics[i] = (fit_loc, rmse_loc, False)
                 best_methods[i] = "none"
                 best_scores[i] = ""
+                best_residuals[i] = None
                 rejection_reasons[i] = f"local bridge link {i}->{pred_idx} failed ({reason_loc})"
                 frame_states[i] = "REJECTED"
                 print(f"    frame {i:02d}: local bridge link {i}->{pred_idx} REJECTED ({reason_loc})")
@@ -1688,6 +1753,7 @@ def build_pose_graph_rgbd(
                 diagnostics[i] = (fit_loc, rmse_loc, False)
                 best_methods[i] = meth_loc
                 best_scores[i] = reason_loc
+                best_residuals[i] = getattr(res_local, "residual_mm", None)
                 rejection_msg = (
                     f"REJECTED -- pose jump ({jump_trans_m:.2f}m/{jump_rot_deg:.1f}deg) exceeds plausible motion "
                     f"(bound {effective_trans_bound:.2f}m/{effective_rot_bound:.1f}deg, scaled for {hop} hops)"
@@ -1711,12 +1777,14 @@ def build_pose_graph_rgbd(
                     "rmse": rmse_loc,
                     "method": meth_loc,
                     "reason": reason_loc,
+                    "residual_mm": getattr(res_local, "residual_mm", None),
                     "hop": hop,
                 })
                 diagnostics[i] = (fit_loc, rmse_loc, False)
                 frame_states[i] = "PROVISIONAL_BRIDGE"
                 best_methods[i] = meth_loc
                 best_scores[i] = reason_loc
+                best_residuals[i] = getattr(res_local, "residual_mm", None)
                 frames_since_accepted += 1
                 last_rel_trans = None
                 print(f"    frame {i:02d}: tier={meth_loc} PROVISIONAL_BRIDGE (hop={hop}, buffered={len(bridge_buffer)}/{max_buf_size})")
@@ -1736,6 +1804,7 @@ def build_pose_graph_rgbd(
                     frame_states[b_idx] = "PROMOTED_BRIDGE"
                     best_methods[b_idx] = b["method"]
                     best_scores[b_idx] = b["reason"]
+                    best_residuals[b_idx] = b.get("residual_mm")
                     # Add bridge edge with uncertain=True and info scaled by 1/(1+h)
                     # Heuristic scaling: 1 / (1 + h), where h is topological hop distance
                     b_info = get_information_matrix(frames[b_idx].pcd, frames[b["target_idx"]].pcd, b["T_local"], cfg)
@@ -1756,6 +1825,7 @@ def build_pose_graph_rgbd(
                 frame_states[i] = "UNANCHORED_ODOMETRY"
                 best_methods[i] = meth_loc
                 best_scores[i] = reason_loc
+                best_residuals[i] = getattr(res_local, "residual_mm", None)
                 info = get_information_matrix(frames[i].pcd, frames[pred_idx].pcd, T_loc, cfg)
                 info_scaled = info * (1.0 / (1.0 + hop))
                 pose_graph.edges.append(
@@ -1775,10 +1845,10 @@ def build_pose_graph_rgbd(
         # Prioritize sequential candidate (prev_accepted_idx) if it succeeded and meets quality criteria
         seq_candidates = [c for c in candidates if c[0] == prev_accepted_idx]
         if seq_candidates:
-            j_best, T_best, fit_best, rmse_best, rot_best, trans_best, method_best, reason_best = seq_candidates[0]
+            j_best, T_best, fit_best, rmse_best, rot_best, trans_best, method_best, reason_best, res_best = seq_candidates[0]
             last_rel_trans = T_best.copy() if frames_since_accepted == 0 else None
         else:
-            j_best, T_best, fit_best, rmse_best, rot_best, trans_best, method_best, reason_best = max(
+            j_best, T_best, fit_best, rmse_best, rot_best, trans_best, method_best, reason_best, res_best = max(
                 candidates, key=lambda c: c[2]
             )
             last_rel_trans = None
@@ -1817,6 +1887,7 @@ def build_pose_graph_rgbd(
                         frame_states[b_idx] = "PROMOTED_BRIDGE"
                         best_methods[b_idx] = b["method"]
                         best_scores[b_idx] = b["reason"]
+                        best_residuals[b_idx] = b.get("residual_mm")
                         b_info = get_information_matrix(frames[b_idx].pcd, frames[b["target_idx"]].pcd, b["T_local"], cfg)
                         b_info_scaled = b_info * (1.0 / (1.0 + b["hop"]))
                         pose_graph.edges.append(
@@ -1831,6 +1902,7 @@ def build_pose_graph_rgbd(
                     diagnostics[i] = (fit_best, rmse_best, False)
                     best_methods[i] = method_best
                     best_scores[i] = reason_best
+                    best_residuals[i] = res_best
                     rejection_reasons[i] = f"REJECTED -- independent bridge cross-check failed: trans disagree {trans_disagree*1000.0:.1f}mm > {max_trans_cross*1000.0:.1f}mm or rot {rot_disagree:.1f}deg > {max_rot_cross:.1f}deg"
                     frame_states[i] = "REJECTED"
                     frames_since_accepted += 1
@@ -1844,6 +1916,7 @@ def build_pose_graph_rgbd(
         frames_since_accepted = 0
         best_methods[i] = method_best
         best_scores[i] = reason_best
+        best_residuals[i] = res_best
         frame_states[i] = frame_state_i
 
         # Mark primary candidate in pair_logs for frame i
@@ -1860,8 +1933,8 @@ def build_pose_graph_rgbd(
         best_tgt_is_upper = is_upper_face_frame(frames[j_best], face_y_thresh)
         best_is_face_pair = (src_is_upper and best_tgt_is_upper)
 
-        lm_res_val = None
-        if "residual=" in reason_best:
+        lm_res_val = res_best
+        if lm_res_val is None and "residual=" in reason_best:
             try:
                 lm_res_val = float(reason_best.split("residual=")[1].split("mm")[0])
             except Exception as e:
@@ -1896,7 +1969,8 @@ def build_pose_graph_rgbd(
         # Add edges: primary sequential candidate is certain (odometry);
         # other non-consecutive candidates are uncertain (loop closures) and must satisfy min_loop_closure_fitness.
         min_loop_fit = getattr(cfg, "min_loop_closure_fitness", 0.65)
-        for j, T, fit, rmse, rot, trans, method, reason in candidates:
+        for c in candidates:
+            j, T, fit, rmse, rot, trans, method, reason = c[:8]
             certain = (j == j_best)
             if not certain and fit < min_loop_fit:
                 continue
@@ -2004,6 +2078,7 @@ def build_pose_graph_rgbd(
         unanchored_chain=promotable_unanchored_chain,
         bridge_edges=bridge_edges_info,
         potential_loop_closures=potential_loop_closures,
+        residuals=best_residuals,
     )
 
 
@@ -2041,6 +2116,8 @@ def register_sequence_rgbd_human(
             "first_rejected_frame": None,
             "frame_methods": {0: "reference"},
             "frame_scores": {0: "(origin)"},
+            "residuals": {0: None},
+            "frame_residuals": {0: None},
             "rejection_reasons": {},
             "tier_counts": {"landmark": 0, "colored_icp": 0, "fpfh_fallback": 0, "rejected": 0},
             "tier_summary_str": "0 landmark, 0 colored_icp, 0 fpfh_fallback, 0 rejected",
@@ -2054,6 +2131,7 @@ def register_sequence_rgbd_human(
     unanchored_chain = getattr(pg_res, "unanchored_chain", [])
     potential_loop_closures = getattr(pg_res, "potential_loop_closures", [])
     bridge_edges = getattr(pg_res, "bridge_edges", [])
+    residuals = getattr(pg_res, "residuals", {})
 
     n_before = len(pose_graph.edges)
     if len(pose_graph.nodes) > 1:
@@ -2169,8 +2247,8 @@ def register_sequence_rgbd_human(
             fit_val = d[0]
             rmse_val_mm = d[1] * 1000.0 if np.isfinite(d[1]) else 999.0
             score_str = best_scores.get(i, "")
-            res_val = None
-            if "residual=" in score_str:
+            res_val = residuals.get(i)
+            if res_val is None and "residual=" in score_str:
                 try:
                     res_val = float(score_str.split("residual=")[1].split("mm")[0])
                 except Exception as e:
@@ -2235,6 +2313,8 @@ def register_sequence_rgbd_human(
         "n_loop": n_loop,
         "frame_methods": best_methods,
         "frame_scores": best_scores,
+        "residuals": residuals,
+        "frame_residuals": residuals,
         "rejection_reasons": rejection_reasons,
         "tier_counts": tier_counts,
         "tier_summary_str": tier_summary_str,

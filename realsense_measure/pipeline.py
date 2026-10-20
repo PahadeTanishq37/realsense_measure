@@ -1084,10 +1084,12 @@ class ScanPipeline:
             frame_scores = {}
             fusion_eligible = {}
             fusion_reasons = {}
+            residuals = {}
             if hasattr(self, "last_registration_stats") and self.last_registration_stats:
                 frame_scores = self.last_registration_stats.get("frame_scores", {})
                 fusion_eligible = self.last_registration_stats.get("fusion_eligible", {})
                 fusion_reasons = self.last_registration_stats.get("fusion_reasons", {})
+                residuals = self.last_registration_stats.get("residuals") or self.last_registration_stats.get("frame_residuals", {})
 
             accepted_indices = []
             for i, d in enumerate(diagnostics):
@@ -1106,8 +1108,8 @@ class ScanPipeline:
                     else:
                         fit = d[0]
                         score_str = frame_scores.get(i, "")
-                        lm_res = None
-                        if "residual=" in score_str:
+                        lm_res = residuals.get(i)
+                        if lm_res is None and "residual=" in score_str:
                             try:
                                 lm_res = float(score_str.split("residual=")[1].split("mm")[0])
                             except Exception:

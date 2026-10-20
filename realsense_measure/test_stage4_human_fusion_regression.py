@@ -178,6 +178,30 @@ def test_stage4_marginal_frame_exclusion_from_fusion():
         (0.65, 0.003, True),
         (0.80, 0.002, True),
     ]
+
+    # Test 2a: Structured residuals provided without "residual=" in frame_scores text
+    pipeline_head.last_registration_stats = {
+        "frame_scores": {
+            1: "fitness=0.65 tier=landmark",
+            2: "fitness=0.80 tier=landmark",
+        },
+        "residuals": {
+            1: 7.5,
+            2: 2.1,
+        },
+        "frame_residuals": {
+            1: 7.5,
+            2: 2.1,
+        },
+    }
+    fused_struct = pipeline_head.fuse(frames, diagnostics_lm)
+    pts_fused_struct = np.asarray(fused_struct.points)
+    pts_f1_struct = np.sum((pts_fused_struct[:, 0] >= 0.14) & (pts_fused_struct[:, 0] <= 0.26))
+    pts_f2_struct = np.sum((pts_fused_struct[:, 0] >= 0.34) & (pts_fused_struct[:, 0] <= 0.46))
+    assert pts_f1_struct == 0, f"Frame with structured residual 7.5mm (> 5.0mm) must be EXCLUDED from fusion, found {pts_f1_struct} pts"
+    assert pts_f2_struct > 0, "Frame with structured residual 2.1mm (<= 5.0mm) must be INCLUDED in fusion"
+
+    # Test 2b: Backward compatibility fallback when only formatted text is present
     pipeline_head.last_registration_stats = {
         "frame_scores": {
             1: "fitness=0.65 (src=0.65) residual=7.5mm",

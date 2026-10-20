@@ -1026,6 +1026,116 @@ def test_l_profile_transition_rejection_cascade():
     print("  [PASS] Test L: Deterministic regression test confirmed bounded recovery and fusion quarantine.")
 
 
+def test_m_structured_residuals_threading():
+    """
+    Test M: Structured residual threading.
+
+    Verifies:
+    1. PairRegistrationResult preserves 8-tuple unpacking while exposing .residual_mm.
+    2. build_pose_graph_rgbd and register_sequence_rgbd_human propagate structured
+       residuals into pair_logs and summary_stats without string parsing.
+    3. pipeline.py stage 4 fusion uses structured residuals directly.
+    """
+    print("\n--- Test M: Structured Residual Threading ---")
+    import registration
+    from registration import PairRegistrationResult, build_pose_graph_rgbd, register_sequence_rgbd_human
+
+    # 1. Test PairRegistrationResult
+    T_dummy = np.eye(4)
+    res = PairRegistrationResult(
+        T_dummy, 0.85, 0.002, True, "landmark", 2.5, 5.0, "fitness=0.85 (src=0.85) residual=3.2mm", residual_mm=3.2
+    )
+    # Check 8-tuple unpacking
+    T, fit, rmse, acc, meth, rot, trans, reason = res
+    assert len(res) == 8
+    assert np.allclose(T, T_dummy)
+    assert fit == 0.85
+    assert rmse == 0.002
+    assert acc is True
+    assert meth == "landmark"
+    assert rot == 2.5
+    assert trans == 5.0
+    assert reason == "fitness=0.85 (src=0.85) residual=3.2mm"
+    # Check structured residual attribute
+    assert res.residual_mm == 3.2
+    assert res.transformation is T_dummy
+    assert res.fitness == 0.85
+
+    # Check PairRegistrationResult with residual_mm=None
+    res_none = PairRegistrationResult(
+        T_dummy, 0.90, 0.001, True, "colored_icp", 1.0, 2.0, "fitness=0.90 rmse=1.0mm", residual_mm=None
+    )
+    assert len(res_none) == 8
+    assert res_none.residual_mm is None
+
+    # 2. Test registration_sequence_rgbd_human summary_stats
+    cfg = RegistrationConfig(registration_mode="rgbd_human")
+    mesh = o3d.geometry.TriangleMesh.create_sphere(radius=0.1)
+    mesh.compute_vertex_normals()
+    pcd0 = mesh.sample_points_uniformly(150)
+    pcd0.paint_uniform_color([0.5, 0.5, 0.5])
+    intr = o3d.camera.PinholeCameraIntrinsic(64, 48, 50.0, 50.0, 32.0, 24.0)
+
+    # Single frame case
+    f0 = RGBDFrame(
+        frame_id=0,
+        color_bgr=np.zeros((48, 64, 3), dtype=np.uint8),
+        depth_m=np.ones((48, 64), dtype=np.float32),
+        pcd=pcd0,
+        timestamp=0.0,
+        intrinsics=intr,
+    )
+    _, _, _, stats_single = register_sequence_rgbd_human([f0], cfg)
+    assert "residuals" in stats_single
+    assert "frame_residuals" in stats_single
+    assert stats_single["residuals"][0] is None
+
+    # Multi-frame synthetic test with mock
+    f1 = RGBDFrame(
+        frame_id=1,
+        color_bgr=np.zeros((48, 64, 3), dtype=np.uint8),
+        depth_m=np.ones((48, 64), dtype=np.float32),
+        pcd=copy.deepcopy(pcd0),
+        timestamp=0.033,
+        intrinsics=intr,
+    )
+    orig_register = registration.register_rgbd_pair
+    try:
+        def mock_register_pair(src, tgt, cfg, initial_guess=None, is_bridge=False):
+            return PairRegistrationResult(
+                np.eye(4),
+                0.88,
+                0.002,
+                True,
+                "landmark",
+                1.0,
+                2.0,
+                "fitness=0.88 (src=0.88) residual=4.1mm",
+                residual_mm=4.1,
+            )
+        registration.register_rgbd_pair = mock_register_pair
+
+        pg_res = build_pose_graph_rgbd([f0, f1], cfg)
+        residuals = getattr(pg_res, "residuals", {})
+        assert 1 in residuals
+        assert residuals[1] == 4.1
+
+        # Check pair_logs contains residual_mm
+        pair_logs = pg_res[5]
+        assert len(pair_logs) > 0
+        assert pair_logs[0]["residual_mm"] == 4.1
+
+        # Check register_sequence_rgbd_human produces residuals in summary_stats
+        _, diags, poses, stats = register_sequence_rgbd_human([f0, f1], cfg)
+        assert stats["residuals"][1] == 4.1
+        assert stats["frame_residuals"][1] == 4.1
+
+    finally:
+        registration.register_rgbd_pair = orig_register
+
+    print("  [PASS] Test M: Structured residual threading confirmed across all components.")
+
+
 def main():
     print("=" * 65)
     print("  HUMAN 180 DEG MULTI-VIEW REGISTRATION SYNTHETIC TEST SUITE")
@@ -1043,9 +1153,10 @@ def main():
     test_j_glasses_weighted_kabsch_and_dense_sanity()
     test_k_systematic_bias_fpfh_crosscheck()
     test_l_profile_transition_rejection_cascade()
+    test_m_structured_residuals_threading()
 
     print("\n" + "=" * 65)
-    print("  ALL 12 SYNTHETIC TESTS (A, B, C, D, E, F, G, H, I, J, K, L) PASSED SUCCESSFULLY!")
+    print("  ALL 13 SYNTHETIC TESTS (A, B, C, D, E, F, G, H, I, J, K, L, M) PASSED SUCCESSFULLY!")
     print("=" * 65)
 
 
