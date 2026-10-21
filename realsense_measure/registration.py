@@ -313,10 +313,12 @@ def check_landmark_geometric_conditioning(
         True if correspondence geometry is well-conditioned for Kabsch.
         False with a human-readable reason if Kabsch should be bypassed.
     """
-    spread_thresh = min_spread_m if min_spread_m is not None else getattr(cfg, "landmark_min_spread_m", 0.025)
-    s2_thresh = min_secondary_spread_m if min_secondary_spread_m is not None else getattr(cfg, "landmark_min_secondary_spread_m", 0.005)
-    ratio_thresh = max_collinear_ratio if max_collinear_ratio is not None else getattr(cfg, "landmark_max_collinear_ratio", 10.0)
-    uniq_dist = min_unique_dist_m if min_unique_dist_m is not None else getattr(cfg, "landmark_min_unique_dist_m", 0.005)
+    if cfg is None:
+        cfg = RegistrationConfig()
+    spread_thresh = min_spread_m if min_spread_m is not None else cfg.landmark_min_spread_m
+    s2_thresh = min_secondary_spread_m if min_secondary_spread_m is not None else cfg.landmark_min_secondary_spread_m
+    ratio_thresh = max_collinear_ratio if max_collinear_ratio is not None else cfg.landmark_max_collinear_ratio
+    uniq_dist = min_unique_dist_m if min_unique_dist_m is not None else cfg.landmark_min_unique_dist_m
 
     # 1. Validate source point set
     src_ok, src_reason, _ = evaluate_point_set_geometry(
@@ -612,7 +614,7 @@ def register_frame_pair_landmark_guided(
     """
     from landmarks import detect_face_landmarks_3d
 
-    lm_cfg = getattr(cfg, "landmark_cfg", None)
+    lm_cfg = cfg.landmark_cfg
     src_lm = detect_face_landmarks_3d(source_color, source_depth, intrinsics_o3d, cfg=lm_cfg)
     dst_lm = detect_face_landmarks_3d(target_color, target_depth, intrinsics_o3d, cfg=lm_cfg)
 
@@ -622,7 +624,7 @@ def register_frame_pair_landmark_guided(
             src_pts_list = []
             dst_pts_list = []
             weights_list = []
-            max_var_thresh = getattr(cfg, "max_depth_variance_m2", 1e-5)
+            max_var_thresh = cfg.max_depth_variance_m2
 
             for k in common:
                 s_item = src_lm[k]
@@ -665,7 +667,7 @@ def register_frame_pair_landmark_guided(
             weights = np.array(weights_list)
 
             # Geometric conditioning check (Problem 4)
-            if getattr(cfg, "enable_landmark_conditioning_check", True):
+            if cfg.enable_landmark_conditioning_check:
                 is_conditioned, cond_reason = check_landmark_geometric_conditioning(
                     src_pts, dst_pts, weights=weights, cfg=cfg
                 )
@@ -677,8 +679,8 @@ def register_frame_pair_landmark_guided(
             init_T, residual_mm = rigid_transform_from_correspondences(src_pts, dst_pts, weights=weights)
             if residual_mm <= residual_accept_mm:
                 # Post-seed dense-surface sanity check (single pass evaluation)
-                min_dense_fit = getattr(cfg, "min_seed_dense_fitness", 0.30)
-                eval_voxel = max(getattr(cfg, "voxel_size_m", 0.003) * 2.0, 0.006)
+                min_dense_fit = cfg.min_seed_dense_fitness
+                eval_voxel = max(cfg.voxel_size_m * 2.0, 0.006)
                 src_down = source_pcd.voxel_down_sample(eval_voxel) if len(source_pcd.points) > 50 else source_pcd
                 tgt_down = target_pcd.voxel_down_sample(eval_voxel) if len(target_pcd.points) > 50 else target_pcd
 
@@ -706,10 +708,10 @@ def register_frame_pair_landmark_guided(
                     return np.eye(4), 0.0, float("inf"), "dense_sanity_failed", float(residual_mm)
 
                 # Localized (face-region) fitness check (Task 2)
-                if getattr(cfg, "enable_landmark_face_fitness_check", True):
-                    face_crop_r = getattr(cfg, "face_crop_radius_m", 0.08)
-                    min_face_fit = getattr(cfg, "min_landmark_face_fitness", 0.25)
-                    face_corr_dist = getattr(cfg, "face_fitness_dist_m", 0.005)
+                if cfg.enable_landmark_face_fitness_check:
+                    face_crop_r = cfg.face_crop_radius_m
+                    min_face_fit = cfg.min_landmark_face_fitness
+                    face_corr_dist = cfg.face_fitness_dist_m
 
                     if "nose_tip" in dst_lm:
                         d_nose = dst_lm["nose_tip"]
@@ -745,12 +747,12 @@ def register_frame_pair_landmark_guided(
                             return np.eye(4), 0.0, float("inf"), "face_sanity_failed", float(residual_mm)
 
                 # Independent geometric FPFH+RANSAC cross-check (Task 1)
-                if getattr(cfg, "enable_landmark_fpfh_crosscheck", True):
-                    max_trans_disagree = getattr(cfg, "max_landmark_fpfh_disagreement_trans_m", 0.02)
-                    max_rot_disagree = getattr(cfg, "max_landmark_fpfh_disagreement_rot_deg", 10.0)
+                if cfg.enable_landmark_fpfh_crosscheck:
+                    max_trans_disagree = cfg.max_landmark_fpfh_disagreement_trans_m
+                    max_rot_disagree = cfg.max_landmark_fpfh_disagreement_rot_deg
 
                     try:
-                        voxel_fpfh = getattr(cfg, "voxel_size_m", 0.003)
+                        voxel_fpfh = cfg.voxel_size_m
                         s_down_fpfh, s_fpfh = _prepare(source_pcd, voxel_fpfh, cfg)
                         t_down_fpfh, t_fpfh = _prepare(target_pcd, voxel_fpfh, cfg)
                         fpfh_res = _global_register(s_down_fpfh, t_down_fpfh, s_fpfh, t_fpfh, cfg, voxel_fpfh)
@@ -1217,7 +1219,7 @@ def register_rgbd_pair(
     src_centroid = np.asarray(src_pcd.get_center())
     tgt_centroid = np.asarray(tgt_pcd.get_center())
     centroid_dist = float(np.linalg.norm(src_centroid - tgt_centroid))
-    max_centroid_dist = float(getattr(cfg, "max_pair_centroid_dist_m", 0.50))
+    max_centroid_dist = float(cfg.max_pair_centroid_dist_m)
     centroid_ok = centroid_dist <= max_centroid_dist
     overlap_ok = aabb_intersects and centroid_ok
 
@@ -1233,7 +1235,7 @@ def register_rgbd_pair(
     # 1. Landmark-guided registration
     is_landmark_seeded = False
     if (
-        getattr(cfg, "use_landmarks", True)
+        cfg.use_landmarks
         and hasattr(source_frame, "color_bgr") and source_frame.color_bgr is not None
         and hasattr(source_frame, "depth_m") and source_frame.depth_m is not None
         and hasattr(target_frame, "color_bgr") and target_frame.color_bgr is not None
@@ -1672,7 +1674,7 @@ def recover_bridge_buffer(
     """
     Attempt bounded recovery using bridge buffer or unanchored odometry when all window candidates fail.
     """
-    enable_recovery = getattr(cfg, "enable_bounded_recovery", True)
+    enable_recovery = cfg.enable_bounded_recovery
     if not enable_recovery:
         best_prev = pair_logs[-1] if pair_logs else {}
         diagnostics[i] = (best_prev.get("fitness", 0.0), best_prev.get("rmse_mm", float("inf")) / 1000.0, False)
@@ -1753,7 +1755,7 @@ def recover_bridge_buffer(
         return
 
     # Kinematic check passed!
-    max_buf_size = getattr(cfg, "max_bridge_buffer_size", 2)
+    max_buf_size = cfg.max_bridge_buffer_size
     if len(bridge_buffer) < max_buf_size and not active_unanchored_chain:
         bridge_buffer.append({
             "frame_idx": i,
@@ -1883,8 +1885,8 @@ def commit_accepted_pair(
             delta_T = np.linalg.inv(T_dir_to_anchor) @ T_comp_to_anchor
             trans_disagree = float(np.linalg.norm(delta_T[:3, 3]))
             rot_disagree = float(compute_rotation_deg(delta_T[:3, :3]))
-            max_trans_cross = getattr(cfg, "max_bridge_crosscheck_trans_m", 0.020)
-            max_rot_cross = getattr(cfg, "max_bridge_crosscheck_rot_deg", 10.0)
+            max_trans_cross = cfg.max_bridge_crosscheck_trans_m
+            max_rot_cross = cfg.max_bridge_crosscheck_rot_deg
 
             if trans_disagree <= max_trans_cross and rot_disagree <= max_rot_cross:
                 logger.debug(f"    frame {i:02d}: independent bridge cross-check PASSED (trans disagree {trans_disagree*1000.0:.1f}mm <= {max_trans_cross*1000.0:.1f}mm, rot {rot_disagree:.1f}deg <= {max_rot_cross:.1f}deg)")
@@ -1935,10 +1937,10 @@ def commit_accepted_pair(
             pl["is_primary"] = (pl["target"] == j_best)
 
     # Fusion eligibility check (secondary stricter gate for Stage 4 fusion)
-    min_fit_fusion = getattr(cfg, "min_fitness_for_fusion", 0.60)
-    max_res_fusion = getattr(cfg, "max_landmark_residual_for_fusion_mm", 5.0)
-    min_face_fit = getattr(cfg, "min_face_pair_fitness_for_fusion", 0.75)
-    max_face_rmse = getattr(cfg, "max_face_pair_rmse_for_fusion_mm", 4.0)
+    min_fit_fusion = cfg.min_fitness_for_fusion
+    max_res_fusion = cfg.max_landmark_residual_for_fusion_mm
+    min_face_fit = cfg.min_face_pair_fitness_for_fusion
+    max_face_rmse = cfg.max_face_pair_rmse_for_fusion_mm
 
     src_is_upper = is_upper_face_frame(frames[i], face_y_thresh)
     best_tgt_is_upper = is_upper_face_frame(frames[j_best], face_y_thresh)
@@ -1979,7 +1981,7 @@ def commit_accepted_pair(
 
     # Add edges: primary sequential candidate is certain (odometry);
     # other non-consecutive candidates are uncertain (loop closures) and must satisfy min_loop_closure_fitness.
-    min_loop_fit = getattr(cfg, "min_loop_closure_fitness", 0.65)
+    min_loop_fit = cfg.min_loop_closure_fitness
     for c in candidates:
         j, T, fit, rmse, rot, trans, method, reason = c[:8]
         certain = (j == j_best)
@@ -2071,7 +2073,7 @@ def build_pose_graph_rgbd(
     composed_to_anchor: dict[int, np.ndarray] = {0: np.eye(4)}
 
     for i in range(1, n):
-        face_y_thresh = getattr(cfg, "face_region_center_y_threshold_m", 0.0)
+        face_y_thresh = cfg.face_region_center_y_threshold_m
         prev_accepted_idx = accepted_idx[-1]
 
         effective_translation_bound = min(
@@ -2156,11 +2158,11 @@ def build_pose_graph_rgbd(
     logger.info(f"  Average loop-closure edges per frame: {avg_loop_per_frame:.2f}")
 
     if accepted_pairs:
-        min_face_fit = getattr(cfg, "min_face_pair_fitness_for_fusion", 0.75)
-        max_face_rmse = getattr(cfg, "max_face_pair_rmse_for_fusion_mm", 4.0)
-        min_fit_fusion = getattr(cfg, "min_fitness_for_fusion", 0.60)
-        max_colored_rmse_mm = getattr(cfg, "max_colored_icp_rmse_m", 0.006) * 1000.0
-        min_accept_fit = getattr(cfg, "min_accept_fitness", 0.50) if getattr(cfg, "min_accept_fitness", None) is not None else 0.45
+        min_face_fit = cfg.min_face_pair_fitness_for_fusion
+        max_face_rmse = cfg.max_face_pair_rmse_for_fusion_mm
+        min_fit_fusion = cfg.min_fitness_for_fusion
+        max_colored_rmse_mm = cfg.max_colored_icp_rmse_m * 1000.0
+        min_accept_fit = cfg.min_accept_fitness if cfg.min_accept_fitness is not None else 0.50
 
         fits = [p["fitness"] for p in accepted_pairs]
         rmses = [p["rmse_mm"] for p in accepted_pairs if p["rmse_mm"] < 990.0]
@@ -2333,11 +2335,11 @@ def register_sequence_rgbd_human(
     # Compute fusion eligibility for accepted frames
     fusion_eligible_map: dict[int, bool] = {}
     fusion_reasons_map: dict[int, str] = {}
-    min_fit_fusion = getattr(cfg, "min_fitness_for_fusion", 0.60)
-    max_res_fusion = getattr(cfg, "max_landmark_residual_for_fusion_mm", 5.0)
-    min_face_fit = getattr(cfg, "min_face_pair_fitness_for_fusion", 0.75)
-    max_face_rmse = getattr(cfg, "max_face_pair_rmse_for_fusion_mm", 4.0)
-    face_y_thresh = getattr(cfg, "face_region_center_y_threshold_m", 0.0)
+    min_fit_fusion = cfg.min_fitness_for_fusion
+    max_res_fusion = cfg.max_landmark_residual_for_fusion_mm
+    min_face_fit = cfg.min_face_pair_fitness_for_fusion
+    max_face_rmse = cfg.max_face_pair_rmse_for_fusion_mm
+    face_y_thresh = cfg.face_region_center_y_threshold_m
 
     for i, d in enumerate(diagnostics):
         if i == 0:
