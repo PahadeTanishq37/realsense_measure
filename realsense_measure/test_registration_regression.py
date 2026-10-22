@@ -11,7 +11,9 @@ Run from the project folder:   python test_registration_regression.py
 import contextlib
 import copy
 import io
+import logging
 import sys
+from unittest.mock import patch
 
 import numpy as np
 import open3d as o3d
@@ -161,7 +163,7 @@ def main() -> int:
     T_implausible = np.eye(4)
     T_implausible[0, 3] = 2.0
 
-    def mock_register_pair(src, dst, c, initial_guess=None):
+    def mock_register_pair(src, dst, c, initial_guess=None, **kwargs):
         if src.frame_id in (1, 2, 3, 4):
             return np.eye(4), 0.1, 0.1, False, "none", 0.0, 0.0, "low fitness"
         elif src.frame_id == 5:
@@ -190,6 +192,105 @@ def main() -> int:
     return 0 if not failures else 1
 
 
+# ===========================================================================
+# Pytest Unit Tests for register_against_candidates (Fix #3)
+# ===========================================================================
+
+def test_register_against_candidates_fallback_on_exception(caplog):
+    """
+    Test register_against_candidates when candidate registration raises an exception (Fix #3).
+
+    Asserts:
+      (a) The exception is logged/visible as a warning per fix #3 ([fusion-fallback]).
+      (b) The pipeline correctly falls through to the next candidate rather than
+          silently returning a wrong or empty (None) result.
+    """
+    cfg = RegistrationConfig()
+
+    # Create dummy point clouds with >= 10 points
+    new_frame = o3d.geometry.PointCloud()
+    new_frame.points = o3d.utility.Vector3dVector(np.ones((20, 3)))
+
+    cand0 = o3d.geometry.PointCloud()
+    cand0.points = o3d.utility.Vector3dVector(np.ones((20, 3)) * 0.1)
+
+    cand1 = o3d.geometry.PointCloud()
+    cand1.points = o3d.utility.Vector3dVector(np.ones((20, 3)) * 0.2)
+
+    expected_transform = np.eye(4)
+    expected_transform[0, 3] = 0.05
+    expected_fitness = 0.88
+    expected_rmse = 0.0015
+
+    def mock_candidate_fn(src, dst, c):
+        if dst is cand0:
+            raise RuntimeError("Deliberate registration failure on candidate 0")
+        elif dst is cand1:
+            return expected_transform, expected_fitness, expected_rmse
+        raise ValueError("Unexpected candidate")
+
+    with patch.object(reg, "register_frame_pair", side_effect=mock_candidate_fn):
+        with caplog.at_level(logging.WARNING):
+            result = reg.register_against_candidates(new_frame, [cand0, cand1], cfg)
+
+    # (a) Assert exception is logged/visible per fix #3
+    warning_records = [
+        r for r in caplog.records
+        if "[fusion-fallback]" in r.message and "Candidate 0" in r.message
+    ]
+    assert len(warning_records) >= 1, (
+        f"Expected '[fusion-fallback] Candidate 0' warning in logs, found:\n{caplog.text}"
+    )
+    assert "RuntimeError" in warning_records[0].message
+    assert "Deliberate registration failure on candidate 0" in warning_records[0].message
+
+    # (b) Assert pipeline correctly falls through to candidate 1
+    assert result is not None, (
+        "register_against_candidates silently returned None instead of falling through to candidate 1"
+    )
+    transform, fitness, rmse = result
+    np.testing.assert_array_equal(transform, expected_transform)
+    assert fitness == expected_fitness
+    assert rmse == expected_rmse
+
+
+def test_register_against_candidates_all_candidates_raise_returns_none(caplog):
+    """
+    When all candidates raise exceptions, all exceptions are logged and
+    the function safely returns None.
+    """
+    cfg = RegistrationConfig()
+    new_frame = o3d.geometry.PointCloud()
+    new_frame.points = o3d.utility.Vector3dVector(np.ones((20, 3)))
+
+    cand0 = o3d.geometry.PointCloud()
+    cand0.points = o3d.utility.Vector3dVector(np.ones((20, 3)) * 0.1)
+    cand1 = o3d.geometry.PointCloud()
+    cand1.points = o3d.utility.Vector3dVector(np.ones((20, 3)) * 0.2)
+
+    def failing_candidate_fn(src, dst, c):
+        raise ValueError(f"Failing registration for candidate {dst}")
+
+    with patch.object(reg, "register_frame_pair", side_effect=failing_candidate_fn):
+        with caplog.at_level(logging.WARNING):
+            result = reg.register_against_candidates(new_frame, [cand0, cand1], cfg)
+
+    assert result is None
+    logged_warnings = [
+        r.message for r in caplog.records if "[fusion-fallback]" in r.message
+    ]
+    assert len(logged_warnings) == 2
+    assert "Candidate 0 registration failed with ValueError" in logged_warnings[0]
+    assert "Candidate 1 registration failed with ValueError" in logged_warnings[1]
+
+
+def test_registration_regression_known_motions_and_junk_frame():
+    """Verify known motion recovery and junk frame rejection across pipeline paths."""
+    res = main()
+    assert res == 0
+
+
 if __name__ == "__main__":
     sys.exit(main())
+
 
