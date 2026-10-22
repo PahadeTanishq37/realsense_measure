@@ -1003,8 +1003,10 @@ class ScanPipeline:
         if len(accepted_indices) >= 8:
             last_idx = accepted_indices[-1]
             try:
+                src = isolated_frames[last_idx].pcd if hasattr(isolated_frames[last_idx], "pcd") else isolated_frames[last_idx]
+                dst = isolated_frames[0].pcd if hasattr(isolated_frames[0], "pcd") else isolated_frames[0]
                 _, loop_fitness, loop_rmse = register_frame_pair(
-                    isolated_frames[last_idx], isolated_frames[0], self.cfg.registration
+                    src, dst, self.cfg.registration
                 )
                 if loop_fitness >= self.cfg.registration.min_accept_fitness:
                     logger.info(f"\n  Loop closure check: fitness={loop_fitness:.4f} (rmse={loop_rmse * 1000:.2f} mm) -- looks like a consistent full orbit.")
@@ -1028,6 +1030,7 @@ class ScanPipeline:
 
         self._log_human_registration_summary(diagnostics, summary_stats, isolated_frames)
         self._visualize_registration_diagnostics(isolated_frames, aligned, diagnostics, poses)
+        self._check_pointcloud_loop_closure(isolated_frames, diagnostics)
         self._save_and_display_stage3(aligned, diagnostics, is_human_mode=True)
         return aligned, diagnostics, poses
 
@@ -1042,10 +1045,11 @@ class ScanPipeline:
             logger.info("  Stage 3: Registering frames (Sequential FPFH+RANSAC -> ICP) ...")
         logger.info("=" * 60)
 
+        pcds = [f.pcd if hasattr(f, "pcd") else f for f in isolated_frames]
         if self.cfg.registration.use_multiway:
-            aligned, diagnostics = register_sequence_multiway(isolated_frames, self.cfg.registration)
+            aligned, diagnostics = register_sequence_multiway(pcds, self.cfg.registration)
         else:
-            aligned, diagnostics = register_sequence(isolated_frames, self.cfg.registration)
+            aligned, diagnostics = register_sequence(pcds, self.cfg.registration)
 
         rejected_indices: list[int] = []
         for i, diag in enumerate(diagnostics):
@@ -1113,55 +1117,183 @@ class ScanPipeline:
         )
         min_fit_fusion = getattr(self.cfg.registration, "min_fitness_for_fusion", 0.60)
         max_lm_res_fusion = getattr(self.cfg.registration, "max_landmark_residual_for_fusion_mm", 5.0)
+        min_face_fit = getattr(self.cfg.registration, "min_face_pair_fitness_for_fusion", 0.75)
+        max_face_rmse = getattr(self.cfg.registration, "max_face_pair_rmse_for_fusion_mm", 4.0)
+        face_y_thresh = getattr(self.cfg.registration, "face_region_center_y_threshold_m", 0.0)
 
         frame_scores = {}
         fusion_eligible = {}
         fusion_reasons = {}
         residuals = {}
+        frame_methods = {}
         if hasattr(self, "last_registration_stats") and self.last_registration_stats:
             frame_scores = self.last_registration_stats.get("frame_scores", {})
             fusion_eligible = self.last_registration_stats.get("fusion_eligible", {})
             fusion_reasons = self.last_registration_stats.get("fusion_reasons", {})
             residuals = self.last_registration_stats.get("residuals") or self.last_registration_stats.get("frame_residuals", {})
+            frame_methods = self.last_registration_stats.get("frame_methods", {})
+
+        from registration import is_upper_face_frame
 
         accepted_indices = []
+        gate_report_records = []
+        gate_exclusions = {
+            "min_fitness_for_fusion": 0,
+            "max_landmark_residual_for_fusion_mm": 0,
+            "min_face_pair_fitness_for_fusion": 0,
+            "max_face_pair_rmse_for_fusion_mm": 0,
+        }
+
         for i, d in enumerate(diagnostics):
-            if d is None or not d[2]:
-                continue
+            reg_accepted = bool(d is not None and d[2]) if i > 0 else True
+            fit = float(d[0]) if (d is not None and d[0] is not None) else (1.0 if i == 0 else 0.0)
+            rmse_m = float(d[1]) if (d is not None and d[1] is not None) else (0.0 if i == 0 else float("inf"))
+            rmse_mm = (rmse_m * 1000.0) if np.isfinite(rmse_m) else None
+
+            score_str = frame_scores.get(i, "")
+            lm_res = residuals.get(i)
+            if lm_res is None and "residual=" in score_str:
+                try:
+                    lm_res = float(score_str.split("residual=")[1].split("mm")[0])
+                except Exception:
+                    pass
+
+            method = frame_methods.get(i, "reference" if i == 0 else ("none" if not reg_accepted else "registered"))
+            is_upper = is_upper_face_frame(aligned_frames[i], face_y_thresh) if i < len(aligned_frames) else False
+
+            # Evaluate each gate vs threshold
+            failed_gates = {}
+            if fit < min_fit_fusion:
+                failed_gates["min_fitness_for_fusion"] = {
+                    "actual": round(fit, 4),
+                    "threshold": float(min_fit_fusion),
+                }
+            if lm_res is not None and lm_res > max_lm_res_fusion:
+                failed_gates["max_landmark_residual_for_fusion_mm"] = {
+                    "actual": round(float(lm_res), 2),
+                    "threshold": float(max_lm_res_fusion),
+                }
+            if fit < min_face_fit:
+                failed_gates["min_face_pair_fitness_for_fusion"] = {
+                    "actual": round(fit, 4),
+                    "threshold": float(min_face_fit),
+                }
+            if rmse_mm is not None and rmse_mm > max_face_rmse:
+                failed_gates["max_face_pair_rmse_for_fusion_mm"] = {
+                    "actual": round(rmse_mm, 2),
+                    "threshold": float(max_face_rmse),
+                }
+
+            is_fused = False
+            reasons = []
+
             if i == 0:
+                is_fused = True
                 accepted_indices.append(0)
-                continue
-
-            if is_human_mode:
+            elif not reg_accepted:
+                is_fused = False
+                reasons.append("rejected in Stage 3 registration")
+            elif is_human_mode:
                 if fusion_eligible and i in fusion_eligible:
-                    if not fusion_eligible[i]:
+                    if fusion_eligible[i]:
+                        is_fused = True
+                        accepted_indices.append(i)
+                    else:
+                        is_fused = False
                         reason_ex = fusion_reasons.get(i, "stricter fusion gate")
+                        reasons.append(reason_ex)
                         logger.debug(f"  frame {i}: pose accepted, EXCLUDED from fusion ({reason_ex})")
-                        continue
                 else:
-                    fit = d[0]
-                    score_str = frame_scores.get(i, "")
-                    lm_res = residuals.get(i)
-                    if lm_res is None and "residual=" in score_str:
-                        try:
-                            lm_res = float(score_str.split("residual=")[1].split("mm")[0])
-                        except Exception:
-                            pass
-
                     if fit < min_fit_fusion:
-                        logger.debug(f"  frame {i}: pose accepted, EXCLUDED from fusion (fitness {fit:.2f} < {min_fit_fusion:.2f} fusion threshold)")
-                        continue
+                        reasons.append(f"fitness {fit:.2f} < {min_fit_fusion:.2f} fusion threshold")
                     if lm_res is not None and lm_res > max_lm_res_fusion:
-                        logger.debug(f"  frame {i}: pose accepted, EXCLUDED from fusion (landmark residual {lm_res:.1f}mm > {max_lm_res_fusion:.1f}mm fusion threshold)")
-                        continue
+                        reasons.append(f"landmark residual {lm_res:.1f}mm > {max_lm_res_fusion:.1f}mm fusion threshold")
 
-            accepted_indices.append(i)
+                    if not reasons:
+                        is_fused = True
+                        accepted_indices.append(i)
+                    else:
+                        is_fused = False
+                        for r_msg in reasons:
+                            logger.debug(f"  frame {i}: pose accepted, EXCLUDED from fusion ({r_msg})")
+            else:
+                is_fused = True
+                accepted_indices.append(i)
+
+            decision_str = "fused" if is_fused else "excluded"
+
+            # Tally gate exclusions for registered frames that were dropped by fusion gates
+            if not is_fused and reg_accepted:
+                for g_name in failed_gates:
+                    if g_name in gate_exclusions:
+                        gate_exclusions[g_name] += 1
+
+            record = {
+                "frame_index": i,
+                "registration_method": method,
+                "fitness": round(fit, 4),
+                "rmse": round(rmse_m, 6) if np.isfinite(rmse_m) else None,
+                "landmark_residual_mm": round(float(lm_res), 2) if lm_res is not None else None,
+                "upper_lower_face_region": "upper" if is_upper else "lower",
+                "is_upper_face_region": is_upper,
+                "failed_gates": failed_gates,
+                "final_decision": decision_str,
+                "reason": "; ".join(reasons) if reasons else "accepted for fusion",
+            }
+            gate_report_records.append(record)
 
         accepted_frames = [aligned_frames[i] for i in accepted_indices]
         if not accepted_frames:
             logger.warning("  [!] Warning: No frames met acceptance criteria; falling back to frame 0.")
             accepted_frames = aligned_frames[:1]
             accepted_indices = [0]
+            if gate_report_records:
+                gate_report_records[0]["final_decision"] = "fused"
+                gate_report_records[0]["reason"] = "fallback to frame 0"
+
+        # One-line summary
+        n_registered = sum(1 for d in diagnostics if d is not None and d[2])
+        n_fused = len(accepted_indices)
+        gate_summary = (
+            f"Stage 4 Gate Summary: {n_registered} frames registered, {n_fused} fused, "
+            f"excluded by gates: min_fitness_for_fusion={gate_exclusions['min_fitness_for_fusion']}, "
+            f"max_landmark_residual_for_fusion_mm={gate_exclusions['max_landmark_residual_for_fusion_mm']}, "
+            f"min_face_pair_fitness_for_fusion={gate_exclusions['min_face_pair_fitness_for_fusion']}, "
+            f"max_face_pair_rmse_for_fusion_mm={gate_exclusions['max_face_pair_rmse_for_fusion_mm']}"
+        )
+        logger.info(gate_summary)
+        print(gate_summary)
+
+        gate_report = {
+            "summary": {
+                "frames_total": len(diagnostics),
+                "frames_registered": n_registered,
+                "frames_fused": n_fused,
+                "frames_excluded": len(diagnostics) - n_fused,
+                "excluded_by_gate": gate_exclusions,
+            },
+            "thresholds": {
+                "min_fitness_for_fusion": float(min_fit_fusion),
+                "max_landmark_residual_for_fusion_mm": float(max_lm_res_fusion),
+                "min_face_pair_fitness_for_fusion": float(min_face_fit),
+                "max_face_pair_rmse_for_fusion_mm": float(max_face_rmse),
+            },
+            "frames": gate_report_records,
+        }
+
+        save_dirs = [self.cfg.output_dir]
+        if hasattr(self, "scan_folder") and self.scan_folder is not None:
+            save_dirs.append(self.scan_folder)
+
+        for d_path in save_dirs:
+            try:
+                d_path.mkdir(parents=True, exist_ok=True)
+                out_json = d_path / "stage4_gate_report.json"
+                with open(out_json, "w", encoding="utf-8") as f:
+                    json.dump(gate_report, f, indent=2)
+                logger.info(f"  Saved: {out_json}")
+            except Exception as exc:
+                logger.warning(f"  [!] Failed to save stage4_gate_report.json to {d_path}: {exc}")
 
         return accepted_frames, accepted_indices
 

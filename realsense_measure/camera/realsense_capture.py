@@ -14,8 +14,11 @@ ever deals with plain numpy arrays and Open3D point clouds, which means:
 
 from __future__ import annotations
 
+import logging
 import numpy as np
 import open3d as o3d
+
+logger = logging.getLogger(__name__)
 
 try:
     import pyrealsense2 as rs
@@ -107,7 +110,8 @@ class RealSenseCamera:
         )
         self._to_disparity   = rs.disparity_transform(True)   # depth → disparity
         self._spatial        = rs.spatial_filter()
-        self._spatial.set_option(rs.option.filter_magnitude, 2.0)
+        spatial_mag = 1.0 if self.cfg.human_face_quality_mode else 2.0
+        self._spatial.set_option(rs.option.filter_magnitude, spatial_mag)
         self._spatial.set_option(rs.option.filter_smooth_alpha, 0.5)
         self._spatial.set_option(rs.option.filter_smooth_delta, 20.0)
         self._spatial.set_option(rs.option.holes_fill, 0.0)
@@ -171,7 +175,53 @@ class RealSenseCamera:
         """
         try:
             self._profile = self.pipeline.start(self.rs_config)
+        except Exception as exc:
+            if self.cfg.human_face_quality_mode and (self.cfg.width != 848 or self.cfg.height != 480):
+                logger.warning(
+                    f"Camera does not support requested high-quality resolution "
+                    f"({self.cfg.width}x{self.cfg.height} @ {self.cfg.fps}fps): {exc}. "
+                    f"Falling back to 848x480."
+                )
+                self.cfg.width = 848
+                self.cfg.height = 480
+                self.rs_config = rs.config()
+                self.rs_config.enable_stream(
+                    rs.stream.depth, 848, 480, rs.format.z16, self.cfg.fps
+                )
+                self.rs_config.enable_stream(
+                    rs.stream.color, 848, 480, rs.format.bgr8, self.cfg.fps
+                )
+                try:
+                    self._profile = self.pipeline.start(self.rs_config)
+                except Exception as fallback_exc:
+                    if self._profile is not None:
+                        try:
+                            self.pipeline.stop()
+                        except Exception:
+                            pass
+                    self._profile = None
+                    self.depth_scale = None
+                    self.intrinsics_o3d = None
+                    raise StreamNegotiationError(
+                        f"Failed to negotiate and start RealSense stream with fallback configuration "
+                        f"(resolution=848x480, fps={self.cfg.fps}): {fallback_exc}"
+                    ) from fallback_exc
+            else:
+                # Clean up and reset attributes so depth_scale/intrinsics_o3d are never left half-set
+                if self._profile is not None:
+                    try:
+                        self.pipeline.stop()
+                    except Exception:
+                        pass
+                self._profile = None
+                self.depth_scale = None
+                self.intrinsics_o3d = None
+                raise StreamNegotiationError(
+                    f"Failed to negotiate and start RealSense stream with requested configuration "
+                    f"(resolution={self.cfg.width}x{self.cfg.height}, fps={self.cfg.fps}): {exc}"
+                ) from exc
 
+        try:
             # ---- depth scale (converts raw u16 units to metres) -------------
             depth_sensor = (
                 self._profile
@@ -179,6 +229,23 @@ class RealSenseCamera:
                 .first_depth_sensor()
             )
             self.depth_scale = depth_sensor.get_depth_scale()
+
+            if self.cfg.human_face_quality_mode:
+                try:
+                    if hasattr(rs, "option") and hasattr(rs.option, "visual_preset") and depth_sensor.supports(rs.option.visual_preset):
+                        if hasattr(rs, "rs400_visual_preset") and hasattr(rs.rs400_visual_preset, "high_accuracy"):
+                            preset_val = float(rs.rs400_visual_preset.high_accuracy)
+                            depth_sensor.set_option(rs.option.visual_preset, preset_val)
+                            logger.info("  RealSense depth visual preset set to High Accuracy")
+                except Exception as exc:
+                    logger.warning(f"Could not set RealSense visual preset to High Accuracy: {exc}")
+
+                try:
+                    if hasattr(rs, "option") and hasattr(rs.option, "emitter_enabled") and depth_sensor.supports(rs.option.emitter_enabled):
+                        depth_sensor.set_option(rs.option.emitter_enabled, 1.0)
+                        logger.info("  RealSense IR emitter enabled")
+                except Exception as exc:
+                    logger.warning(f"Could not enable RealSense IR emitter: {exc}")
 
             # ---- colour-stream intrinsics → Open3D format -------------------
             stream_profile = (
@@ -196,7 +263,6 @@ class RealSenseCamera:
                 cy=intr.ppy,
             )
         except Exception as exc:
-            # Clean up and reset attributes so depth_scale/intrinsics_o3d are never left half-set
             if self._profile is not None:
                 try:
                     self.pipeline.stop()
@@ -206,8 +272,7 @@ class RealSenseCamera:
             self.depth_scale = None
             self.intrinsics_o3d = None
             raise StreamNegotiationError(
-                f"Failed to negotiate and start RealSense stream with requested configuration "
-                f"(resolution={self.cfg.width}x{self.cfg.height}, fps={self.cfg.fps}): {exc}"
+                f"Failed to initialize RealSense sensor calibration: {exc}"
             ) from exc
 
         print("\n  RealSense D455 Camera Calibration:")

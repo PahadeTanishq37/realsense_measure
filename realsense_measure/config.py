@@ -116,6 +116,18 @@ class CameraConfig:
     # Real-time feedback settings for human/head capture
     head_capture: HeadCaptureConfig = field(default_factory=HeadCaptureConfig)
 
+    # High-quality capture mode for human face/head scans
+    human_face_quality_mode: bool = False
+
+    def resolve_defaults(self, target_name: str = "box") -> "CameraConfig":
+        """Apply human face quality settings when enabled and target is head or body."""
+        if self.human_face_quality_mode and target_name in ("head", "body"):
+            self.use_decimation = False
+            self.use_hole_filling = False
+            self.width = 1280
+            self.height = 720
+        return self
+
 
 # ---------------------------------------------------------------------------
 # Stage: Preprocessing
@@ -385,6 +397,9 @@ class PipelineConfig:
 
         # Resolve registration target-specific defaults if still None
         self.registration.resolve_defaults(self.target.name)
+
+        # Resolve camera target-specific defaults (e.g. human face quality mode)
+        self.camera.resolve_defaults(self.target.name)
 
         # Human head/body mode: apply finer TSDF voxel resolution if still None
         if self.target.name in ("head", "body") or self.registration.registration_mode == "rgbd_human":

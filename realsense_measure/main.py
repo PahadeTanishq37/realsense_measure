@@ -121,6 +121,21 @@ def _build_parser() -> argparse.ArgumentParser:
         help="disable multiway pose-graph registration and use sequential registration instead",
     )
     parser.add_argument(
+        "--multiway",
+        action="store_true",
+        help="use multiway pose-graph global registration instead of sequential",
+    )
+    parser.add_argument(
+        "--tsdf",
+        action="store_true",
+        help="use volumetric TSDF integration for reconstruction fusion",
+    )
+    parser.add_argument(
+        "--face-quality",
+        action="store_true",
+        help="enable high-quality face scan settings (1280x720, no decimation/hole-filling, high accuracy preset)",
+    )
+    parser.add_argument(
         "--reference-dims",
         type=str,
         default=None,
@@ -206,9 +221,18 @@ def main() -> None:
 
     if args.sequential:
         cfg.registration.use_multiway = False
+    if args.multiway:
+        cfg.registration.use_multiway = True
 
     if args.loop_closure:
         cfg.attempt_loop_closure = True
+
+    if args.tsdf:
+        cfg.fusion_method = "tsdf"
+
+    if args.face_quality:
+        cfg.camera.human_face_quality_mode = True
+        cfg.camera.resolve_defaults(cfg.target.name)
 
     # ---- run -----------------------------------------------------------
     try:
