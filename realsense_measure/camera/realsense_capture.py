@@ -638,42 +638,16 @@ class RealSenseCamera:
                 "Ensure start() completed successfully before calling to_point_cloud()."
             )
 
-        # BGR → RGB (Open3D expects RGB)
-        color_rgb = np.ascontiguousarray(color_bgr[:, :, ::-1])
+        from camera.frame import create_pcd_from_rgbd
 
-        # Clip depth to the usable range; zeroed pixels become "no data"
-        # and are excluded from the RGBD image by depth_trunc.
-        depth_clipped = depth_m.copy()
-        if roi is not None:
-            rx, ry, rw, rh = roi
-            mask = np.zeros_like(depth_clipped, dtype=bool)
-            mask[max(0, ry) : max(0, ry + rh), max(0, rx) : max(0, rx + rw)] = True
-            depth_clipped[~mask] = 0.0
-
-        depth_clipped[depth_clipped < self.cfg.depth_min_m] = 0.0
-        depth_clipped[depth_clipped > self.cfg.depth_max_m] = 0.0
-
-        o3d_color = o3d.geometry.Image(color_rgb)
-        o3d_depth = o3d.geometry.Image(depth_clipped)
-
-        rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
-            o3d_color,
-            o3d_depth,
-            depth_scale=1.0,                    # already in metres
-            depth_trunc=self.cfg.depth_max_m,
-            convert_rgb_to_intensity=False,
+        return create_pcd_from_rgbd(
+            color_bgr=color_bgr,
+            depth_m=depth_m,
+            intrinsics=self.intrinsics_o3d,
+            depth_min_m=self.cfg.depth_min_m,
+            depth_max_m=self.cfg.depth_max_m,
+            roi=roi,
         )
-
-        pcd = o3d.geometry.PointCloud.create_from_rgbd_image(
-            rgbd,
-            self.intrinsics_o3d,
-        )
-
-        # Coordinate system: RealSense native convention is kept.
-        #   +X = right,  +Y = down,  +Z = forward  (units: metres)
-        # No flip is applied here so the point cloud remains in the camera
-        # frame that preprocessing, registration, and reconstruction expect.
-        return pcd
 
     def create_rgbd_frame(
         self,

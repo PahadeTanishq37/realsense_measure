@@ -43,6 +43,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+import cv2
 import numpy as np
 import open3d as o3d
 from scipy.spatial.distance import cdist
@@ -588,6 +589,32 @@ def register_frame_pair(
     )
 
 
+class LandmarkGuidedResult(tuple):
+    """5-tuple result from register_frame_pair_landmark_guided supporting unpacking:
+    (transform, fitness, rmse, method, residual_mm)
+    while exposing trans_disagree_mm and rot_disagree_deg."""
+
+    def __new__(
+        cls,
+        transform,
+        fitness,
+        rmse,
+        method,
+        residual_mm,
+        trans_disagree_mm=None,
+        rot_disagree_deg=None,
+    ):
+        inst = super().__new__(cls, (transform, fitness, rmse, method, residual_mm))
+        inst.transform = transform
+        inst.fitness = fitness
+        inst.rmse = rmse
+        inst.method = method
+        inst.residual_mm = residual_mm
+        inst.trans_disagree_mm = trans_disagree_mm
+        inst.rot_disagree_deg = rot_disagree_deg
+        return inst
+
+
 def register_frame_pair_landmark_guided(
     source_pcd: o3d.geometry.PointCloud,
     source_color: np.ndarray,
@@ -598,7 +625,7 @@ def register_frame_pair_landmark_guided(
     intrinsics_o3d: o3d.camera.PinholeCameraIntrinsic,
     cfg: RegistrationConfig,
     residual_accept_mm: float = 15.0,
-) -> tuple[np.ndarray, float, float, str, float]:
+) -> LandmarkGuidedResult:
     """
     Register one frame pair using facial landmarks as the initial guess for
     ICP, instead of FPFH+RANSAC global registration. Falls back to the
@@ -609,8 +636,9 @@ def register_frame_pair_landmark_guided(
 
     Returns
     -------
-    (transform, fitness, rmse, method, residual_mm) where method is "landmark" or
-    "fpfh_fallback", for logging/diagnostics.
+    LandmarkGuidedResult
+        (transform, fitness, rmse, method, residual_mm) supporting 5-tuple unpacking
+        and carrying trans_disagree_mm and rot_disagree_deg.
     """
     from landmarks import detect_face_landmarks_3d
 
@@ -674,7 +702,7 @@ def register_frame_pair_landmark_guided(
                 if not is_conditioned:
                     logger.warning(f"      [landmarks] Kabsch skipped: {cond_reason} -- falling back to FPFH")
                     transform, fitness, rmse = register_frame_pair(source_pcd, target_pcd, cfg)
-                    return transform, fitness, rmse, "fpfh_fallback", float("nan")
+                    return LandmarkGuidedResult(transform, fitness, rmse, "fpfh_fallback", float("nan"))
 
             init_T, residual_mm = rigid_transform_from_correspondences(src_pts, dst_pts, weights=weights)
             if residual_mm <= residual_accept_mm:
@@ -705,7 +733,7 @@ def register_frame_pair_landmark_guided(
                         f"{seed_dense_fitness:.2f} < {min_dense_fit:.2f} threshold (residual was {residual_mm:.1f}mm) "
                         f"-- falling through to Tier 2"
                     )
-                    return np.eye(4), 0.0, float("inf"), "dense_sanity_failed", float(residual_mm)
+                    return LandmarkGuidedResult(np.eye(4), 0.0, float("inf"), "dense_sanity_failed", float(residual_mm))
 
                 # Localized (face-region) fitness check (Task 2)
                 if cfg.enable_landmark_face_fitness_check:
@@ -744,9 +772,11 @@ def register_frame_pair_landmark_guided(
                                 f"{face_fitness:.2f} < {min_face_fit:.2f} threshold (residual was {residual_mm:.1f}mm) "
                                 f"-- falling through to Tier 2"
                             )
-                            return np.eye(4), 0.0, float("inf"), "face_sanity_failed", float(residual_mm)
+                            return LandmarkGuidedResult(np.eye(4), 0.0, float("inf"), "face_sanity_failed", float(residual_mm))
 
                 # Independent geometric FPFH+RANSAC cross-check (Task 1)
+                trans_disagree_mm = None
+                rot_disagree_deg = None
                 if cfg.enable_landmark_fpfh_crosscheck:
                     max_trans_disagree = cfg.max_landmark_fpfh_disagreement_trans_m
                     max_rot_disagree = cfg.max_landmark_fpfh_disagreement_rot_deg
@@ -764,6 +794,8 @@ def register_frame_pair_landmark_guided(
                         if fpfh_quality >= 0.15:
                             trans_disagree = float(np.linalg.norm(init_T[:3, 3] - T_fpfh[:3, 3]))
                             rot_disagree = float(compute_rotation_deg(init_T[:3, :3] @ T_fpfh[:3, :3].T))
+                            trans_disagree_mm = trans_disagree * 1000.0
+                            rot_disagree_deg = rot_disagree
 
                             if trans_disagree > max_trans_disagree or rot_disagree > max_rot_disagree:
                                 logger.warning(
@@ -771,7 +803,15 @@ def register_frame_pair_landmark_guided(
                                     f"(trans {trans_disagree:.3f}m, rot {rot_disagree:.1f}deg) "
                                     f"-- falling through to Tier 2"
                                 )
-                                return np.eye(4), 0.0, float("inf"), "fpfh_crosscheck_failed", float(residual_mm)
+                                return LandmarkGuidedResult(
+                                    np.eye(4),
+                                    0.0,
+                                    float("inf"),
+                                    "fpfh_crosscheck_failed",
+                                    float(residual_mm),
+                                    trans_disagree_mm=trans_disagree_mm,
+                                    rot_disagree_deg=rot_disagree_deg,
+                                )
                     except Exception as e:
                         logger.warning(
                             f"      [fusion-fallback] FPFH cross-check failed with "
@@ -814,12 +854,14 @@ def register_frame_pair_landmark_guided(
                         f"{type(e).__name__}: {e} -- falling back to point-to-plane ICP"
                     )
                     icp_result = _icp_refine(source_pcd, target_pcd, init_T, cfg)
-                return (
+                return LandmarkGuidedResult(
                     icp_result.transformation,
                     float(icp_result.fitness),
                     float(icp_result.inlier_rmse),
                     "landmark",
                     float(residual_mm),
+                    trans_disagree_mm=trans_disagree_mm,
+                    rot_disagree_deg=rot_disagree_deg,
                 )
             else:
                 logger.debug(f"      [landmarks] Kabsch residual too high: {residual_mm:.1f}mm > {residual_accept_mm:.1f}mm")
@@ -831,7 +873,7 @@ def register_frame_pair_landmark_guided(
         logger.debug(f"      [landmarks] Face not detected on both frames (src={src_n}, dst={dst_n})")
 
     transform, fitness, rmse = register_frame_pair(source_pcd, target_pcd, cfg)
-    return transform, fitness, rmse, "fpfh_fallback", float("nan")
+    return LandmarkGuidedResult(transform, fitness, rmse, "fpfh_fallback", float("nan"))
 
 
 def register_against_candidates(
@@ -1120,7 +1162,7 @@ def compute_mutual_fitness(source_fitness: float, n_source: int, n_target: int) 
 class PairRegistrationResult(tuple):
     """Result tuple from register_rgbd_pair, supporting backward-compatible 8-element unpacking:
     (T, fitness, rmse, accepted, method_name, rot_deg, trans_mm, reason)
-    while exposing structured attributes including residual_mm."""
+    while exposing structured attributes including residual_mm, ROI counts, and disagreement."""
 
     def __new__(
         cls,
@@ -1133,6 +1175,10 @@ class PairRegistrationResult(tuple):
         translation_mm=None,
         reason=None,
         residual_mm=None,
+        src_roi_pts=0,
+        tgt_roi_pts=0,
+        trans_disagree_mm=None,
+        rot_disagree_deg=None,
     ):
         if isinstance(transformation, (tuple, list)) and fitness is None:
             items = list(transformation)
@@ -1160,7 +1206,171 @@ class PairRegistrationResult(tuple):
         inst.translation_mm = tr
         inst.reason = rea
         inst.residual_mm = residual_mm
+        inst.src_roi_pts = src_roi_pts
+        inst.tgt_roi_pts = tgt_roi_pts
+        inst.trans_disagree_mm = trans_disagree_mm
+        inst.rot_disagree_deg = rot_disagree_deg
         return inst
+
+
+def create_depth_mask_from_pcd(
+    pcd: o3d.geometry.PointCloud,
+    depth_m: np.ndarray,
+    intrinsics: o3d.camera.PinholeCameraIntrinsic,
+) -> np.ndarray:
+    """
+    Generate depth_override array retaining only depth for pixels corresponding to pcd points.
+    """
+    H, W = depth_m.shape[:2]
+    depth_masked = np.zeros_like(depth_m, dtype=np.float32)
+    if not hasattr(pcd, "has_points") or not pcd.has_points() or len(pcd.points) == 0:
+        return depth_m.copy()
+
+    pts = np.asarray(pcd.points)
+    intr_mat = intrinsics.intrinsic_matrix
+    fx = float(intr_mat[0, 0])
+    fy = float(intr_mat[1, 1])
+    cx = float(intr_mat[0, 2])
+    cy = float(intr_mat[1, 2])
+
+    z = pts[:, 2]
+    valid = z > 0.01
+    if not np.any(valid):
+        return depth_m.copy()
+
+    pts_val = pts[valid]
+    z_val = z[valid]
+
+    u = np.round((pts_val[:, 0] * fx / z_val) + cx).astype(int)
+    v = np.round((pts_val[:, 1] * fy / z_val) + cy).astype(int)
+
+    mask = (u >= 0) & (u < W) & (v >= 0) & (v < H)
+    u = u[mask]
+    v = v[mask]
+
+    roi_mask = np.zeros((H, W), dtype=np.uint8)
+    roi_mask[v, u] = 255
+    kernel = np.ones((3, 3), np.uint8)
+    roi_mask = cv2.dilate(roi_mask, kernel, iterations=1)
+
+    depth_masked[roi_mask > 0] = depth_m[roi_mask > 0]
+    return depth_masked
+
+
+def derive_head_roi(
+    frame: RGBDFrame,
+    cfg: RegistrationConfig,
+    ref_center: np.ndarray | None = None,
+    ref_down: np.ndarray | None = None,
+    rel_pose: np.ndarray | None = None,
+) -> tuple[o3d.geometry.PointCloud | None, np.ndarray | None, np.ndarray | None, str]:
+    """
+    Derive head ROI used ONLY for computing pairwise registration transforms.
+
+    Strategy:
+    1. Prefer MediaPipe landmarks when detected:
+       - Sphere around landmark centroid, radius cfg.head_roi_radius_m (default 0.15m).
+       - Clipped above chin/neck.
+    2. When landmarks are missing (profile/back views):
+       - Propagate ROI from neighboring frame using its already-estimated pose.
+    3. If no ROI can be derived:
+       - Fall back to the existing full-cloud behavior AND log it per frame.
+
+    Returns
+    -------
+    (roi_pcd, head_center, neck_down_vector, source_type)
+    """
+    pcd = frame.pcd
+    if pcd is None or not hasattr(pcd, "has_points") or not pcd.has_points() or len(pcd.points) < 20:
+        return None, None, None, "fallback_full_cloud"
+
+    pts = np.asarray(pcd.points)
+    radius = float(getattr(cfg, "head_roi_radius_m", 0.15))
+    fid = getattr(frame, "frame_id", 0)
+
+    # 1. Prefer MediaPipe landmarks
+    if (
+        cfg.use_landmarks
+        and hasattr(frame, "color_bgr") and frame.color_bgr is not None
+        and hasattr(frame, "depth_m") and frame.depth_m is not None
+        and hasattr(frame, "intrinsics") and frame.intrinsics is not None
+    ):
+        try:
+            from landmarks import detect_face_landmarks_3d
+            lm_cfg = cfg.landmark_cfg
+            lm_dict = detect_face_landmarks_3d(frame.color_bgr, frame.depth_m, frame.intrinsics, cfg=lm_cfg)
+            if lm_dict is not None and len(lm_dict) >= 4:
+                lm_positions = []
+                chin_pos = None
+                for k, v in lm_dict.items():
+                    pos = v["position"] if isinstance(v, dict) else v
+                    lm_positions.append(pos)
+                    if k == "chin":
+                        chin_pos = np.asarray(pos, dtype=np.float64)
+
+                center = np.mean(lm_positions, axis=0)
+
+                if chin_pos is not None:
+                    v_chin = chin_pos - center
+                    norm_v = np.linalg.norm(v_chin)
+                    if norm_v > 1e-4:
+                        down_vec = v_chin / norm_v
+                        clip_dist = norm_v + 0.01
+                    else:
+                        down_vec = np.array([0.0, 1.0, 0.0])
+                        clip_dist = 0.08
+                else:
+                    down_vec = np.array([0.0, 1.0, 0.0])
+                    clip_dist = 0.08
+
+                dist_to_center = np.linalg.norm(pts - center, axis=1)
+                proj_down = np.dot(pts - center, down_vec)
+                mask = (dist_to_center <= radius) & (proj_down <= clip_dist)
+
+                if np.count_nonzero(mask) >= 20:
+                    roi_pcd = pcd.select_by_index(np.where(mask)[0])
+                    logger.debug(
+                        f"  [head-roi] Frame {fid}: derived via landmarks "
+                        f"(pts: {len(roi_pcd.points)}/{len(pts)}, center: {center})"
+                    )
+                    return roi_pcd, center, down_vec, "landmarks"
+        except Exception as exc:
+            logger.debug(f"  [head-roi] Landmark detection failed for frame {fid}: {exc}")
+
+    # 2. Propagate ROI from neighboring frame using its already-estimated pose
+    # rel_pose maps this frame into ref frame (p_ref = rel_pose @ p_this)
+    if ref_center is not None and rel_pose is not None:
+        try:
+            inv_pose = np.linalg.inv(rel_pose)
+            center = (inv_pose @ np.array([ref_center[0], ref_center[1], ref_center[2], 1.0]))[:3]
+            ref_down_vec = ref_down if ref_down is not None else np.array([0.0, 1.0, 0.0])
+            down_vec = inv_pose[:3, :3] @ ref_down_vec
+            norm_down = np.linalg.norm(down_vec)
+            if norm_down > 1e-4:
+                down_vec /= norm_down
+            else:
+                down_vec = np.array([0.0, 1.0, 0.0])
+
+            dist_to_center = np.linalg.norm(pts - center, axis=1)
+            proj_down = np.dot(pts - center, down_vec)
+            clip_dist = 0.08
+            mask = (dist_to_center <= radius) & (proj_down <= clip_dist)
+
+            if np.count_nonzero(mask) >= 20:
+                roi_pcd = pcd.select_by_index(np.where(mask)[0])
+                logger.debug(
+                    f"  [head-roi] Frame {fid}: derived via propagation "
+                    f"(pts: {len(roi_pcd.points)}/{len(pts)}, center: {center})"
+                )
+                return roi_pcd, center, down_vec, "propagated"
+        except Exception as exc:
+            logger.debug(f"  [head-roi] Propagation failed for frame {fid}: {exc}")
+
+    # 3. Fall back to existing full-cloud behavior AND log it per frame
+    logger.warning(
+        f"  [head-roi] Frame {fid}: No head ROI could be derived, falling back to full-cloud"
+    )
+    return None, None, None, "fallback_full_cloud"
 
 
 def register_rgbd_pair(
@@ -1169,7 +1379,9 @@ def register_rgbd_pair(
     cfg: RegistrationConfig,
     initial_guess: np.ndarray | None = None,
     is_bridge: bool = False,
-) -> tuple[np.ndarray, float, float, bool, str, float, float, str]:
+    src_head_roi: o3d.geometry.PointCloud | None = None,
+    tgt_head_roi: o3d.geometry.PointCloud | None = None,
+) -> PairRegistrationResult:
     """
     Register source_frame onto target_frame with Landmark-Guided ICP -> RGB-D Odometry -> Colored ICP -> Quality Gate -> FPFH/RANSAC Fallback.
 
@@ -1180,7 +1392,7 @@ def register_rgbd_pair(
 
     Returns
     -------
-    (T, fitness, rmse, accepted, method_name, rot_deg, trans_mm, reason)
+    PairRegistrationResult: (T, fitness, rmse, accepted, method_name, rot_deg, trans_mm, reason)
     """
     cfg.resolve_defaults(target_name="head" if cfg.registration_mode == "rgbd_human" else "box")
     # Guard against empty / degenerate point clouds
@@ -1200,14 +1412,52 @@ def register_rgbd_pair(
             residual_mm=None,
         )
 
-    src_pcd = source_frame.pcd
-    tgt_pcd = target_frame.pcd
-    n_src = len(src_pcd.points)
-    n_tgt = len(tgt_pcd.points)
-
     src_id = getattr(source_frame, "frame_id", "src")
     tgt_id = getattr(target_frame, "frame_id", "tgt")
     pair_str = f"{src_id}->{tgt_id}"
+
+    use_head_roi = bool(getattr(cfg, "head_only_registration", False))
+    if use_head_roi and src_head_roi is not None and len(src_head_roi.points) >= 20:
+        src_pcd = src_head_roi
+    else:
+        src_pcd = source_frame.pcd
+
+    if use_head_roi and tgt_head_roi is not None and len(tgt_head_roi.points) >= 20:
+        tgt_pcd = tgt_head_roi
+    else:
+        tgt_pcd = target_frame.pcd
+
+    n_src = len(src_pcd.points)
+    n_tgt = len(tgt_pcd.points)
+    n_src_roi = len(src_head_roi.points) if src_head_roi is not None else len(source_frame.pcd.points)
+    n_tgt_roi = len(tgt_head_roi.points) if tgt_head_roi is not None else len(target_frame.pcd.points)
+
+    trans_disagree_mm = None
+    rot_disagree_deg = None
+
+    def _make_result(T, fit, rmse, accepted, method, rot, trans, reason, residual_mm=None):
+        trans_dis_str = f"{trans_disagree_mm:.1f}mm" if trans_disagree_mm is not None else "N/A"
+        rot_dis_str = f"{rot_disagree_deg:.1f}deg" if rot_disagree_deg is not None else "N/A"
+        logger.info(
+            f"  [pair-reg] pair {pair_str}: tier={method} fitness={fit:.2f} "
+            f"rmse={rmse*1000.0:.1f}mm | ROI pts src={n_src_roi} tgt={n_tgt_roi} | "
+            f"Kabsch-vs-FPFH disagree: trans={trans_dis_str} rot={rot_dis_str}"
+        )
+        return PairRegistrationResult(
+            T,
+            fit,
+            rmse,
+            accepted,
+            method,
+            rot,
+            trans,
+            reason,
+            residual_mm=residual_mm,
+            src_roi_pts=n_src_roi,
+            tgt_roi_pts=n_tgt_roi,
+            trans_disagree_mm=trans_disagree_mm,
+            rot_disagree_deg=rot_disagree_deg,
+        )
 
     # Overlap pre-check: AABB intersection and Centroid-to-Centroid distance
     src_min = np.asarray(src_pcd.get_min_bound())
@@ -1243,7 +1493,7 @@ def register_rgbd_pair(
         and hasattr(source_frame, "intrinsics") and source_frame.intrinsics is not None
     ):
         try:
-            lm_T, lm_fit_src, lm_rmse, lm_method, lm_res_mm = register_frame_pair_landmark_guided(
+            lm_res = register_frame_pair_landmark_guided(
                 source_pcd=src_pcd,
                 source_color=source_frame.color_bgr,
                 source_depth=source_frame.depth_m,
@@ -1253,6 +1503,10 @@ def register_rgbd_pair(
                 intrinsics_o3d=source_frame.intrinsics,
                 cfg=cfg,
             )
+            lm_T, lm_fit_src, lm_rmse, lm_method, lm_res_mm = lm_res[:5]
+            trans_disagree_mm = getattr(lm_res, "trans_disagree_mm", None)
+            rot_disagree_deg = getattr(lm_res, "rot_disagree_deg", None)
+
             if lm_method == "landmark":
                 is_landmark_seeded = True
                 lm_rot = compute_rotation_deg(lm_T)
@@ -1264,7 +1518,7 @@ def register_rgbd_pair(
                     and lm_rot <= cfg.max_rotation_deg_per_frame
                     and lm_trans <= (cfg.max_translation_m_per_frame * 1000.0)
                 ):
-                    return PairRegistrationResult(
+                    return _make_result(
                         lm_T,
                         lm_fit,
                         lm_rmse,
@@ -1297,8 +1551,23 @@ def register_rgbd_pair(
         # 2. RGB-D Odometry initial pose estimation
         odo_status = "NOT RUN"
         try:
-            rgbd_source = source_frame.to_rgbd_image(depth_trunc=1.5, convert_rgb_to_intensity=True)
-            rgbd_target = target_frame.to_rgbd_image(depth_trunc=1.5, convert_rgb_to_intensity=True)
+            src_depth_override = (
+                create_depth_mask_from_pcd(src_head_roi, source_frame.depth_m, source_frame.intrinsics)
+                if (use_head_roi and src_head_roi is not None)
+                else None
+            )
+            tgt_depth_override = (
+                create_depth_mask_from_pcd(tgt_head_roi, target_frame.depth_m, target_frame.intrinsics)
+                if (use_head_roi and tgt_head_roi is not None)
+                else None
+            )
+
+            rgbd_source = source_frame.to_rgbd_image(
+                depth_trunc=1.5, convert_rgb_to_intensity=True, depth_override=src_depth_override
+            )
+            rgbd_target = target_frame.to_rgbd_image(
+                depth_trunc=1.5, convert_rgb_to_intensity=True, depth_override=tgt_depth_override
+            )
 
             if cfg.rgbd_odometry_method == "hybrid":
                 jacobian = RGBDOdometryJacobianFromHybridTerm()
@@ -1346,7 +1615,6 @@ def register_rgbd_pair(
 
         colored_status = "NOT RUN"
         try:
-            # Tightened convergence criteria specifically for landmark-seeded refinement
             colored_criteria = (
                 ICPConvergenceCriteria(max_iteration=50, relative_fitness=1e-7, relative_rmse=1e-7)
                 if is_landmark_seeded
@@ -1379,7 +1647,7 @@ def register_rgbd_pair(
                 issues.append(f"translation {trans_colored:.1f}mm > {cfg.max_translation_m_per_frame * 1000.0:.0f}mm")
 
             if not issues:
-                return PairRegistrationResult(
+                return _make_result(
                     T_colored,
                     fit_colored,
                     rmse_colored,
@@ -1427,7 +1695,7 @@ def register_rgbd_pair(
             src_center_y = float(src_pcd.get_axis_aligned_bounding_box().get_center()[1])
             region_str = "lower (neck/shoulder)" if src_center_y > 0.0 else "upper (face/head)"
             logger.debug(f"[registration-diagnostic] pair {pair_str} FPFH fallback SUCCEEDED (region: {region_str}, bbox_center_y={src_center_y:+.3f}m)")
-            return PairRegistrationResult(
+            return _make_result(
                 fb_T,
                 fb_fit,
                 fb_rmse,
@@ -1451,7 +1719,7 @@ def register_rgbd_pair(
         f"[registration-diagnostic] pair {pair_str} REJECTED / LOW-FITNESS "
         f"(region: {region_str}, bbox_center_y={src_center_y:+.3f}m) -- {fail_reason}"
     )
-    return PairRegistrationResult(
+    return _make_result(
         T_colored,
         fit_colored,
         rmse_colored,
@@ -1493,8 +1761,33 @@ class BuildPoseGraphResult(tuple):
         return inst
 
 
-def _call_register_pair(src, dst, cfg, initial_guess=None, is_bridge=False):
-    return register_rgbd_pair(src, dst, cfg, initial_guess=initial_guess, is_bridge=is_bridge)
+def _call_register_pair(
+    src,
+    dst,
+    cfg,
+    initial_guess=None,
+    is_bridge=False,
+    src_head_roi=None,
+    tgt_head_roi=None,
+):
+    try:
+        return register_rgbd_pair(
+            src,
+            dst,
+            cfg,
+            initial_guess=initial_guess,
+            is_bridge=is_bridge,
+            src_head_roi=src_head_roi,
+            tgt_head_roi=tgt_head_roi,
+        )
+    except TypeError:
+        return register_rgbd_pair(
+            src,
+            dst,
+            cfg,
+            initial_guess=initial_guess,
+            is_bridge=is_bridge,
+        )
 
 
 def check_pose_jump_gate(
@@ -1531,6 +1824,9 @@ def find_candidate_pairs(
     effective_translation_bound: float,
     effective_rotation_bound: float,
     face_y_thresh: float,
+    head_rois: dict[int, o3d.geometry.PointCloud | None] | None = None,
+    head_centers: dict[int, np.ndarray | None] | None = None,
+    head_downs: dict[int, np.ndarray | None] | None = None,
 ) -> tuple[list[tuple], list[dict], list[dict]]:
     """
     Find candidate pairs for frame i against preceding accepted frames in the search window.
@@ -1545,6 +1841,15 @@ def find_candidate_pairs(
         if (hasattr(frames[i], "pcd") and frames[i].pcd is not None and frames[i].pcd.has_points())
         else 0.0
     )
+
+    use_head_roi = bool(getattr(cfg, "head_only_registration", False))
+    if use_head_roi and head_rois is not None and i not in head_rois:
+        roi_i, c_i, d_i, _ = derive_head_roi(frames[i], cfg)
+        head_rois[i] = roi_i
+        if head_centers is not None:
+            head_centers[i] = c_i
+        if head_downs is not None:
+            head_downs[i] = d_i
 
     window = accepted_idx[-(cfg.search_accepted_window + 1):]
     target_indices = []
@@ -1577,7 +1882,34 @@ def find_candidate_pairs(
             if rot_p <= cfg.max_rotation_deg_per_frame and trans_p_mm <= (cfg.max_translation_m_per_frame * 1000.0):
                 init_guess = last_rel_trans.copy()
 
-        res = _call_register_pair(frames[i], frames[j], cfg, initial_guess=init_guess, is_bridge=False)
+        src_roi = head_rois.get(i) if head_rois is not None else None
+        tgt_roi = head_rois.get(j) if head_rois is not None else None
+
+        # If source has no head ROI yet, attempt propagation from target j using init_guess
+        if use_head_roi and src_roi is None and head_centers is not None and head_centers.get(j) is not None:
+            prop_roi, prop_c, prop_d, _ = derive_head_roi(
+                frames[i],
+                cfg,
+                ref_center=head_centers[j],
+                ref_down=head_downs.get(j) if head_downs is not None else None,
+                rel_pose=init_guess,
+            )
+            if prop_roi is not None:
+                src_roi = prop_roi
+                head_rois[i] = prop_roi
+                head_centers[i] = prop_c
+                if head_downs is not None:
+                    head_downs[i] = prop_d
+
+        res = _call_register_pair(
+            frames[i],
+            frames[j],
+            cfg,
+            initial_guess=init_guess,
+            is_bridge=False,
+            src_head_roi=src_roi,
+            tgt_head_roi=tgt_roi,
+        )
         T, fit, rmse, accepted, method, rot, trans, reason = res
         res_residual = getattr(res, "residual_mm", None)
         if res_residual is None and "residual=" in reason:
@@ -1611,6 +1943,31 @@ def find_candidate_pairs(
                     "frames_since_accepted": frames_since_accepted,
                 })
 
+        # If accepted, and source frame center is still missing, propagate from target j using accepted T
+        if accepted and not exceeds_jump and use_head_roi and head_centers is not None:
+            if head_centers.get(i) is None and head_centers.get(j) is not None:
+                try:
+                    inv_T = np.linalg.inv(T)
+                    c_i = (inv_T @ np.array([head_centers[j][0], head_centers[j][1], head_centers[j][2], 1.0]))[:3]
+                    d_j = head_downs.get(j) if (head_downs is not None and head_downs.get(j) is not None) else np.array([0.0, 1.0, 0.0])
+                    d_i = inv_T[:3, :3] @ d_j
+                    norm_d = np.linalg.norm(d_i)
+                    d_i = d_i / norm_d if norm_d > 1e-4 else np.array([0.0, 1.0, 0.0])
+                    head_centers[i] = c_i
+                    if head_downs is not None:
+                        head_downs[i] = d_i
+                    prop_roi, _, _, _ = derive_head_roi(
+                        frames[i],
+                        cfg,
+                        ref_center=head_centers[j],
+                        ref_down=d_j,
+                        rel_pose=T,
+                    )
+                    if prop_roi is not None and head_rois is not None:
+                        head_rois[i] = prop_roi
+                except Exception:
+                    pass
+
         pair_logs.append({
             "source": i,
             "target": j,
@@ -1621,6 +1978,10 @@ def find_candidate_pairs(
             "rotation_deg": rot,
             "translation_mm": trans,
             "residual_mm": res_residual,
+            "src_roi_pts": getattr(res, "src_roi_pts", 0),
+            "tgt_roi_pts": getattr(res, "tgt_roi_pts", 0),
+            "trans_disagree_mm": getattr(res, "trans_disagree_mm", None),
+            "rot_disagree_deg": getattr(res, "rot_disagree_deg", None),
             "reason": (
                 f"pose jump ({jump_trans_m:.2f}m/{jump_rot_deg:.1f}deg) > allowed ({effective_translation_bound:.2f}m/{effective_rotation_bound:.1f}deg)"
                 if exceeds_jump else reason
@@ -1670,6 +2031,7 @@ def recover_bridge_buffer(
     rejection_reasons: dict[int, str],
     frame_states: dict[int, str],
     pair_logs: list[dict],
+    head_rois: dict[int, o3d.geometry.PointCloud | None] | None = None,
 ) -> None:
     """
     Attempt bounded recovery using bridge buffer or unanchored odometry when all window candidates fail.
@@ -1703,7 +2065,14 @@ def recover_bridge_buffer(
         prev_T_to_anchor = np.eye(4)
 
     # Attempt local registration against predecessor
-    res_local = _call_register_pair(frames[i], frames[pred_idx], cfg, is_bridge=True)
+    src_roi = head_rois.get(i) if head_rois is not None else None
+    pred_roi = head_rois.get(pred_idx) if head_rois is not None else None
+    res_local = _call_register_pair(
+        frames[i], frames[pred_idx], cfg,
+        is_bridge=True,
+        src_head_roi=src_roi,
+        tgt_head_roi=pred_roi,
+    )
     T_loc, fit_loc, rmse_loc, acc_loc, meth_loc, rot_loc, trans_loc, reason_loc = res_local
 
     if not acc_loc:
@@ -1850,6 +2219,7 @@ def commit_accepted_pair(
     n_loop: int,
     face_y_thresh: float,
     frames_since_accepted: int = 0,
+    head_rois: dict[int, o3d.geometry.PointCloud | None] | None = None,
 ) -> tuple[int, int, np.ndarray | None, bool]:
     """
     Commit an accepted candidate pair to the pose graph and update tracking state.
@@ -1872,7 +2242,15 @@ def commit_accepted_pair(
     res_crosscheck = None
     if bridge_buffer:
         b_head = bridge_buffer[-1]
-        res_crosscheck = _call_register_pair(frames[i], frames[b_head["frame_idx"]], cfg, is_bridge=True)
+        b_head_idx = b_head["frame_idx"]
+        src_roi = head_rois.get(i) if head_rois is not None else None
+        head_roi_node = head_rois.get(b_head_idx) if head_rois is not None else None
+        res_crosscheck = _call_register_pair(
+            frames[i], frames[b_head_idx], cfg,
+            is_bridge=True,
+            src_head_roi=src_roi,
+            tgt_head_roi=head_roi_node,
+        )
         if res_crosscheck[3]:
             T_loc_cross = res_crosscheck[0]
             T_comp_to_anchor = b_head["T_to_anchor"] @ T_loc_cross
@@ -2012,7 +2390,14 @@ def commit_accepted_pair(
     # If active unanchored chain exists, check if frame i connects to the unanchored chain head
     if active_unanchored_chain and active_unanchored_chain[-1] in node_of and i not in active_unanchored_chain:
         last_u = active_unanchored_chain[-1]
-        res_u = _call_register_pair(frames[i], frames[last_u], cfg, is_bridge=True)
+        src_roi = head_rois.get(i) if head_rois is not None else None
+        u_roi = head_rois.get(last_u) if head_rois is not None else None
+        res_u = _call_register_pair(
+            frames[i], frames[last_u], cfg,
+            is_bridge=True,
+            src_head_roi=src_roi,
+            tgt_head_roi=u_roi,
+        )
         if res_u[3] and res_u[1] >= min_loop_fit:
             u_hop = frame_hops.get(last_u, 1) + 1
             u_info = get_information_matrix(frames[i].pcd, frames[last_u].pcd, res_u[0], cfg)
@@ -2061,6 +2446,18 @@ def build_pose_graph_rgbd(
     last_rel_trans: np.ndarray | None = None
     frames_since_accepted: int = 0
 
+    # Head-only registration tracking
+    head_rois: dict[int, o3d.geometry.PointCloud | None] = {}
+    head_centers: dict[int, np.ndarray | None] = {}
+    head_downs: dict[int, np.ndarray | None] = {}
+
+    use_head_roi = bool(getattr(cfg, "head_only_registration", False))
+    if use_head_roi and n > 0:
+        roi_0, c_0, d_0, _ = derive_head_roi(frames[0], cfg)
+        head_rois[0] = roi_0
+        head_centers[0] = c_0
+        head_downs[0] = d_0
+
     # Bounded recovery tracking structures
     bridge_buffer: list[dict] = []
     active_unanchored_chain: list[int] = []
@@ -2090,6 +2487,9 @@ def build_pose_graph_rgbd(
             last_rel_trans, frames_since_accepted,
             effective_translation_bound, effective_rotation_bound,
             face_y_thresh,
+            head_rois=head_rois,
+            head_centers=head_centers,
+            head_downs=head_downs,
         )
         pair_logs.extend(pair_logs_i)
 
@@ -2124,6 +2524,7 @@ def build_pose_graph_rgbd(
                 all_unanchored_nodes, bridge_edges_info, frame_hops, composed_to_anchor,
                 diagnostics, best_methods, best_scores, best_residuals, rejection_reasons,
                 frame_states, pair_logs,
+                head_rois=head_rois,
             )
             frames_since_accepted += 1
             last_rel_trans = None
@@ -2136,6 +2537,7 @@ def build_pose_graph_rgbd(
             diagnostics, best_methods, best_scores, best_residuals, rejection_reasons,
             frame_states, n_odom, n_loop, face_y_thresh,
             frames_since_accepted=frames_since_accepted,
+            head_rois=head_rois,
         )
         if not accepted:
             frames_since_accepted += 1
@@ -2460,6 +2862,17 @@ def register_sequence_rgbd_human(
         "unanchored_chain": unanchored_chain,
         "bridge_edges": bridge_edges,
         "node_of": node_of,
+        "pair_logs": pair_logs,
+        "registration_report": {
+            "head_only_registration": bool(getattr(cfg, "head_only_registration", False)),
+            "total_pairs_evaluated": len(pair_logs),
+            "accepted_pairs_count": len([p for p in pair_logs if p.get("success")]),
+            "tier_counts": tier_counts,
+            "mean_rmse_mm": avg_rmse,
+            "median_rmse_mm": median_rmse,
+            "max_rmse_mm": float(np.max(rmse_values)) if rmse_values else 0.0,
+            "pairs": pair_logs,
+        },
     }
 
     return aligned, diagnostics, poses, summary_stats

@@ -95,3 +95,83 @@ class RGBDFrame:
             timestamp=self.timestamp,
             intrinsics=copy.deepcopy(self.intrinsics),
         )
+
+    def to_point_cloud(
+        self,
+        depth_min_m: float = 0.40,
+        depth_max_m: float = 1.20,
+        roi: tuple[int, int, int, int] | None = None,
+    ) -> o3d.geometry.PointCloud:
+        """
+        Recompute Open3D PointCloud from color and depth without requiring pyrealsense2.
+        """
+        return create_pcd_from_rgbd(
+            color_bgr=self.color_bgr,
+            depth_m=self.depth_m,
+            intrinsics=self.intrinsics,
+            depth_min_m=depth_min_m,
+            depth_max_m=depth_max_m,
+            roi=roi,
+        )
+
+
+def create_pcd_from_rgbd(
+    color_bgr: np.ndarray,
+    depth_m: np.ndarray,
+    intrinsics: o3d.camera.PinholeCameraIntrinsic,
+    depth_min_m: float = 0.40,
+    depth_max_m: float = 1.20,
+    roi: tuple[int, int, int, int] | None = None,
+) -> o3d.geometry.PointCloud:
+    """
+    Create an Open3D PointCloud from color and depth arrays with camera intrinsics.
+
+    Matches RealSenseCapture.to_point_cloud() exactly without requiring pyrealsense2.
+
+    Parameters
+    ----------
+    color_bgr:
+        HxWx3 uint8 BGR image.
+    depth_m:
+        HxW float32 depth map in metres.
+    intrinsics:
+        Open3D PinholeCameraIntrinsic.
+    depth_min_m:
+        Minimum depth distance to retain (metres).
+    depth_max_m:
+        Maximum depth distance to retain (metres).
+    roi:
+        Optional (x, y, w, h) pixel bounding box crop.
+
+    Returns
+    -------
+    o3d.geometry.PointCloud
+    """
+    color_rgb = np.ascontiguousarray(color_bgr[:, :, ::-1])
+    depth_clipped = depth_m.copy()
+    if roi is not None:
+        rx, ry, rw, rh = roi
+        mask = np.zeros_like(depth_clipped, dtype=bool)
+        mask[max(0, ry) : max(0, ry + rh), max(0, rx) : max(0, rx + rw)] = True
+        depth_clipped[~mask] = 0.0
+
+    depth_clipped[depth_clipped < depth_min_m] = 0.0
+    depth_clipped[depth_clipped > depth_max_m] = 0.0
+
+    o3d_color = o3d.geometry.Image(color_rgb)
+    o3d_depth = o3d.geometry.Image(depth_clipped)
+
+    rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
+        o3d_color,
+        o3d_depth,
+        depth_scale=1.0,
+        depth_trunc=depth_max_m,
+        convert_rgb_to_intensity=False,
+    )
+
+    pcd = o3d.geometry.PointCloud.create_from_rgbd_image(
+        rgbd,
+        intrinsics,
+    )
+    return pcd
+

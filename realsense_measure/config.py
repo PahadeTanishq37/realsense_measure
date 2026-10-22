@@ -263,6 +263,10 @@ class RegistrationConfig:
     show_registration_pairs: bool = False      # display before/after pairwise alignment window
     show_camera_trajectory: bool = False       # display 3D camera trajectory with jump diagnostics
 
+    # Head-only registration mode (opt-in)
+    head_only_registration: bool = False       # derive head ROI for pairwise registration transforms
+    head_roi_radius_m: float = 0.15            # radius around head landmark center (metres)
+
     def resolve_defaults(self, target_name: str = "box") -> "RegistrationConfig":
         """Apply box/head/body-specific values when fields are still None."""
         if target_name in ("head", "body") or self.registration_mode == "rgbd_human":
@@ -391,9 +395,23 @@ class PipelineConfig:
     stage5_display_voxel_size_m: float = 0.006      # 6 mm display resolution for Stage 5 window
     stage3_4_display_voxel_size_m: float = 0.0025    # 2.5 mm display resolution for Stage 3/4 preview windows (loosened from 6mm)
 
+    # Record and replay raw captures
+    save_raw: bool = False
+    save_raw_dir: Path | None = None
+    replay_dir: Path | None = None
+    replay_batch_dir: Path | None = None
+    batch_configs: list[str] | None = None
+
     def __post_init__(self) -> None:
         # Ensure output_dir is always a Path, even if a plain string was passed.
         self.output_dir = Path(self.output_dir)
+
+        if self.save_raw_dir is not None:
+            self.save_raw_dir = Path(self.save_raw_dir)
+        if self.replay_dir is not None:
+            self.replay_dir = Path(self.replay_dir)
+        if self.replay_batch_dir is not None:
+            self.replay_batch_dir = Path(self.replay_batch_dir)
 
         # Resolve registration target-specific defaults if still None
         self.registration.resolve_defaults(self.target.name)
@@ -414,4 +432,5 @@ class PipelineConfig:
                 self.tsdf_trunc_m = 0.02
 
         self.camera.head_capture = self.head_capture
+
 

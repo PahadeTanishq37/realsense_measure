@@ -582,7 +582,7 @@ class ScanPipeline:
 
     def capture_frames(self) -> list[o3d.geometry.PointCloud | RGBDFrame]:
         """
-        Live camera capture loop.
+        Live camera capture loop or replay from raw recording.
 
         Returns
         -------
@@ -591,6 +591,11 @@ class ScanPipeline:
             In rgbd_human mode: synchronized RGBDFrame instances containing color,
             depth, point clouds with normals, timestamps, and intrinsics.
         """
+        if self.cfg.replay_dir is not None:
+            from camera.recording import load_raw_capture
+            logger.info(f"\n  [REPLAY MODE] Loading raw frames from: {self.cfg.replay_dir}")
+            return load_raw_capture(self.cfg.replay_dir)
+
         try:
             cam = RealSenseCamera(self.cfg.camera).start()
         except StreamNegotiationError as exc:
@@ -1028,6 +1033,21 @@ class ScanPipeline:
         )
         self.last_registration_stats = summary_stats
 
+        report = summary_stats.get("registration_report")
+        if report is not None:
+            if hasattr(self, "scan_folder") and self.scan_folder is not None:
+                try:
+                    with open(self.scan_folder / "registration_report.json", "w", encoding="utf-8") as f:
+                        json.dump(report, f, indent=2)
+                except Exception as e:
+                    logger.warning(f"  Failed to write registration_report.json to {self.scan_folder}: {e}")
+            if hasattr(self.cfg, "output_dir") and self.cfg.output_dir is not None:
+                try:
+                    with open(self.cfg.output_dir / "registration_report.json", "w", encoding="utf-8") as f:
+                        json.dump(report, f, indent=2)
+                except Exception as e:
+                    logger.warning(f"  Failed to write registration_report.json to {self.cfg.output_dir}: {e}")
+
         self._log_human_registration_summary(diagnostics, summary_stats, isolated_frames)
         self._visualize_registration_diagnostics(isolated_frames, aligned, diagnostics, poses)
         self._check_pointcloud_loop_closure(isolated_frames, diagnostics)
@@ -1051,6 +1071,7 @@ class ScanPipeline:
         else:
             aligned, diagnostics = register_sequence(pcds, self.cfg.registration)
 
+        pc_pairs = []
         rejected_indices: list[int] = []
         for i, diag in enumerate(diagnostics):
             if diag is None:
@@ -1062,12 +1083,68 @@ class ScanPipeline:
             logger.debug(f"  frame {i:02d}: fitness={fitness:.4f}  "
                   f"rmse={rmse * 1000:.3f} mm  {status}")
 
+            pc_pairs.append({
+                "source": i,
+                "target": max(0, i - 1),
+                "success": bool(accepted),
+                "method": "pointcloud_multiway" if self.cfg.registration.use_multiway else "pointcloud_sequential",
+                "fitness": float(fitness),
+                "rmse_mm": float(rmse * 1000.0) if np.isfinite(rmse) else 999.0,
+                "rotation_deg": 0.0,
+                "translation_mm": 0.0,
+                "src_roi_pts": len(pcds[i].points) if (i < len(pcds) and hasattr(pcds[i], "points")) else 0,
+                "tgt_roi_pts": len(pcds[max(0, i - 1)].points) if (max(0, i - 1) < len(pcds) and hasattr(pcds[max(0, i - 1)], "points")) else 0,
+                "trans_disagree_mm": None,
+                "rot_disagree_deg": None,
+                "residual_mm": None,
+                "reason": "accepted" if accepted else "rejected",
+                "is_face_pair": False,
+                "is_primary": True,
+            })
+
         n_accepted = sum(1 for d in diagnostics if d is not None and d[2])
         n_total = len(diagnostics)
         logger.info(f"\n  Registration summary: {n_accepted} of {n_total} frames accepted into the reconstruction.")
         if n_total > 0 and (n_accepted / n_total) < 0.70:
             logger.warning("  Tip: low acceptance ratio (< 70%). Try moving the camera more slowly")
             logger.info("       or reducing --interval for higher frame overlap.")
+
+        pc_rmses = [p["rmse_mm"] for p in pc_pairs if p["success"] and p["rmse_mm"] < 990.0]
+        pc_report = {
+            "head_only_registration": False,
+            "total_pairs_evaluated": len(pc_pairs),
+            "accepted_pairs_count": sum(1 for p in pc_pairs if p["success"]),
+            "tier_counts": {"pointcloud": len(pc_pairs)},
+            "mean_rmse_mm": float(np.mean(pc_rmses)) if pc_rmses else 0.0,
+            "median_rmse_mm": float(np.median(pc_rmses)) if pc_rmses else 0.0,
+            "max_rmse_mm": float(np.max(pc_rmses)) if pc_rmses else 0.0,
+            "pairs": pc_pairs,
+        }
+        self.last_registration_stats = {
+            "captured": n_total,
+            "accepted": n_accepted,
+            "rejected": n_total - n_accepted,
+            "avg_rmse_mm": float(np.mean(pc_rmses)) if pc_rmses else 0.0,
+            "median_rmse_mm": float(np.median(pc_rmses)) if pc_rmses else 0.0,
+            "tier_counts": {"pointcloud": len(pc_pairs)},
+            "tier_summary_str": f"{n_accepted} pointcloud accepted, {n_total - n_accepted} rejected",
+            "diagnostics": diagnostics,
+            "n_edges": n_accepted,
+            "n_loop": 0,
+            "registration_report": pc_report,
+        }
+        if hasattr(self, "scan_folder") and self.scan_folder is not None:
+            try:
+                with open(self.scan_folder / "registration_report.json", "w", encoding="utf-8") as f:
+                    json.dump(pc_report, f, indent=2)
+            except Exception as e:
+                logger.warning(f"  Failed to write registration_report.json to {self.scan_folder}: {e}")
+        if hasattr(self.cfg, "output_dir") and self.cfg.output_dir is not None:
+            try:
+                with open(self.cfg.output_dir / "registration_report.json", "w", encoding="utf-8") as f:
+                    json.dump(pc_report, f, indent=2)
+            except Exception as e:
+                logger.warning(f"  Failed to write registration_report.json to {self.cfg.output_dir}: {e}")
 
         self._check_pointcloud_loop_closure(isolated_frames, diagnostics)
         self._save_and_display_stage3(aligned, diagnostics, is_human_mode=False)
@@ -1692,7 +1769,15 @@ class ScanPipeline:
         """
         is_body_mode = (self.cfg.target.name == "body" and self.cfg.registration.registration_mode == "rgbd_human")
 
-        raw_frames                  = self.capture_frames()
+        raw_frames = self.capture_frames()
+
+        if self.cfg.save_raw:
+            from camera.recording import save_raw_capture
+            save_dir = self.cfg.save_raw_dir
+            if save_dir is None:
+                save_dir = self.scan_folder / "raw_capture"
+            save_raw_capture(raw_frames, save_dir, self.cfg)
+
         isolated                    = self.isolate_frames(raw_frames)
         aligned, diagnostics, poses = self.register(isolated)
         fused                       = self.fuse(aligned, diagnostics, raw_frames=isolated, poses=poses)
@@ -1724,6 +1809,7 @@ class ScanPipeline:
                 "frames_accepted": n_accepted,
                 "frames_rejected": n_total - n_accepted,
                 "final_points": len(fused.points),
+                "points_in_stage4": len(fused.points),
                 "output": str(out),
             }
         else:
@@ -1746,9 +1832,11 @@ class ScanPipeline:
                     "frames_accepted": n_accepted,
                     "frames_total": n_total,
                     "fused_points": len(fused.points),
+                    "points_in_stage4": len(fused.points),
                 }
             else:
                 result = self.measure(fused)
+                result["points_in_stage4"] = len(fused.points)
 
         logger.info("\n" + "=" * 60)
         logger.info(f"  Done. Outputs written to: {self.cfg.output_dir.resolve()}")

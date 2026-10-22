@@ -153,6 +153,39 @@ def _build_parser() -> argparse.ArgumentParser:
         help="disable MediaPipe face landmark detection during capture HUD tracking and registration",
     )
     parser.add_argument(
+        "--save-raw",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="DIR",
+        help="save raw aligned frames (color, depth float32, meta.json) after capture before Stage 2 isolation (default: <scan output folder>/raw_capture)",
+    )
+    parser.add_argument(
+        "--replay",
+        type=str,
+        default=None,
+        metavar="DIR",
+        help="replay a saved raw capture directory, skipping camera entirely",
+    )
+    parser.add_argument(
+        "--replay-batch",
+        type=str,
+        default=None,
+        metavar="DIR",
+        help="replay a saved raw capture directory across multiple named configurations and compare results",
+    )
+    parser.add_argument(
+        "--configs",
+        nargs="+",
+        default=None,
+        help="list of configuration names for --replay-batch (e.g. baseline multiway+tsdf head_only+multiway+tsdf)",
+    )
+    parser.add_argument(
+        "--head-only-registration",
+        action="store_true",
+        help="derive head ROI used only for pairwise registration transforms",
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -171,11 +204,36 @@ def main() -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
+    # If --replay-batch is specified, execute batch runs and exit cleanly
+    if args.replay_batch is not None:
+        from camera.recording import run_replay_batch
+        configs = args.configs if args.configs else ["baseline", "multiway+tsdf", "head_only+multiway+tsdf"]
+        run_replay_batch(
+            raw_dir=args.replay_batch,
+            config_names=configs,
+            output_base_dir=args.out,
+            target_name=args.target,
+        )
+        return
+
     # ---- build configuration -------------------------------------------
     cfg = PipelineConfig(output_dir=Path(args.out))
 
     cfg.target.name        = args.target
     cfg.show_stage_windows = not args.no_viz
+
+    if args.save_raw is not None:
+        cfg.save_raw = True
+        if args.save_raw.strip():
+            cfg.save_raw_dir = Path(args.save_raw.strip())
+        else:
+            cfg.save_raw_dir = None
+
+    if args.replay is not None:
+        cfg.replay_dir = Path(args.replay)
+
+    if args.head_only_registration:
+        cfg.registration.head_only_registration = True
 
     if args.manual_roi:
         cfg.target.use_manual_roi = True
