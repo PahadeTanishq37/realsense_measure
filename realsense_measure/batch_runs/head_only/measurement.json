@@ -1,0 +1,151 @@
+{
+  "target": "head",
+  "status": "unverified",
+  "measurement_type": "3d_geometric_cranial_envelope",
+  "num_points": 25190,
+  "cranial_envelope_3d": {
+    "breadth_m": 0.1114,
+    "breadth_mm": 111.4,
+    "length_m": 0.1944,
+    "length_mm": 194.4,
+    "height_m": 0.2226,
+    "height_mm": 222.6
+  },
+  "endpoints_3d": {
+    "breadth": {
+      "P1": [
+        0.00404,
+        -0.00625,
+        0.62211
+      ],
+      "P2": [
+        -0.04842,
+        -0.01798,
+        0.52457
+      ],
+      "distance_m": 0.1114,
+      "distance_mm": 111.4,
+      "axis_vector": [
+        -0.4711,
+        -0.1053,
+        -0.8758
+      ]
+    },
+    "length": {
+      "P1": [
+        0.00786,
+        -0.09746,
+        0.54563
+      ],
+      "P2": [
+        -0.07405,
+        0.07736,
+        0.56867
+      ],
+      "distance_m": 0.1944,
+      "distance_mm": 194.4,
+      "axis_vector": [
+        -0.4213,
+        0.8992,
+        0.1185
+      ]
+    },
+    "height": {
+      "P1": [
+        -0.11472,
+        -0.05991,
+        0.60705
+      ],
+      "P2": [
+        0.05781,
+        0.03465,
+        0.50288
+      ],
+      "distance_m": 0.2226,
+      "distance_mm": 222.6,
+      "axis_vector": [
+        0.775,
+        0.4248,
+        -0.4679
+      ]
+    }
+  },
+  "anatomical_landmarks": null,
+  "oriented_bbox": {
+    "length_m": 0.1944,
+    "width_m": 0.1114,
+    "height_m": 0.2226,
+    "volume_m3": null,
+    "estimated_volume_m3": 0.002524,
+    "center": [
+      -0.03119,
+      -0.01413,
+      0.55661
+    ],
+    "rotation": [
+      -0.47106,
+      -0.42127,
+      0.77501,
+      -0.10529,
+      0.89916,
+      0.42476,
+      -0.87579,
+      0.11849,
+      -0.46791
+    ]
+  },
+  "volume_m3": null,
+  "estimated_volume_m3": 0.002524,
+  "head_dimensions_mm": {
+    "cranial_width_mm": 111.4,
+    "cranial_depth_mm": 194.4,
+    "head_height_mm": 222.6
+  },
+  "boundary_checks": {
+    "breadth": {
+      "near_supported": true,
+      "near_reason": "face supported",
+      "near_points": 414,
+      "far_supported": true,
+      "far_reason": "face supported",
+      "far_points": 535
+    },
+    "length": {
+      "near_supported": true,
+      "near_reason": "face supported",
+      "near_points": 326,
+      "far_supported": true,
+      "far_reason": "face supported",
+      "far_points": 311
+    },
+    "height": {
+      "near_supported": true,
+      "near_reason": "face supported",
+      "near_points": 384,
+      "far_supported": true,
+      "far_reason": "face supported",
+      "far_points": 358
+    }
+  },
+  "symmetry_residual_mm": 23.37,
+  "diagnostics": [
+    "High bilateral symmetry residual (23.4 mm > 12.0 mm)"
+  ],
+  "segmentation": {
+    "outcome": "constriction_cut",
+    "cut_applied": true,
+    "reason": "Neck constriction cut applied at projection 0.0597 m, retaining 25190 points",
+    "raw_point_count": 82445,
+    "finite_point_count": 82445,
+    "dominant_point_count": 82387,
+    "retained_point_count": 25190,
+    "retention_ratio": 0.3055,
+    "longitudinal_span_m": 0.5,
+    "fingerprint": "912813ed607b5daeee07fefb4e5fa6ee81e0d7b5ef64c1b5ed49194052225b1d"
+  },
+  "axis_aligned_bbox_extent_m": [
+    0.2202,
+    0.2027,
+    0.1809
+  ]
+}

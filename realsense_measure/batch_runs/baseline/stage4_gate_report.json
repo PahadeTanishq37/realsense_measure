@@ -1,0 +1,354 @@
+{
+  "summary": {
+    "frames_total": 22,
+    "frames_registered": 19,
+    "frames_fused": 19,
+    "frames_excluded": 3,
+    "excluded_by_gate": {
+      "min_fitness_for_fusion": 0,
+      "max_landmark_residual_for_fusion_mm": 0,
+      "min_face_pair_fitness_for_fusion": 0,
+      "max_face_pair_rmse_for_fusion_mm": 0
+    }
+  },
+  "thresholds": {
+    "min_fitness_for_fusion": 0.6,
+    "max_landmark_residual_for_fusion_mm": 5.0,
+    "min_face_pair_fitness_for_fusion": 0.75,
+    "max_face_pair_rmse_for_fusion_mm": 4.0
+  },
+  "frames": [
+    {
+      "frame_index": 0,
+      "registration_method": "reference",
+      "fitness": 1.0,
+      "rmse": 0.0,
+      "landmark_residual_mm": null,
+      "upper_lower_face_region": "lower",
+      "is_upper_face_region": false,
+      "failed_gates": {},
+      "final_decision": "fused",
+      "reason": "accepted for fusion"
+    },
+    {
+      "frame_index": 1,
+      "registration_method": "colored_icp",
+      "fitness": 1.0,
+      "rmse": 0.004674,
+      "landmark_residual_mm": null,
+      "upper_lower_face_region": "lower",
+      "is_upper_face_region": false,
+      "failed_gates": {
+        "max_face_pair_rmse_for_fusion_mm": {
+          "actual": 4.67,
+          "threshold": 4.0
+        }
+      },
+      "final_decision": "fused",
+      "reason": "accepted for fusion"
+    },
+    {
+      "frame_index": 2,
+      "registration_method": "colored_icp",
+      "fitness": 1.0,
+      "rmse": 0.003152,
+      "landmark_residual_mm": null,
+      "upper_lower_face_region": "lower",
+      "is_upper_face_region": false,
+      "failed_gates": {},
+      "final_decision": "fused",
+      "reason": "accepted for fusion"
+    },
+    {
+      "frame_index": 3,
+      "registration_method": "colored_icp",
+      "fitness": 0.9686,
+      "rmse": 0.003134,
+      "landmark_residual_mm": null,
+      "upper_lower_face_region": "lower",
+      "is_upper_face_region": false,
+      "failed_gates": {},
+      "final_decision": "fused",
+      "reason": "accepted for fusion"
+    },
+    {
+      "frame_index": 4,
+      "registration_method": "colored_icp",
+      "fitness": 0.9799,
+      "rmse": 0.003816,
+      "landmark_residual_mm": null,
+      "upper_lower_face_region": "lower",
+      "is_upper_face_region": false,
+      "failed_gates": {},
+      "final_decision": "fused",
+      "reason": "accepted for fusion"
+    },
+    {
+      "frame_index": 5,
+      "registration_method": "colored_icp",
+      "fitness": 0.9947,
+      "rmse": 0.003929,
+      "landmark_residual_mm": null,
+      "upper_lower_face_region": "lower",
+      "is_upper_face_region": false,
+      "failed_gates": {},
+      "final_decision": "fused",
+      "reason": "accepted for fusion"
+    },
+    {
+      "frame_index": 6,
+      "registration_method": "colored_icp",
+      "fitness": 0.9973,
+      "rmse": 0.003539,
+      "landmark_residual_mm": null,
+      "upper_lower_face_region": "lower",
+      "is_upper_face_region": false,
+      "failed_gates": {},
+      "final_decision": "fused",
+      "reason": "accepted for fusion"
+    },
+    {
+      "frame_index": 7,
+      "registration_method": "colored_icp",
+      "fitness": 1.0,
+      "rmse": 0.005172,
+      "landmark_residual_mm": null,
+      "upper_lower_face_region": "lower",
+      "is_upper_face_region": false,
+      "failed_gates": {
+        "max_face_pair_rmse_for_fusion_mm": {
+          "actual": 5.17,
+          "threshold": 4.0
+        }
+      },
+      "final_decision": "fused",
+      "reason": "accepted for fusion"
+    },
+    {
+      "frame_index": 8,
+      "registration_method": "colored_icp",
+      "fitness": 0.9936,
+      "rmse": 0.004346,
+      "landmark_residual_mm": null,
+      "upper_lower_face_region": "lower",
+      "is_upper_face_region": false,
+      "failed_gates": {
+        "max_face_pair_rmse_for_fusion_mm": {
+          "actual": 4.35,
+          "threshold": 4.0
+        }
+      },
+      "final_decision": "fused",
+      "reason": "accepted for fusion"
+    },
+    {
+      "frame_index": 9,
+      "registration_method": "landmark",
+      "fitness": 1.0,
+      "rmse": 0.003906,
+      "landmark_residual_mm": 1.81,
+      "upper_lower_face_region": "lower",
+      "is_upper_face_region": false,
+      "failed_gates": {},
+      "final_decision": "fused",
+      "reason": "accepted for fusion"
+    },
+    {
+      "frame_index": 10,
+      "registration_method": "colored_icp",
+      "fitness": 1.0,
+      "rmse": 0.004041,
+      "landmark_residual_mm": null,
+      "upper_lower_face_region": "lower",
+      "is_upper_face_region": false,
+      "failed_gates": {
+        "max_face_pair_rmse_for_fusion_mm": {
+          "actual": 4.04,
+          "threshold": 4.0
+        }
+      },
+      "final_decision": "fused",
+      "reason": "accepted for fusion"
+    },
+    {
+      "frame_index": 11,
+      "registration_method": "colored_icp",
+      "fitness": 0.9823,
+      "rmse": 0.003893,
+      "landmark_residual_mm": null,
+      "upper_lower_face_region": "lower",
+      "is_upper_face_region": false,
+      "failed_gates": {},
+      "final_decision": "fused",
+      "reason": "accepted for fusion"
+    },
+    {
+      "frame_index": 12,
+      "registration_method": "colored_icp",
+      "fitness": 1.0,
+      "rmse": 0.004007,
+      "landmark_residual_mm": null,
+      "upper_lower_face_region": "lower",
+      "is_upper_face_region": false,
+      "failed_gates": {
+        "max_face_pair_rmse_for_fusion_mm": {
+          "actual": 4.01,
+          "threshold": 4.0
+        }
+      },
+      "final_decision": "fused",
+      "reason": "accepted for fusion"
+    },
+    {
+      "frame_index": 13,
+      "registration_method": "colored_icp",
+      "fitness": 1.0,
+      "rmse": 0.004168,
+      "landmark_residual_mm": null,
+      "upper_lower_face_region": "upper",
+      "is_upper_face_region": true,
+      "failed_gates": {
+        "max_face_pair_rmse_for_fusion_mm": {
+          "actual": 4.17,
+          "threshold": 4.0
+        }
+      },
+      "final_decision": "fused",
+      "reason": "accepted for fusion"
+    },
+    {
+      "frame_index": 14,
+      "registration_method": "fpfh_fallback",
+      "fitness": 0.8034,
+      "rmse": 0.004637,
+      "landmark_residual_mm": null,
+      "upper_lower_face_region": "lower",
+      "is_upper_face_region": false,
+      "failed_gates": {
+        "max_face_pair_rmse_for_fusion_mm": {
+          "actual": 4.64,
+          "threshold": 4.0
+        }
+      },
+      "final_decision": "fused",
+      "reason": "accepted for fusion"
+    },
+    {
+      "frame_index": 15,
+      "registration_method": "none",
+      "fitness": 1.0,
+      "rmse": 0.010809,
+      "landmark_residual_mm": null,
+      "upper_lower_face_region": "lower",
+      "is_upper_face_region": false,
+      "failed_gates": {
+        "max_face_pair_rmse_for_fusion_mm": {
+          "actual": 10.81,
+          "threshold": 4.0
+        }
+      },
+      "final_decision": "excluded",
+      "reason": "rejected in Stage 3 registration"
+    },
+    {
+      "frame_index": 16,
+      "registration_method": "fpfh_fallback",
+      "fitness": 0.6162,
+      "rmse": 0.004814,
+      "landmark_residual_mm": null,
+      "upper_lower_face_region": "lower",
+      "is_upper_face_region": false,
+      "failed_gates": {
+        "min_face_pair_fitness_for_fusion": {
+          "actual": 0.6162,
+          "threshold": 0.75
+        },
+        "max_face_pair_rmse_for_fusion_mm": {
+          "actual": 4.81,
+          "threshold": 4.0
+        }
+      },
+      "final_decision": "excluded",
+      "reason": "rejected in Stage 3 registration"
+    },
+    {
+      "frame_index": 17,
+      "registration_method": "none",
+      "fitness": 1.0,
+      "rmse": 0.011406,
+      "landmark_residual_mm": null,
+      "upper_lower_face_region": "lower",
+      "is_upper_face_region": false,
+      "failed_gates": {
+        "max_face_pair_rmse_for_fusion_mm": {
+          "actual": 11.41,
+          "threshold": 4.0
+        }
+      },
+      "final_decision": "excluded",
+      "reason": "rejected in Stage 3 registration"
+    },
+    {
+      "frame_index": 18,
+      "registration_method": "fpfh_fallback",
+      "fitness": 0.7155,
+      "rmse": 0.005555,
+      "landmark_residual_mm": null,
+      "upper_lower_face_region": "lower",
+      "is_upper_face_region": false,
+      "failed_gates": {
+        "min_face_pair_fitness_for_fusion": {
+          "actual": 0.7155,
+          "threshold": 0.75
+        },
+        "max_face_pair_rmse_for_fusion_mm": {
+          "actual": 5.56,
+          "threshold": 4.0
+        }
+      },
+      "final_decision": "fused",
+      "reason": "accepted for fusion"
+    },
+    {
+      "frame_index": 19,
+      "registration_method": "colored_icp",
+      "fitness": 0.9914,
+      "rmse": 0.003805,
+      "landmark_residual_mm": null,
+      "upper_lower_face_region": "lower",
+      "is_upper_face_region": false,
+      "failed_gates": {},
+      "final_decision": "fused",
+      "reason": "accepted for fusion"
+    },
+    {
+      "frame_index": 20,
+      "registration_method": "colored_icp",
+      "fitness": 0.9509,
+      "rmse": 0.005213,
+      "landmark_residual_mm": null,
+      "upper_lower_face_region": "lower",
+      "is_upper_face_region": false,
+      "failed_gates": {
+        "max_face_pair_rmse_for_fusion_mm": {
+          "actual": 5.21,
+          "threshold": 4.0
+        }
+      },
+      "final_decision": "fused",
+      "reason": "accepted for fusion"
+    },
+    {
+      "frame_index": 21,
+      "registration_method": "colored_icp",
+      "fitness": 0.9969,
+      "rmse": 0.003396,
+      "landmark_residual_mm": null,
+      "upper_lower_face_region": "lower",
+      "is_upper_face_region": false,
+      "failed_gates": {},
+      "final_decision": "fused",
+      "reason": "accepted for fusion"
+    }
+  ]
+}

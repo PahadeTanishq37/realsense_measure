@@ -1,0 +1,3 @@
+config_name,registration_tier_counts,mean_pair_rmse_mm,median_pair_rmse_mm,max_pair_rmse_mm,edges,points_in_stage4,fusion_method,stage5_measurement,capture_time_notes
+baseline,"1 landmark, 15 colored_icp, 2 fpfh_fallback, 3 rejected",0.00,0.00,0.00,"17 primary, 33 loop",62007,POINTCLOUD,"L=195.1mm, W=173.6mm, H=258.4mm",none
+head_only,"1 landmark, 17 colored_icp, 2 fpfh_fallback, 1 rejected",0.00,0.00,0.00,"17 primary, 38 loop",82445,POINTCLOUD,"L=194.4mm, W=111.4mm, H=222.6mm",none
