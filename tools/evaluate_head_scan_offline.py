@@ -28,10 +28,12 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import open3d as o3d
 
-# Ensure repository root is on sys.path
-REPO_ROOT = Path(__file__).resolve().parent
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+# Ensure repository root and package are on sys.path
+REPO_ROOT = Path(__file__).resolve().parent.parent
+PACKAGE_DIR = REPO_ROOT / 'realsense_measure'
+for p in [str(PACKAGE_DIR), str(REPO_ROOT)]:
+    if p not in sys.path:
+        sys.path.insert(0, p)
 
 from config import PipelineConfig, PreprocessConfig
 from targets.head import HeadTarget, _sanitize_points
