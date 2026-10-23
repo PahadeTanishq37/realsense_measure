@@ -1,5 +1,6 @@
 __pycache__/
 *.py[cod]
+*.class
 *.pyo
 *.pyd
 .Python
@@ -10,18 +11,36 @@ build/
 .venv
 venv/
 *.log
-scan_output/
+.pytest_cache/
+
+# Scan & replay capture outputs
+scan_output*/
+stage_wise_output/
+head_scan_manual/
+my_head_scan/
+*_scan/
+raw_capture*/
+replay_*/
+*_replay/
+batch_runs/
 test_out*/
 test_output_*/
-head_scan_manual/
+
+# Generated report files
+comparison_summary.csv
+registration_report.json
+stage4_gate_report.json
+
+# Large point cloud and array binaries
+*.ply
+*.npy
+*.pcd
 models/
 *.task
+
+# IDE / OS / diagnostic artifacts
 .idea/
 .vscode/
 ScreenCapture*
 ScreenCamera*
 Screenshot*
-stage_wise_output/
-
-my_head_scan/
-*_scan/
