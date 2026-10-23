@@ -306,15 +306,21 @@ def run_replay_batch(
         tier_summary = reg_stats.get("tier_summary_str", "")
 
         # Compute pair RMSE metrics
-        diagnostics = reg_stats.get("diagnostics", [])
-        rmses_mm = [
-            float(d[1]) * 1000.0
-            for d in diagnostics
-            if d is not None and len(d) > 1 and d[1] is not None and np.isfinite(d[1]) and d[1] > 0
-        ]
-        mean_rmse = float(np.mean(rmses_mm)) if rmses_mm else 0.0
-        median_rmse = float(np.median(rmses_mm)) if rmses_mm else 0.0
-        max_rmse = float(np.max(rmses_mm)) if rmses_mm else 0.0
+        report = reg_stats.get("registration_report", {})
+        if report and "mean_rmse_mm" in report:
+            mean_rmse = float(report.get("mean_rmse_mm", 0.0))
+            median_rmse = float(report.get("median_rmse_mm", 0.0))
+            max_rmse = float(report.get("max_rmse_mm", 0.0))
+        else:
+            diagnostics = reg_stats.get("diagnostics", [])
+            rmses_mm = [
+                float(d[1]) * 1000.0
+                for d in diagnostics
+                if d is not None and len(d) > 1 and d[1] is not None and np.isfinite(d[1]) and d[1] > 0
+            ]
+            mean_rmse = float(np.mean(rmses_mm)) if rmses_mm else float(reg_stats.get("avg_rmse_mm", 0.0))
+            median_rmse = float(np.median(rmses_mm)) if rmses_mm else float(reg_stats.get("median_rmse_mm", 0.0))
+            max_rmse = float(np.max(rmses_mm)) if rmses_mm else 0.0
 
         n_edges = reg_stats.get("n_edges", 0)
         n_loop = reg_stats.get("n_loop", 0)
