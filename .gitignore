@@ -25,11 +25,14 @@ replay_*/
 batch_runs/
 test_out*/
 test_output_*/
+scan_seed*/
 
 # Generated report files
 comparison_summary.csv
 registration_report.json
 stage4_gate_report.json
+capture_quality_report/
+seed_variation_summary.json
 
 # Large point cloud and array binaries
 *.ply

@@ -104,13 +104,27 @@ def save_raw_capture(
         # Save depth in metres as float32 .npy
         np.save(str(depth_file), frame.depth_m.astype(np.float32))
 
-        frames_meta.append({
+        meta_entry: dict[str, Any] = {
             "frame_id": fid,
             "order": i,
             "timestamp": ts,
             "color_file": color_filename,
             "depth_file": depth_filename,
-        })
+        }
+        qm = getattr(frame, "quality_metrics", None)
+        if qm:
+            if "roi_median_depth_m" in qm:
+                meta_entry["roi_median_depth_m"] = qm["roi_median_depth_m"]
+            if "roi_min_depth_m" in qm:
+                meta_entry["roi_min_depth_m"] = qm["roi_min_depth_m"]
+            if "roi_valid_depth_frac" in qm:
+                meta_entry["roi_valid_depth_frac"] = qm["roi_valid_depth_frac"]
+            if "face_detected" in qm:
+                meta_entry["face_detected"] = qm["face_detected"]
+            if "roi_type" in qm:
+                meta_entry["roi_type"] = qm["roi_type"]
+
+        frames_meta.append(meta_entry)
 
     meta_doc = {
         "intrinsics": intr_meta,
@@ -147,10 +161,15 @@ def load_raw_capture(input_dir: Path | str) -> list[RGBDFrame]:
     in_path = Path(input_dir)
     meta_path = in_path / "meta.json"
     if not meta_path.exists():
-        raise FileNotFoundError(
-            f"Raw capture metadata not found at {meta_path}. "
-            "Ensure the directory contains a valid meta.json from --save-raw."
-        )
+        candidate = Path(__file__).resolve().parent.parent / input_dir / "meta.json"
+        if candidate.exists():
+            in_path = candidate.parent
+            meta_path = candidate
+        else:
+            raise FileNotFoundError(
+                f"Raw capture metadata not found at {meta_path}. "
+                "Ensure the directory contains a valid meta.json from --save-raw."
+            )
 
     with open(meta_path, "r", encoding="utf-8") as f:
         meta_doc = json.load(f)
@@ -192,6 +211,16 @@ def load_raw_capture(input_dir: Path | str) -> list[RGBDFrame]:
             depth_max_m=depth_max_m,
         )
 
+        qm = None
+        if "roi_median_depth_m" in item or "face_detected" in item:
+            qm = {
+                "roi_median_depth_m": item.get("roi_median_depth_m"),
+                "roi_min_depth_m": item.get("roi_min_depth_m"),
+                "roi_valid_depth_frac": item.get("roi_valid_depth_frac"),
+                "face_detected": item.get("face_detected"),
+                "roi_type": item.get("roi_type", "unknown"),
+            }
+
         frame = RGBDFrame(
             frame_id=fid,
             color_bgr=color_bgr,
@@ -199,6 +228,7 @@ def load_raw_capture(input_dir: Path | str) -> list[RGBDFrame]:
             pcd=pcd,
             timestamp=ts,
             intrinsics=intr,
+            quality_metrics=qm,
         )
         raw_frames.append(frame)
 
@@ -246,6 +276,7 @@ def run_replay_batch(
     config_names: list[str],
     output_base_dir: Path | str = "batch_runs",
     target_name: str = "head",
+    seed: int | None = 0,
 ) -> Path:
     """
     Execute a list of named configurations against the recorded raw capture.
@@ -288,7 +319,10 @@ def run_replay_batch(
             output_dir=out_base / name,
             show_stage_windows=False,
             replay_dir=raw_path,
+            random_seed=seed,
         )
+        if seed is not None:
+            logger.info(f"  Replay batch: using random seed {seed}")
         base_cfg.target.name = target_name
         base_cfg.registration.resolve_defaults(target_name)
 

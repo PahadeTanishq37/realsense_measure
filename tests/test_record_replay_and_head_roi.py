@@ -470,3 +470,48 @@ def test_run_replay_batch_summary_csv(tmp_path: Path, monkeypatch: pytest.Monkey
     ]
     for h in expected_headers:
         assert h in row0
+
+
+def test_seeded_replay_reproducibility(tmp_path: Path):
+    """Verify that two replay runs with the same random seed produce identical results."""
+    from camera.recording import save_raw_capture
+    from pipeline import ScanPipeline
+    from config import TargetConfig
+
+    frames = [_make_dummy_frame(i, timestamp=100.0 + i * 2.0) for i in range(3)]
+    raw_dir = tmp_path / "raw"
+    save_cfg = PipelineConfig(target=TargetConfig(name="head"))
+    save_raw_capture(frames, raw_dir, save_cfg)
+
+    out1 = tmp_path / "out1"
+    out2 = tmp_path / "out2"
+
+    cfg1 = PipelineConfig(
+        output_dir=out1,
+        replay_dir=raw_dir,
+        random_seed=42,
+        show_stage_windows=False,
+    )
+    cfg1.target.name = "head"
+    ScanPipeline(cfg1).run()
+
+    cfg2 = PipelineConfig(
+        output_dir=out2,
+        replay_dir=raw_dir,
+        random_seed=42,
+        show_stage_windows=False,
+    )
+    cfg2.target.name = "head"
+    ScanPipeline(cfg2).run()
+
+    rep1_path = out1 / "registration_report.json"
+    rep2_path = out2 / "registration_report.json"
+    assert rep1_path.exists() and rep2_path.exists()
+    with open(rep1_path, "r", encoding="utf-8") as f:
+        rep1 = json.load(f)
+    with open(rep2_path, "r", encoding="utf-8") as f:
+        rep2 = json.load(f)
+
+    assert rep1["accepted_pairs_count"] == rep2["accepted_pairs_count"]
+    if rep1["mean_rmse_mm"] is not None:
+        assert rep1["mean_rmse_mm"] == pytest.approx(rep2["mean_rmse_mm"], rel=1e-6)

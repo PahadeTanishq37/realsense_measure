@@ -10,6 +10,8 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass
 
+from typing import Any
+
 import numpy as np
 import open3d as o3d
 
@@ -33,6 +35,8 @@ class RGBDFrame:
         Capture timestamp in seconds.
     intrinsics:
         Open3D PinholeCameraIntrinsic calibration parameters.
+    quality_metrics:
+        Optional dictionary of live quality diagnostics (ROI distance, valid fraction, face detected).
     """
 
     frame_id: int
@@ -41,6 +45,7 @@ class RGBDFrame:
     pcd: o3d.geometry.PointCloud
     timestamp: float
     intrinsics: o3d.camera.PinholeCameraIntrinsic
+    quality_metrics: dict[str, Any] | None = None
 
     def to_rgbd_image(
         self,

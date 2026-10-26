@@ -39,6 +39,8 @@ import os
 import sys
 from pathlib import Path
 
+logger = logging.getLogger("realsense_measure")
+
 from config import PipelineConfig
 from pipeline import ScanPipeline
 
@@ -186,6 +188,37 @@ def _build_parser() -> argparse.ArgumentParser:
         help="derive head ROI used only for pairwise registration transforms",
     )
     parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="random seed for reproducible execution (defaults to 0 in --replay and --replay-batch mode)",
+    )
+    parser.add_argument(
+        "--isolation",
+        default="geometric",
+        choices=["geometric", "segmentation"],
+        help=(
+            "Stage 2 subject isolation method.  "
+            "\'geometric\' (default) uses the original DBSCAN-only pipeline and "
+            "produces byte-identical results to all previous runs.  "
+            "\'segmentation\' runs a MediaPipe person-segmentation mask on the "
+            "colour image first, zeroes out background depth, then runs "
+            "depth-range / voxel / cluster selection on the masked cloud, "
+            "with satellite-fragment merging to recover profile-view frames "
+            "that DBSCAN splits across depth dropouts."
+        ),
+    )
+    parser.add_argument(
+        "--capture-gate",
+        action="store_true",
+        help="enable live capture-quality gating for human/head capture (blocks frames failing ROI valid depth or distance criteria)",
+    )
+    parser.add_argument(
+        "--gate-require-face",
+        action="store_true",
+        help="require face detection lock to pass capture gate (by default only distance and valid-depth fraction are gated)",
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -213,6 +246,7 @@ def main() -> None:
             config_names=configs,
             output_base_dir=args.out,
             target_name=args.target,
+            seed=args.seed if args.seed is not None else 0,
         )
         return
 
@@ -229,11 +263,26 @@ def main() -> None:
         else:
             cfg.save_raw_dir = None
 
+    if args.seed is not None:
+        cfg.random_seed = args.seed
+        logger.info(f"  Random seed explicitly set to: {cfg.random_seed}")
+    elif args.replay is not None:
+        cfg.random_seed = 0
+        logger.info(f"  Replay mode: defaulting random seed to {cfg.random_seed}")
+
     if args.replay is not None:
         cfg.replay_dir = Path(args.replay)
 
     if args.head_only_registration:
         cfg.registration.head_only_registration = True
+
+    if args.capture_gate:
+        cfg.head_capture.capture_gate = True
+        cfg.camera.head_capture.capture_gate = True
+
+    if args.gate_require_face:
+        cfg.head_capture.gate_require_face = True
+        cfg.camera.head_capture.gate_require_face = True
 
     if args.manual_roi:
         cfg.target.use_manual_roi = True
@@ -291,6 +340,9 @@ def main() -> None:
     if args.face_quality:
         cfg.camera.human_face_quality_mode = True
         cfg.camera.resolve_defaults(cfg.target.name)
+
+    if args.isolation == "segmentation":
+        cfg.preprocess.isolation_mode = "segmentation"
 
     # ---- run -----------------------------------------------------------
     try:

@@ -21,6 +21,7 @@ from __future__ import annotations
 import numpy as np
 import open3d as o3d
 
+from camera.frame import create_pcd_from_rgbd
 from config import PreprocessConfig, TargetConfig
 
 
@@ -315,6 +316,187 @@ def extract_plausible_cluster(
     # If last_centroid is None, prefer the largest plausible cluster
     best_idx, _ = max(candidates, key=lambda c: len(c[0]))
     return pcd.select_by_index(best_idx)
+
+
+
+def isolate_with_segmentation(
+    frame: "RGBDFrame",
+    cfg: PreprocessConfig,
+    target_cfg: "TargetConfig | None" = None,
+    last_centroid: "np.ndarray | None" = None,
+) -> "tuple[o3d.geometry.PointCloud, str]":
+    """
+    Segmentation-guided Stage 2 isolation for human frames.
+
+    Algorithm
+    ---------
+    1. Run MediaPipe selfie segmenter on color_bgr to obtain a binary person mask.
+    2. Zero out depth_m wherever the mask is False (never invent depth data).
+    3. Rebuild the point cloud from the masked depth via create_pcd_from_rgbd.
+    4. Apply the full geometric pipeline (downsample+denoise, plane removal,
+       plausible-cluster selection) on the masked cloud.
+    5. Fragment merging: keep the cluster whose centroid is nearest to
+       last_centroid (or the largest cluster when last_centroid is None)
+       AND union any other clusters whose centroid is within
+       cfg.seg_merge_radius_m of the primary cluster centroid.
+       Never silently fall back to "largest only".
+    6. If the mask is None or the result has too few points, fall back to
+       the standard geometric isolate_object() for this frame and log the
+       reason.
+
+    Parameters
+    ----------
+    frame : RGBDFrame
+        Raw captured frame (color_bgr + depth_m + intrinsics must be set).
+    cfg : PreprocessConfig
+        Preprocessing configuration.
+    target_cfg : TargetConfig, optional
+        Target configuration for plausibility checks.
+    last_centroid : np.ndarray (3,), optional
+        Centroid of the last accepted frame in world-camera coordinates,
+        used to identify the primary cluster across fragmented views.
+
+    Returns
+    -------
+    pcd : o3d.geometry.PointCloud
+        Isolated subject point cloud.
+    method : str
+        "segmentation" if the mask path succeeded, "geometric_fallback"
+        if we fell back.
+    """
+    from camera.frame import RGBDFrame as _RGBDFrame
+    from segmentation import get_person_mask
+
+    min_pts = (target_cfg.min_object_points if target_cfg is not None else 200)
+    cam_cfg_min = 0.40
+    cam_cfg_max = 1.20
+
+    # --- attempt segmentation path ---
+    mask = get_person_mask(frame.color_bgr)
+
+    if mask is not None:
+        masked_depth = frame.depth_m.copy()
+        masked_depth[~mask] = 0.0
+
+        # Rebuild point cloud from masked depth (reuses existing helper)
+        masked_pcd = create_pcd_from_rgbd(
+            color_bgr=frame.color_bgr,
+            depth_m=masked_depth,
+            intrinsics=frame.intrinsics,
+            depth_min_m=cam_cfg_min,
+            depth_max_m=cam_cfg_max,
+        )
+
+        if len(masked_pcd.points) >= min_pts:
+            # Apply geometric pipeline on already-masked cloud
+            cleaned = downsample_and_denoise(masked_pcd, cfg)
+            if not cleaned.has_points():
+                pass  # fall through to geometric fallback below
+            else:
+                # Plane removal only if the target is not a body/head that
+                # fills the full depth range (preserve subject geometry)
+                if target_cfg is not None and target_cfg.expected_max_size_m is not None:
+                    no_plane, _ = remove_dominant_plane(cleaned, cfg, target_cfg=target_cfg)
+                else:
+                    no_plane, _ = remove_dominant_plane(cleaned, cfg)
+
+                if not no_plane.has_points():
+                    no_plane = cleaned  # keep cleaned if plane removal ate everything
+
+                # DBSCAN clustering to get candidate fragments
+                labels = np.array(no_plane.cluster_dbscan(
+                    eps=cfg.cluster_eps_m,
+                    min_points=cfg.cluster_min_points,
+                    print_progress=False,
+                ))
+                unique_labels = [l for l in np.unique(labels) if l >= 0]
+
+                if unique_labels:
+                    # Build list of (indices, cloud, centroid) per cluster
+                    clusters = []
+                    for lbl in unique_labels:
+                        idx = np.where(labels == lbl)[0]
+                        c   = no_plane.select_by_index(idx)
+                        cen = np.asarray(c.points).mean(axis=0)
+                        clusters.append((idx, c, cen))
+
+                    if last_centroid is not None:
+                        # Primary: cluster nearest to last known position
+                        primary = min(
+                            clusters,
+                            key=lambda t: np.linalg.norm(t[2] - last_centroid),
+                        )
+                    else:
+                        # Primary: largest cluster
+                        primary = max(clusters, key=lambda t: len(t[0]))
+
+                    primary_idx, _, primary_cen = primary
+
+                    # Merge any satellite clusters within seg_merge_radius_m
+                    merge_radius = cfg.seg_merge_radius_m
+                    merged_indices = [primary_idx]
+                    for idx, c, cen in clusters:
+                        if np.array_equal(idx, primary_idx):
+                            continue
+                        dist = float(np.linalg.norm(cen - primary_cen))
+                        if dist <= merge_radius:
+                            merged_indices.append(idx)
+                            n_pts = len(idx)
+                            print(
+                                f"  [seg-isolation] merging satellite cluster "
+                                f"(size: {n_pts}, dist: {dist:.3f} m)"
+                            )
+
+                    final_indices = np.concatenate(merged_indices)
+                    result_pcd = no_plane.select_by_index(final_indices)
+                else:
+                    # No DBSCAN labels -> use the whole cleaned+masked cloud
+                    result_pcd = no_plane
+
+                n_result = len(result_pcd.points)
+                if n_result >= min_pts:
+                    cen_str = (
+                        f"{np.asarray(result_pcd.points).mean(axis=0).round(3)}"
+                        if result_pcd.has_points() else "N/A"
+                    )
+                    print(
+                        f"  [seg-isolation] frame: method=segmentation  "
+                        f"pts_before={len(masked_pcd.points)}  "
+                        f"pts_after={n_result}  centroid={cen_str}"
+                    )
+                    return result_pcd, "segmentation"
+
+                # Too few points after segmentation path
+                reason = f"only {n_result} pts after segmentation (need >= {min_pts})"
+                print(
+                    f"  [seg-isolation] segmentation path gave {reason}; "
+                    f"falling back to geometric isolation."
+                )
+        else:
+            reason = f"masked cloud has only {len(masked_pcd.points)} pts (need >= {min_pts})"
+            print(
+                f"  [seg-isolation] segmentation path gave {reason}; "
+                f"falling back to geometric isolation."
+            )
+    else:
+        reason = "person mask is None (segmentation unavailable or failed)"
+        print(
+            f"  [seg-isolation] {reason}; "
+            f"falling back to geometric isolation."
+        )
+
+    # --- geometric fallback ---
+    geo_pcd = isolate_object(frame.pcd, cfg, target_cfg, last_centroid=last_centroid)
+    n_geo = len(geo_pcd.points)
+    cen_str = (
+        f"{np.asarray(geo_pcd.points).mean(axis=0).round(3)}"
+        if geo_pcd.has_points() else "N/A"
+    )
+    print(
+        f"  [seg-isolation] frame: method=geometric_fallback  "
+        f"pts_after={n_geo}  centroid={cen_str}"
+    )
+    return geo_pcd, "geometric_fallback"
 
 
 def isolate_object(

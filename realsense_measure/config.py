@@ -71,12 +71,30 @@ class LandmarkConfig:
 
 @dataclass
 class HeadCaptureConfig:
-    """Real-time feedback thresholds during human/head capture."""
+    """Real-time feedback and capture gating thresholds during human/head capture."""
     enabled: bool = True                       # enable real-time landmark tracking during capture
     min_landmarks_for_lock: int = 4            # minimum landmarks detected to consider tracking locked
     min_frames_for_low_lock: int = 3           # frames without good lock before yellow warning
     max_frames_without_lock: int = 8           # hard cap frames without lock before red coverage gap warning
     max_landmark_px_motion: float = 40.0       # max average pixel displacement between frames before red too-fast warning
+
+    # Working distance & HUD color band thresholds (m)
+    target_dist_min_m: float = 0.65            # lower bound of optimal target distance band
+    target_dist_max_m: float = 0.85            # upper bound of optimal target distance band
+    warn_dist_min_m: float = 0.60              # below this triggers distance warning ("MOVE BACK")
+    critical_dist_min_m: float = 0.52          # below this triggers red alert (D455 physical cutoff risk)
+    warn_dist_max_m: float = 0.95              # above this triggers distance warning ("TOO FAR")
+
+    # Central fallback ROI (relative fraction of image width and height)
+    center_roi_width_frac: float = 0.35        # central ROI width fraction when face is not detected
+    center_roi_height_frac: float = 0.45       # central ROI height fraction when face is not detected
+
+    # Capture gate settings (opt-in via --capture-gate or capture_gate=True)
+    capture_gate: bool = False                 # when True, gate blocks saving frames that fail quality criteria
+    gate_min_valid_depth_frac: float = 0.70    # minimum fraction of ROI pixels with non-zero depth
+    gate_min_dist_m: float = 0.55              # minimum allowed working distance for gate (m)
+    gate_max_dist_m: float = 0.95              # maximum allowed working distance for gate (m)
+    gate_require_face: bool = False            # require face landmark lock when tracker is active (optional, default False)
 
 
 @dataclass
@@ -153,6 +171,17 @@ class PreprocessConfig:
     # DBSCAN clustering (isolate the target object)
     cluster_eps_m: float = 0.02
     cluster_min_points: int = 60
+
+    # ---------- Segmentation-mode isolation (opt-in) ----------
+    # "geometric"    -> original DBSCAN-only pipeline (default, byte-identical)
+    # "segmentation" -> person-mask-guided depth zeroing before clustering
+    isolation_mode: str = "geometric"
+
+    # In segmentation mode: clusters whose centroid is within this distance
+    # of the main (nearest-to-last-centroid) cluster's centroid are merged
+    # into it, so depth-dropout gaps between torso / shoulder fragments
+    # do not produce a multi-piece result.
+    seg_merge_radius_m: float = 0.05
 
 
 # ---------------------------------------------------------------------------
@@ -394,6 +423,9 @@ class PipelineConfig:
     # while all saved .ply files and dimensional measurements remain at 100% full resolution.
     stage5_display_voxel_size_m: float = 0.006      # 6 mm display resolution for Stage 5 window
     stage3_4_display_voxel_size_m: float = 0.0025    # 2.5 mm display resolution for Stage 3/4 preview windows (loosened from 6mm)
+
+    # Random seed for deterministic execution (default None; defaults to 0 in replay mode)
+    random_seed: int | None = None
 
     # Record and replay raw captures
     save_raw: bool = False
