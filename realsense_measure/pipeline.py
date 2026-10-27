@@ -30,7 +30,15 @@ from camera.realsense_capture import (
 from config import HeadCaptureConfig, PipelineConfig
 from landmarks import detect_face_landmarks_3d, project_landmarks_3d_to_pixel
 from preprocessing import isolate_object, isolate_with_segmentation, reject_positional_outliers
-from reconstruction import fuse_point_clouds, fuse_tsdf_volume
+from reconstruction import (
+    compute_reconstruction_quality_metrics,
+    filter_depth_pixel_quality,
+    fuse_head_scalable_tsdf,
+    fuse_point_clouds,
+    fuse_tsdf_volume,
+    mask_frame_to_head_roi,
+    refine_poses_model_based,
+)
 from registration import (
     compute_rotation_deg,
     register_frame_pair,
@@ -1967,6 +1975,206 @@ class ScanPipeline:
     ) -> tuple[o3d.geometry.PointCloud, str]:
         """Perform 3D reconstruction via volumetric TSDF integration or point cloud concatenation."""
         if (
+            self.cfg.refine
+            and raw_frames is not None
+            and raw_frames
+            and isinstance(raw_frames[0], RGBDFrame)
+            and poses is not None
+        ):
+            logger.info("\n" + "=" * 60)
+            logger.info("  Reconstruction mode: HEAD REFINEMENT (--refine)")
+            logger.info("=" * 60)
+            refine_cfg = self.cfg.head_refinement
+            acc_raw = [raw_frames[i] for i in accepted_indices]
+            acc_poses = [poses[i] for i in accepted_indices]
+
+            # 1. Filter frames by landmark count (< 6 dropped)
+            frames_filtered = []
+            poses_filtered = []
+            lm_data = []
+            for frame, pose in zip(acc_raw, acc_poses):
+                lm_dict = detect_face_landmarks_3d(frame.color_bgr, frame.depth_m, frame.intrinsics, quiet=True)
+                n_lm = len(lm_dict) if lm_dict is not None else 0
+                if n_lm < refine_cfg.min_fusion_landmarks:
+                    logger.info(
+                        f"  [head-refine] Excluded frame {frame.frame_id}: "
+                        f"landmark count ({n_lm}) < {refine_cfg.min_fusion_landmarks}"
+                    )
+                    continue
+                frames_filtered.append(frame)
+                poses_filtered.append(pose)
+                lm_data.append(lm_dict)
+
+            if len(frames_filtered) >= 2:
+                acc_raw = frames_filtered
+                acc_poses = poses_filtered
+            else:
+                logger.warning("  [head-refine] Too few frames met landmark threshold; keeping all accepted frames.")
+                lm_data = [detect_face_landmarks_3d(f.color_bgr, f.depth_m, f.intrinsics, quiet=True) for f in acc_raw]
+
+            # 2. Derive global world head center from detected landmarks
+            world_centers = []
+            for f, p, lm in zip(acc_raw, acc_poses, lm_data):
+                if lm:
+                    pos = [v["position"] for v in lm.values()]
+                    c_cam = np.mean(pos, axis=0)
+                    c_world = (p[:3, :3] @ c_cam) + p[:3, 3]
+                    world_centers.append(c_world)
+            global_world_center = np.mean(world_centers, axis=0) if world_centers else np.zeros(3)
+
+            # 3. Apply per-pixel depth quality filter and head-only masking
+            head_frames = []
+            head_pcds = []
+            for f, p, lm in zip(acc_raw, acc_poses, lm_data):
+                if lm:
+                    pos = [v["position"] for v in lm.values()]
+                    c_cam = np.mean(pos, axis=0)
+                    chin_pos = np.array(lm["chin"]["position"]) if "chin" in lm else None
+                    if chin_pos is not None:
+                        v_chin = chin_pos - c_cam
+                        norm_v = np.linalg.norm(v_chin)
+                        down_vec = v_chin / norm_v if norm_v > 1e-4 else np.array([0.0, 1.0, 0.0])
+                        chin_dist = float(norm_v)
+                    else:
+                        down_vec = np.array([0.0, 1.0, 0.0])
+                        chin_dist = 0.10
+                else:
+                    inv_p = np.linalg.inv(p)
+                    c_cam = (inv_p[:3, :3] @ global_world_center) + inv_p[:3, 3]
+                    down_vec = np.array([0.0, 1.0, 0.0])
+                    chin_dist = 0.10
+
+                # Per-pixel depth quality filter (drop normals > 70 deg and depth jumps > 8 mm)
+                depth_q, q_stats = filter_depth_pixel_quality(
+                    f.depth_m,
+                    f.intrinsics,
+                    max_normal_angle_deg=refine_cfg.filter_normal_angle_deg,
+                    max_depth_jump_m=refine_cfg.filter_depth_jump_mm / 1000.0,
+                )
+
+                # Head-only fusion mask (sphere radius ~0.13 m, chin extension <= 25 mm)
+                masked_depth, masked_color, dropped_count, total_valid = mask_frame_to_head_roi(
+                    color_bgr=f.color_bgr,
+                    depth_m=depth_q,
+                    intrinsics=f.intrinsics,
+                    head_center_cam=c_cam,
+                    down_vec=down_vec,
+                    chin_dist=chin_dist,
+                    radius_m=refine_cfg.head_fusion_radius_m,
+                    chin_margin_m=refine_cfg.head_fusion_chin_margin_m,
+                )
+                pct_dropped = (dropped_count / total_valid * 100.0) if total_valid > 0 else 0.0
+                logger.info(
+                    f"  [head-only fusion] Frame {f.frame_id}: "
+                    f"dropped {dropped_count:,} / {total_valid:,} pixels ({pct_dropped:.1f}%) outside head region"
+                )
+
+                f_head = f.clone()
+                f_head.depth_m = masked_depth
+                f_head.color_bgr = masked_color
+
+                # Extract head ROI point cloud for ICP & metrics
+                h_img, w_img = masked_depth.shape[:2]
+                fx_c, fy_c = f.intrinsics.get_focal_length()
+                cx_c, cy_c = f.intrinsics.get_principal_point()
+                u_g, v_g = np.meshgrid(np.arange(w_img), np.arange(h_img))
+                valid_head = (masked_depth > 0.05) & np.isfinite(masked_depth)
+
+                pts_x = (u_g[valid_head] - cx_c) * masked_depth[valid_head] / fx_c
+                pts_y = (v_g[valid_head] - cy_c) * masked_depth[valid_head] / fy_c
+                pts_z = masked_depth[valid_head]
+                pcd_h = o3d.geometry.PointCloud()
+                pcd_h.points = o3d.utility.Vector3dVector(np.column_stack([pts_x, pts_y, pts_z]))
+                colors_h = (masked_color[valid_head][:, ::-1] / 255.0).astype(np.float64)
+                pcd_h.colors = o3d.utility.Vector3dVector(colors_h)
+                f_head.pcd = pcd_h
+
+                head_frames.append(f_head)
+                head_pcds.append(pcd_h)
+
+            # 4. Model-based refinement
+            logger.info("  Running model-based pose refinement ...")
+            refined_poses, iter_stats, _ = refine_poses_model_based(
+                head_frames,
+                acc_poses,
+                head_pcds,
+                voxel_length_m=0.002,
+                sdf_trunc_m=0.008,
+                depth_trunc_m=refine_cfg.depth_trunc_m,
+                max_distance_m=refine_cfg.refine_max_distance_mm / 1000.0,
+                max_trans_m=refine_cfg.refine_max_trans_mm / 1000.0,
+                max_rot_deg=refine_cfg.refine_max_rot_deg,
+                max_iterations=refine_cfg.refine_iterations,
+                early_stop_improvement_m=refine_cfg.refine_early_stop_mm / 1000.0,
+            )
+
+            # 5. Scalable TSDF fusion with refined poses
+            logger.info(
+                f"  Integrating {len(head_frames)} head frames into ScalableTSDFVolume "
+                f"(voxel {refine_cfg.voxel_length_mm} mm, sdf_trunc {refine_cfg.sdf_trunc_mm} mm) ..."
+            )
+            final_mesh, fused = fuse_head_scalable_tsdf(
+                head_frames,
+                refined_poses,
+                voxel_length_m=refine_cfg.voxel_length_mm / 1000.0,
+                sdf_trunc_m=refine_cfg.sdf_trunc_mm / 1000.0,
+                depth_trunc_m=refine_cfg.depth_trunc_m,
+                taubin_iterations=refine_cfg.taubin_iterations,
+                min_component_ratio=refine_cfg.min_component_ratio,
+            )
+
+            if len(fused.points) < 100 and len(final_mesh.vertices) > 0:
+                fused = o3d.geometry.PointCloud(final_mesh.vertices)
+                fused.colors = final_mesh.vertex_colors
+                fused.normals = final_mesh.vertex_normals
+
+            # Save fused_mesh.ply
+            mesh_out = self.cfg.output_dir / "fused_mesh.ply"
+            o3d.io.write_triangle_mesh(str(mesh_out), final_mesh)
+            logger.info(f"  Saved fused mesh: {mesh_out}")
+            if hasattr(self, "scan_folder") and self.scan_folder is not None:
+                o3d.io.write_triangle_mesh(str(self.scan_folder / "fused_mesh.ply"), final_mesh)
+                logger.info(f"  Saved: {self.scan_folder / 'fused_mesh.ply'}")
+
+            # 6. Quality metrics
+            metrics = compute_reconstruction_quality_metrics(
+                final_mesh,
+                head_frames,
+                acc_poses,
+                refined_poses,
+                head_pcds,
+                refine_cfg,
+            )
+
+            # Save reconstruction_quality.json
+            qual_path = self.cfg.output_dir / "reconstruction_quality.json"
+            with qual_path.open("w", encoding="utf-8") as fp:
+                json.dump(metrics, fp, indent=2)
+            logger.info(f"  Saved quality metrics: {qual_path}")
+            if hasattr(self, "scan_folder") and self.scan_folder is not None:
+                with (self.scan_folder / "reconstruction_quality.json").open("w", encoding="utf-8") as fp:
+                    json.dump(metrics, fp, indent=2)
+
+            # Log quality metrics summary table
+            res_b = metrics.get("residual_before_refinement_mm", {})
+            res_a = metrics.get("residual_after_refinement_mm", {})
+            rep = metrics.get("repeatability_odd_even_mm", {})
+            logger.info("\n" + "=" * 60)
+            logger.info("  RECONSTRUCTION QUALITY METRICS (--refine)")
+            logger.info("=" * 60)
+            logger.info(f"  Residual before refinement: median = {res_b.get('median')} mm, p90 = {res_b.get('p90')} mm")
+            logger.info(f"  Residual after refinement : median = {res_a.get('median')} mm, p90 = {res_a.get('p90')} mm")
+            logger.info("  Repeatability (odd vs even frames):")
+            logger.info(f"    - Symmetric Chamfer dist: {rep.get('chamfer_distance_mm')} mm")
+            logger.info(f"    - 95th-percentile dist  : {rep.get('p95_distance_mm')} mm")
+            logger.info("  Mesh topology:")
+            logger.info(f"    - Vertices  : {metrics.get('mesh_vertex_count'):,}")
+            logger.info(f"    - Triangles : {metrics.get('mesh_triangle_count'):,}")
+            logger.info(f"    - Holes     : {metrics.get('mesh_hole_count')}")
+            logger.info("=" * 60 + "\n")
+
+            fusion_name = "SCALABLE TSDF (REFINED)"
+        elif (
             self.cfg.fusion_method == "tsdf"
             and raw_frames is not None
             and raw_frames

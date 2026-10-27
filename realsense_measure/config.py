@@ -412,6 +412,35 @@ class TargetConfig:
 
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Head Refinement: HeadRefinementConfig
+# ---------------------------------------------------------------------------
+
+@dataclass
+class HeadRefinementConfig:
+    """
+    Configuration for head-only fusion, per-pixel depth quality filtering,
+    and model-based pose refinement (--refine).
+    """
+    enabled: bool = False
+    voxel_length_mm: float = 1.5           # TSDF voxel length in mm (default 1.5 mm)
+    sdf_trunc_mm: float = 5.0              # TSDF truncation margin in mm (default 5.0 mm)
+    depth_trunc_m: float = 0.9             # Max depth truncation for integration (0.9 m)
+    head_fusion_radius_m: float = 0.13     # Radius for head sphere masking (0.13 m = 13 cm)
+    head_fusion_chin_margin_m: float = 0.025 # Maximum extension below chin (25 mm)
+    filter_normal_angle_deg: float = 70.0  # Drop pixels with normal angle > 70 deg to view ray
+    filter_depth_jump_mm: float = 8.0      # Drop flying pixels with jump > 8 mm
+    min_fusion_landmarks: int = 6          # Drop frames with < 6 landmarks
+    refine_iterations: int = 3             # Number of refinement iterations (2-3)
+    refine_max_distance_mm: float = 4.0    # Distance threshold for model ICP (4 mm)
+    refine_max_trans_mm: float = 10.0      # Max accepted pose translation update (10 mm)
+    refine_max_rot_deg: float = 3.0        # Max accepted pose rotation update (3 deg)
+    refine_early_stop_mm: float = 0.1      # Stop early if median RMSE improves < 0.1 mm
+    taubin_iterations: int = 10            # Taubin smoothing iterations (preserves volume)
+    min_component_ratio: float = 0.02      # Drop connected components < 2% of largest
+
+
+# ---------------------------------------------------------------------------
 # Top-level: PipelineConfig
 # ---------------------------------------------------------------------------
 
@@ -441,6 +470,7 @@ class PipelineConfig:
     registration: RegistrationConfig = field(default_factory=RegistrationConfig)
     target: TargetConfig = field(default_factory=TargetConfig)
     head_capture: HeadCaptureConfig = field(default_factory=HeadCaptureConfig)
+    head_refinement: HeadRefinementConfig = field(default_factory=HeadRefinementConfig)
 
     # Developer / debug toggles
     show_stage_windows: bool = True   # pop up an Open3D window after each stage
@@ -481,6 +511,11 @@ class PipelineConfig:
     resolution: str | None = None
     background_ref_color: np.ndarray | None = None
     background_ref_depth: np.ndarray | None = None
+
+    # Head Refinement (--refine)
+    refine: bool = False
+    voxel_length_mm: float = 1.5
+    sdf_trunc_mm: float = 5.0
 
     def __post_init__(self) -> None:
         # Ensure output_dir is always a Path, even if a plain string was passed.
@@ -530,5 +565,13 @@ class PipelineConfig:
             self.head_capture.gate_mode = "hard"
 
         self.camera.head_capture = self.head_capture
+
+        # Sync head refinement settings
+        if self.refine:
+            self.head_refinement.enabled = True
+        if self.head_refinement.enabled:
+            self.refine = True
+        self.head_refinement.voxel_length_mm = self.voxel_length_mm
+        self.head_refinement.sdf_trunc_mm = self.sdf_trunc_mm
 
 

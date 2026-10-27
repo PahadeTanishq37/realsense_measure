@@ -249,6 +249,23 @@ def _build_parser() -> argparse.ArgumentParser:
         help="camera stream resolution override (e.g. 848x480, 1280x720) independent of --face-quality",
     )
     parser.add_argument(
+        "--refine",
+        action="store_true",
+        help="opt-in head-only fusion, per-pixel depth quality filtering, and model-based ICP pose refinement",
+    )
+    parser.add_argument(
+        "--voxel-length-mm",
+        type=float,
+        default=None,
+        help="TSDF voxel length in mm for head refinement (default: 1.5)",
+    )
+    parser.add_argument(
+        "--sdf-trunc-mm",
+        type=float,
+        default=None,
+        help="TSDF truncation margin in mm for head refinement (default: 5.0)",
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -402,6 +419,16 @@ def main() -> None:
 
     if args.isolation == "segmentation":
         cfg.preprocess.isolation_mode = "segmentation"
+
+    if args.refine:
+        cfg.refine = True
+        cfg.head_refinement.enabled = True
+    if args.voxel_length_mm is not None:
+        cfg.voxel_length_mm = args.voxel_length_mm
+        cfg.head_refinement.voxel_length_mm = args.voxel_length_mm
+    if args.sdf_trunc_mm is not None:
+        cfg.sdf_trunc_mm = args.sdf_trunc_mm
+        cfg.head_refinement.sdf_trunc_mm = args.sdf_trunc_mm
 
     # ---- run -----------------------------------------------------------
     try:
