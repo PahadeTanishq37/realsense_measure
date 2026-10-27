@@ -1562,11 +1562,33 @@ def register_rgbd_pair(
                 else None
             )
 
+            src_color_override = None
+            tgt_color_override = None
+            if getattr(source_frame, "foreground_mask", None) is not None:
+                sm = source_frame.foreground_mask
+                base_sd = source_frame.depth_m if src_depth_override is None else src_depth_override
+                src_depth_override = np.where(sm, base_sd, 0.0)
+                src_color_override = source_frame.color_bgr.copy()
+                src_color_override[~sm] = 0
+
+            if getattr(target_frame, "foreground_mask", None) is not None:
+                tm = target_frame.foreground_mask
+                base_td = target_frame.depth_m if tgt_depth_override is None else tgt_depth_override
+                tgt_depth_override = np.where(tm, base_td, 0.0)
+                tgt_color_override = target_frame.color_bgr.copy()
+                tgt_color_override[~tm] = 0
+
             rgbd_source = source_frame.to_rgbd_image(
-                depth_trunc=1.5, convert_rgb_to_intensity=True, depth_override=src_depth_override
+                depth_trunc=1.5,
+                convert_rgb_to_intensity=True,
+                depth_override=src_depth_override,
+                color_override=src_color_override,
             )
             rgbd_target = target_frame.to_rgbd_image(
-                depth_trunc=1.5, convert_rgb_to_intensity=True, depth_override=tgt_depth_override
+                depth_trunc=1.5,
+                convert_rgb_to_intensity=True,
+                depth_override=tgt_depth_override,
+                color_override=tgt_color_override,
             )
 
             if cfg.rgbd_odometry_method == "hybrid":

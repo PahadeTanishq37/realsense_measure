@@ -80,6 +80,9 @@ class HeadCaptureTracker:
         self.cfg = cfg or HeadCaptureConfig()
         self.frames_since_good_lock: int = 0
         self.prev_landmarks_px: dict[str, np.ndarray] | None = None
+        self.last_face_bbox: tuple[int, int, int, int] | None = None
+        self.frames_since_face_bbox: int = 0
+        self.avg_motion_px: float = 0.0
 
     def update(
         self,
@@ -120,6 +123,20 @@ class HeadCaptureTracker:
                 ]
                 avg_motion_px = float(np.mean(displacements))
 
+        self.avg_motion_px = avg_motion_px
+
+        if landmarks_px is not None and len(landmarks_px) >= self.cfg.min_landmarks_for_lock:
+            coords = np.array(list(landmarks_px.values()))
+            pad = 12
+            x1 = max(0, int(np.min(coords[:, 0])) - pad)
+            y1 = max(0, int(np.min(coords[:, 1])) - pad)
+            x2 = int(np.max(coords[:, 0])) + pad
+            y2 = int(np.max(coords[:, 1])) + pad
+            self.last_face_bbox = (x1, y1, x2, y2)
+            self.frames_since_face_bbox = 0
+        else:
+            self.frames_since_face_bbox += 1
+
         if landmarks_px is not None and len(landmarks_px) > 0:
             self.prev_landmarks_px = landmarks_px
 
@@ -143,22 +160,22 @@ def compute_head_roi_quality(
     depth_m: np.ndarray,
     landmarks_px: dict[str, np.ndarray] | None,
     cfg: HeadCaptureConfig,
+    tracker: HeadCaptureTracker | None = None,
 ) -> dict[str, Any]:
     """
     Compute real-time depth quality metrics in the face/head region.
 
-    Uses landmark bounding box when a face is detected; otherwise a configurable central ROI.
-    Computes:
-      - median valid depth (m)
-      - nearest valid depth (m)
-      - fraction of ROI pixels with valid depth
-      - working distance status ('MOVE BACK', 'TOO FAR', 'OK', 'NO DEPTH')
-      - HUD color code ('green', 'yellow', 'red')
-      - capture gate evaluation
+    Uses landmark bounding box when a face is detected; otherwise a multi-tier fallback:
+      (a) last known face box from tracker (previous N frames)
+      (b) bounding box of nearest connected foreground region inside central 60%
+      (c) skip quality check and return 'no subject found'
     """
     h, w = depth_m.shape[:2]
     num_lms = len(landmarks_px) if landmarks_px is not None else 0
     face_detected = num_lms >= cfg.min_landmarks_for_lock
+
+    roi_bbox: tuple[int, int, int, int] | None = None
+    roi_type: str = "none"
 
     if face_detected and landmarks_px:
         coords = np.array(list(landmarks_px.values()))
@@ -167,16 +184,74 @@ def compute_head_roi_quality(
         y1 = max(0, int(np.min(coords[:, 1])) - pad)
         x2 = min(w, int(np.max(coords[:, 0])) + pad)
         y2 = min(h, int(np.max(coords[:, 1])) + pad)
+        roi_bbox = (x1, y1, x2, y2)
         roi_type = f"face_bbox ({num_lms} pts)"
+        if tracker is not None:
+            tracker.last_face_bbox = roi_bbox
+            tracker.frames_since_face_bbox = 0
     else:
-        rw = int(w * cfg.center_roi_width_frac)
-        rh = int(h * cfg.center_roi_height_frac)
-        x1 = max(0, (w - rw) // 2)
-        x2 = min(w, x1 + rw)
-        y1 = max(0, int(h * 0.20))
-        y2 = min(h, y1 + rh)
-        roi_type = "central_roi"
+        # (a) Last known face box from previous N frames
+        max_gap = getattr(cfg, "fallback_face_box_max_frames", 30)
+        if (
+            tracker is not None
+            and getattr(tracker, "last_face_bbox", None) is not None
+            and getattr(tracker, "frames_since_face_bbox", 999) <= max_gap
+        ):
+            x1, y1, x2, y2 = tracker.last_face_bbox
+            x1 = max(0, min(w - 1, x1))
+            y1 = max(0, min(h - 1, y1))
+            x2 = max(x1 + 1, min(w, x2))
+            y2 = max(y1 + 1, min(h, y2))
+            roi_bbox = (x1, y1, x2, y2)
+            roi_type = f"last_face_bbox (gap={tracker.frames_since_face_bbox})"
+        else:
+            # (b) Bounding box of nearest connected foreground region inside central 60% of image
+            cx1 = int(w * 0.20)
+            cx2 = int(w * 0.80)
+            cy1 = int(h * 0.20)
+            cy2 = int(h * 0.80)
+            sub_d = depth_m[cy1:cy2, cx1:cx2]
+            valid_fg = (sub_d > 0.10) & (sub_d <= getattr(cfg, "warn_dist_max_m", 0.95) + 0.35)
+            n_fg_pts = int(np.count_nonzero(valid_fg))
+            if n_fg_pts >= 100:
+                d_min_sub = float(np.percentile(sub_d[valid_fg], 5))
+                if d_min_sub <= 1.30:
+                    slice_mask = (sub_d > 0.10) & (sub_d <= d_min_sub + 0.25)
+                    n_lbl, lbls, stats, _ = cv2.connectedComponentsWithStats(slice_mask.astype(np.uint8), connectivity=8)
+                    if n_lbl > 1:
+                        best_lbl = int(np.argmax(stats[1:, cv2.CC_STAT_AREA])) + 1
+                        if stats[best_lbl, cv2.CC_STAT_AREA] >= 150:
+                            bx = stats[best_lbl, cv2.CC_STAT_LEFT]
+                            by = stats[best_lbl, cv2.CC_STAT_TOP]
+                            bw = stats[best_lbl, cv2.CC_STAT_WIDTH]
+                            bh = stats[best_lbl, cv2.CC_STAT_HEIGHT]
+                            pad_px = 10
+                            x1 = max(0, cx1 + bx - pad_px)
+                            y1 = max(0, cy1 + by - pad_px)
+                            x2 = min(w, cx1 + bx + bw + pad_px)
+                            y2 = min(h, cy1 + by + bh + pad_px)
+                            roi_bbox = (x1, y1, x2, y2)
+                            roi_type = "nearest_foreground_roi"
 
+    # (c) Skip quality check and show 'no subject found' if no valid ROI found
+    if roi_bbox is None:
+        return {
+            "roi_median_depth_m": 0.0,
+            "roi_min_depth_m": 0.0,
+            "roi_valid_depth_frac": 0.0,
+            "face_detected": False,
+            "roi_bbox": None,
+            "roi_type": "none",
+            "dist_status_text": "NO SUBJECT",
+            "dist_color": "red",
+            "is_gate_pass": False,
+            "gate_reason": "No subject found",
+            "gate_reasons": ["No subject found"],
+            "gate_mode": getattr(cfg, "gate_mode", "off"),
+            "advisory_reasons": ["No subject found"],
+        }
+
+    x1, y1, x2, y2 = roi_bbox
     roi_depth = depth_m[y1:y2, x1:x2]
     total_px = roi_depth.size
     valid_mask = roi_depth > 0
@@ -208,36 +283,71 @@ def compute_head_roi_quality(
         dist_color = "green"
 
     # Capture gate evaluation
+    gate_mode = getattr(cfg, "gate_mode", "off")
+    if getattr(cfg, "capture_gate", False) and gate_mode == "off":
+        gate_mode = "hard"
+
+    advisory_reasons: list[str] = []
+    if cfg.gate_require_face and not face_detected:
+        advisory_reasons.append("Face not detected")
+    if valid_fraction < cfg.gate_min_valid_depth_frac:
+        advisory_reasons.append(f"ROI valid depth too low ({valid_fraction:.1%} < {cfg.gate_min_valid_depth_frac:.0%})")
+    if median_depth_m < cfg.gate_min_dist_m:
+        advisory_reasons.append(f"Subject too close ({median_depth_m:.2f}m < {cfg.gate_min_dist_m:.2f}m)")
+    elif median_depth_m > cfg.gate_max_dist_m:
+        advisory_reasons.append(f"Subject too far ({median_depth_m:.2f}m > {cfg.gate_max_dist_m:.2f}m)")
+
     is_gate_pass = True
     gate_reason: str | None = None
     gate_reasons: list[str] = []
 
-    if cfg.capture_gate:
-        if cfg.gate_require_face and not face_detected:
-            gate_reasons.append("Face not detected")
-        if valid_fraction < cfg.gate_min_valid_depth_frac:
-            gate_reasons.append(f"ROI valid depth too low ({valid_fraction:.1%} < {cfg.gate_min_valid_depth_frac:.0%})")
-        if median_depth_m < cfg.gate_min_dist_m:
-            gate_reasons.append(f"Subject too close ({median_depth_m:.2f}m < {cfg.gate_min_dist_m:.2f}m)")
+    if gate_mode == "off":
+        is_gate_pass = True
+        gate_reason = None
+        gate_reasons = []
+    elif gate_mode == "advisory":
+        # In advisory mode, HUD shows the reasons in colour, but still allows capture
+        is_gate_pass = True
+        gate_reasons = advisory_reasons
+        gate_reason = "; ".join(advisory_reasons) if advisory_reasons else None
+    elif gate_mode == "hard":
+        # Hard-block only on catastrophic conditions by default
+        hard_min_valid = getattr(cfg, "gate_hard_min_valid_depth_frac", 0.35)
+        hard_min_dist = getattr(cfg, "gate_hard_min_dist_m", 0.50)
+        hard_reasons = []
+        if valid_fraction < hard_min_valid:
+            hard_reasons.append(f"ROI valid depth too low ({valid_fraction:.1%} < {hard_min_valid:.0%})")
+        if min_depth_m < hard_min_dist or median_depth_m < hard_min_dist:
+            d_val = min_depth_m if min_depth_m > 0 else median_depth_m
+            hard_reasons.append(f"Subject too close ({d_val:.2f}m < {hard_min_dist:.2f}m)")
         elif median_depth_m > cfg.gate_max_dist_m:
-            gate_reasons.append(f"Subject too far ({median_depth_m:.2f}m > {cfg.gate_max_dist_m:.2f}m)")
+            hard_reasons.append(f"Subject too far ({median_depth_m:.2f}m > {cfg.gate_max_dist_m:.2f}m)")
+        if cfg.gate_require_face and not face_detected:
+            hard_reasons.append("Face not detected")
 
-        if gate_reasons:
+        if hard_reasons:
             is_gate_pass = False
-            gate_reason = "; ".join(gate_reasons)
+            gate_reason = "; ".join(hard_reasons)
+            gate_reasons = hard_reasons
+        else:
+            is_gate_pass = True
+            gate_reason = None
+            gate_reasons = []
 
     return {
         "roi_median_depth_m": median_depth_m,
         "roi_min_depth_m": min_depth_m,
         "roi_valid_depth_frac": valid_fraction,
         "face_detected": face_detected,
-        "roi_bbox": (x1, y1, x2, y2),
+        "roi_bbox": roi_bbox,
         "roi_type": roi_type,
         "dist_status_text": dist_status_text,
         "dist_color": dist_color,
         "is_gate_pass": is_gate_pass,
         "gate_reason": gate_reason,
         "gate_reasons": gate_reasons,
+        "gate_mode": gate_mode,
+        "advisory_reasons": advisory_reasons,
     }
 
 
@@ -256,6 +366,9 @@ def _draw_hud(
     lock_status: str | None = None,
     roi_quality: dict[str, Any] | None = None,
     gate_enabled: bool = False,
+    stillness_status: str | None = None,
+    turn_guidance: str | None = None,
+    bg_status: str | None = None,
 ) -> None:
     """
     Render the D455f status HUD onto the depth panel in-place.
@@ -273,22 +386,38 @@ def _draw_hud(
 
     if is_human:
         if roi_quality is not None:
-            d_med = roi_quality["roi_median_depth_m"]
-            d_nearest = roi_quality["roi_min_depth_m"]
-            v_frac = roi_quality["roi_valid_depth_frac"]
-            status_txt = roi_quality["dist_status_text"]
-            c_tag = roi_quality["dist_color"]
-            if c_tag == "green":
-                status_bgr = (0, 255, 0)
-            elif c_tag == "yellow":
-                status_bgr = (0, 255, 255)
+            if roi_quality.get("roi_type") == "none":
+                guide_lines.append(("Distance (ROI)  : -- [NO SUBJECT FOUND]", (0, 0, 255), True))
             else:
-                status_bgr = (0, 0, 255)
+                d_med = roi_quality["roi_median_depth_m"]
+                d_nearest = roi_quality["roi_min_depth_m"]
+                v_frac = roi_quality["roi_valid_depth_frac"]
+                status_txt = roi_quality["dist_status_text"]
+                c_tag = roi_quality["dist_color"]
+                if c_tag == "green":
+                    status_bgr = (0, 255, 0)
+                elif c_tag == "yellow":
+                    status_bgr = (0, 255, 255)
+                else:
+                    status_bgr = (0, 0, 255)
 
-            dist_str = f"{d_med:.2f} m" if d_med > 0 else "--"
-            guide_lines.append((f"Distance (ROI)  : {dist_str} [{status_txt}]", status_bgr, True))
-            guide_lines.append((f"ROI valid depth : {v_frac:.1%} (nearest: {d_nearest:.2f} m)", None, False))
-            if gate_enabled:
+                dist_str = f"{d_med:.2f} m" if d_med > 0 else "--"
+                guide_lines.append((f"Distance (ROI)  : {dist_str} [{status_txt}]", status_bgr, True))
+                guide_lines.append((f"ROI valid depth : {v_frac:.1%} (nearest: {d_nearest:.2f} m)", None, False))
+
+            gate_mode = roi_quality.get("gate_mode", "hard" if gate_enabled else "off")
+            if gate_mode == "hard":
+                if roi_quality["is_gate_pass"]:
+                    guide_lines.append(("Capture Gate    : HARD [READY]", (0, 255, 0), False))
+                else:
+                    guide_lines.append((f"Capture Gate    : [HOLD] {roi_quality['gate_reason']}", (0, 0, 255), False))
+            elif gate_mode == "advisory":
+                if roi_quality.get("advisory_reasons"):
+                    adv_str = "; ".join(roi_quality["advisory_reasons"])
+                    guide_lines.append((f"Capture Gate    : [ADVISORY] {adv_str}", (0, 255, 255), False))
+                else:
+                    guide_lines.append(("Capture Gate    : [ADVISORY OK]", (0, 255, 0), False))
+            elif gate_enabled:
                 if roi_quality["is_gate_pass"]:
                     guide_lines.append(("Capture Gate    : ARMED [READY]", (0, 255, 0), False))
                 else:
@@ -308,6 +437,15 @@ def _draw_hud(
                 dist_guide = "Distance        : NO DEPTH"
                 c = (0, 0, 255)
             guide_lines.append((dist_guide, c, True))
+
+        if bg_status:
+            bg_c = (0, 255, 0) if "LOCKED" in bg_status else (0, 255, 255)
+            guide_lines.append((f"Background Ref  : {bg_status}", bg_c, False))
+        if stillness_status:
+            st_c = (0, 255, 0) if "HOLDING" in stillness_status else (0, 255, 255)
+            guide_lines.append((f"Stillness Hold  : {stillness_status}", st_c, False))
+        if turn_guidance:
+            guide_lines.append((f"Turn Target     : {turn_guidance}", (0, 255, 255), False))
 
     if is_human:
         if warning_banner:
@@ -571,6 +709,9 @@ class ScanPipeline:
         last_n_pts: int,
         gate_warn_text: str | None = None,
         gate_warn_until: float = 0.0,
+        stillness_status: str | None = None,
+        turn_guidance: str | None = None,
+        bg_status: str | None = None,
     ) -> tuple[np.ndarray, dict[str, Any] | None]:
         """Compose dual-panel color + depth HUD preview image for live display."""
         if depth_color.shape[:2] != color_bgr.shape[:2]:
@@ -606,11 +747,11 @@ class ScanPipeline:
             else:
                 lock_status_str = f"NO LOCK (gap={lock_gap})"
 
-        # Compute face/head ROI quality
+        # Compute face/head ROI quality (with tracker history for fallback)
         roi_quality = None
         head_tracker_cfg = getattr(self.cfg.camera, "head_capture", getattr(self.cfg, "head_capture", HeadCaptureConfig()))
         if is_human_mode:
-            roi_quality = compute_head_roi_quality(depth_m, live_landmarks_px, head_tracker_cfg)
+            roi_quality = compute_head_roi_quality(depth_m, live_landmarks_px, head_tracker_cfg, tracker=head_tracker)
 
         now_ts = time.time()
         if now_ts < gate_warn_until and gate_warn_text:
@@ -641,6 +782,9 @@ class ScanPipeline:
             lock_status=lock_status_str,
             roi_quality=roi_quality,
             gate_enabled=bool(head_tracker_cfg.capture_gate),
+            stillness_status=stillness_status,
+            turn_guidance=turn_guidance,
+            bg_status=bg_status,
         )
 
         display_color = color_bgr.copy()
@@ -655,7 +799,7 @@ class ScanPipeline:
                 for pt in live_landmarks_px.values():
                     cv2.circle(display_color, (int(pt[0]), int(pt[1])), 2, (0, 255, 255), -1, cv2.LINE_AA)
 
-            if roi_quality is not None:
+            if roi_quality is not None and roi_quality.get("roi_bbox") is not None:
                 rx1, ry1, rx2, ry2 = roi_quality["roi_bbox"]
                 box_c = (0, 255, 0) if roi_quality["dist_color"] == "green" else (
                     (0, 255, 255) if roi_quality["dist_color"] == "yellow" else (0, 0, 255)
@@ -664,6 +808,9 @@ class ScanPipeline:
                 roi_label = f"HEAD ROI: {roi_quality['dist_status_text']} ({roi_quality['roi_median_depth_m']:.2f}m, {roi_quality['roi_valid_depth_frac']:.0%})"
                 cv2.putText(display_color, roi_label, (rx1 + 4, max(ry1 - 8, 16)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.45, box_c, 1, cv2.LINE_AA)
+            elif roi_quality is not None and roi_quality.get("roi_type") == "none":
+                cv2.putText(display_color, "HEAD ROI: NO SUBJECT FOUND", (20, 35),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2, cv2.LINE_AA)
 
         if manual_roi is not None:
             rx, ry, rw, rh = manual_roi
@@ -672,6 +819,29 @@ class ScanPipeline:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1, cv2.LINE_AA)
 
         return np.hstack([display_color, depth_panel]), roi_quality
+
+    def _capture_burst(
+        self,
+        cam: RealSenseCamera,
+        burst_count: int = 10,
+    ) -> tuple[np.ndarray | None, np.ndarray | None]:
+        """Capture N frames in quick succession and compute pixel-wise median depth."""
+        if burst_count <= 1:
+            c, d, _ = cam.read_with_colorized()
+            return c, d
+        burst_colors: list[np.ndarray] = []
+        burst_depths: list[np.ndarray] = []
+        for _ in range(burst_count):
+            c, d, _ = cam.read_with_colorized()
+            if c is not None and d is not None:
+                burst_colors.append(c)
+                burst_depths.append(d)
+            time.sleep(0.008)
+        if not burst_depths:
+            return None, None
+        from camera.frame import compute_burst_median_frame
+        min_v = getattr(self.cfg.head_capture, "burst_min_valid_frac", 0.50)
+        return compute_burst_median_frame(burst_colors, burst_depths, min_valid_frac=min_v)
 
     def _try_capture_human_frame(
         self,
@@ -809,11 +979,30 @@ class ScanPipeline:
         gate_warn_text: str | None = None
         gate_warn_until = 0.0
         last_gate_log_time = 0.0
+        last_res_warn_time = 0.0
         head_tracker_cfg = getattr(self.cfg.camera, "head_capture", getattr(self.cfg, "head_capture", HeadCaptureConfig()))
         use_landmarks_capture = getattr(self.cfg.registration, "use_landmarks", True) and getattr(head_tracker_cfg, "enabled", True)
         head_tracker = HeadCaptureTracker(head_tracker_cfg) if (is_human_mode and use_landmarks_capture) else None
 
         manual_roi = self._init_manual_roi(cam, is_human_mode)
+
+        # Effective resolution logging and range check
+        eff_w = self.cfg.camera.width
+        eff_h = self.cfg.camera.height
+        logger.info(f"  Effective stream resolution: {eff_w}x{eff_h}")
+        res_min_dist = (
+            self.cfg.camera.min_range_1280x720_m
+            if (eff_w >= 1280 and eff_h >= 720)
+            else self.cfg.camera.min_range_848x480_m
+        )
+
+        # Stillness tracking state for --auto-hold
+        stillness_start_time: float | None = None
+        prev_still_roi_depth: np.ndarray | None = None
+        spacing_satisfied: bool = True  # first frame can trigger immediately once still
+
+        # Subject-turns tracking
+        cumulative_yaw_deg: float = 0.0
 
         window_name = "Stage 1: Human 180 deg Capture" if is_human_mode else "Stage 1: D455f Capture (RGB | Depth)"
         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
@@ -831,12 +1020,77 @@ class ScanPipeline:
                     time.sleep(0.005)
                     continue  # dropped frame — just retry
 
+                now = time.time()
+
+                # Background status string
+                bg_status_str = None
+                if head_tracker_cfg.subject_turns:
+                    if self.cfg.background_ref_depth is not None:
+                        bg_status_str = "LOCKED [OK]"
+                    else:
+                        bg_status_str = "EMPTY SCENE (Press 'B' to Lock)"
+
+                # Stillness tracking
+                stillness_status_str = None
+                if head_tracker_cfg.auto_hold and is_human_mode:
+                    is_still = False
+                    if head_tracker is not None and getattr(head_tracker, "last_face_bbox", None) is not None:
+                        rx1, ry1, rx2, ry2 = head_tracker.last_face_bbox
+                        curr_roi_d = depth_m[ry1:ry2, rx1:rx2]
+                        if prev_still_roi_depth is not None and prev_still_roi_depth.shape == curr_roi_d.shape:
+                            depth_step_diff = _depth_mean_diff(curr_roi_d, prev_still_roi_depth)
+                            cam_motion_ok = True
+                            if not head_tracker_cfg.subject_turns:
+                                cam_motion_ok = (head_tracker.avg_motion_px < 15.0)
+                            if depth_step_diff < head_tracker_cfg.stillness_depth_thresh_m and cam_motion_ok:
+                                is_still = True
+                            if depth_step_diff >= head_tracker_cfg.stillness_min_motion_spacing_m:
+                                spacing_satisfied = True
+                        prev_still_roi_depth = curr_roi_d.copy()
+
+                    if is_still:
+                        if stillness_start_time is None:
+                            stillness_start_time = now
+                        still_duration = now - stillness_start_time
+                        if not spacing_satisfied:
+                            stillness_status_str = "MOVE/TURN FIRST [WAIT]"
+                        else:
+                            stillness_status_str = f"HOLDING ({still_duration:.1f}s / {head_tracker_cfg.stillness_time_s:.1f}s)"
+                    else:
+                        stillness_start_time = None
+                        still_duration = 0.0
+                        stillness_status_str = "WAITING FOR STILLNESS" if spacing_satisfied else "MOVE/TURN FIRST"
+
+                # Turn guidance string
+                turn_guidance_str = None
+                if head_tracker_cfg.subject_turns:
+                    if cumulative_yaw_deg >= 180.0:
+                        turn_guidance_str = f"DONE: ~{cumulative_yaw_deg:.0f} deg covered -- Press ENTER"
+                    elif len(raw_frames) > 0:
+                        target_step = getattr(head_tracker_cfg, "target_yaw_step_deg", 20.0)
+                        turn_guidance_str = f"Turn about {target_step:.0f} deg more (covered: ~{cumulative_yaw_deg:.0f} deg)"
+                    else:
+                        turn_guidance_str = "Facing forward -- Ready for first shot"
+
                 preview, roi_quality = self._render_capture_preview(
                     color_bgr, depth_m, depth_color, cam, head_tracker, manual_roi,
                     is_human_mode, motion_warn_text, motion_warn_until,
                     len(raw_frames), last_n_pts,
                     gate_warn_text=gate_warn_text, gate_warn_until=gate_warn_until,
+                    stillness_status=stillness_status_str,
+                    turn_guidance=turn_guidance_str,
+                    bg_status=bg_status_str,
                 )
+
+                # Check resolution minimum distance warning
+                if roi_quality and roi_quality.get("roi_median_depth_m", 0.0) > 0:
+                    med_d = roi_quality["roi_median_depth_m"]
+                    if med_d < res_min_dist and (now - last_res_warn_time >= 3.0):
+                        logger.warning(
+                            f"  [!] Subject depth ({med_d:.2f}m) is below min recommended range "
+                            f"({res_min_dist:.2f}m) for {eff_w}x{eff_h} resolution."
+                        )
+                        last_res_warn_time = now
 
                 if not window_initialized:
                     disp_w = min(1280, preview.shape[1])
@@ -846,10 +1100,59 @@ class ScanPipeline:
 
                 cv2.imshow(window_name, preview)
                 key = cv2.waitKey(1) & 0xFF
-                now = time.time()
 
-                # ---- Auto-capture logic --------------------------------
-                if self.cfg.camera.auto_capture:
+                # ---- Key 'B' / 'b' for background reference ----
+                if is_human_mode and head_tracker_cfg.subject_turns and (key in (ord('b'), ord('B'))):
+                    logger.info("  [SUBJECT-TURNS] Capturing background reference burst (10 frames)...")
+                    bg_c, bg_d = self._capture_burst(cam, burst_count=head_tracker_cfg.burst_count)
+                    if bg_d is not None:
+                        self.cfg.background_ref_color = bg_c
+                        self.cfg.background_ref_depth = bg_d
+                        gate_warn_text = "BACKGROUND REFERENCE LOCKED [OK]"
+                        gate_warn_until = now + 2.0
+                        logger.info("  [SUBJECT-TURNS] Background reference locked successfully.")
+
+                # ---- Auto-hold stillness trigger ----
+                if head_tracker_cfg.auto_hold and is_human_mode:
+                    if (stillness_start_time is not None) and (now - stillness_start_time >= head_tracker_cfg.stillness_time_s) and spacing_satisfied:
+                        gate_blocks = False
+                        gate_reason = ""
+                        if head_tracker_cfg.gate_mode == "hard" and roi_quality:
+                            if not roi_quality["is_gate_pass"]:
+                                gate_blocks = True
+                                gate_reason = roi_quality["gate_reason"] or "quality criteria failed"
+
+                        if gate_blocks:
+                            if now - last_gate_log_time >= 0.5:
+                                logger.warning(f"  [CAPTURE GATE REJECTED] Frame {len(raw_frames)} attempt blocked: {gate_reason}")
+                                last_gate_log_time = now
+                            gate_warn_text = f"GATE REJECTED: {gate_reason.upper()} -- RETRYING"
+                            gate_warn_until = now + 1.2
+                        else:
+                            logger.info(f"  [AUTO-HOLD] Stillness held for {now - stillness_start_time:.2f}s -> Capturing burst frame {len(raw_frames) + 1}...")
+                            burst_c, burst_d = self._capture_burst(cam, burst_count=head_tracker_cfg.burst_count)
+                            if burst_c is None:
+                                burst_c, burst_d = color_bgr, depth_m
+                            frame, n_pts, m_warn, m_until = self._try_capture_human_frame(
+                                cam, burst_c, burst_d, raw_frames, now, roi_quality=roi_quality
+                            )
+                            if frame is not None:
+                                raw_frames.append(frame)
+                                last_n_pts = n_pts
+                                last_capture_time = now
+                                last_captured_depth = burst_d.copy()
+                                spacing_satisfied = False
+                                stillness_start_time = None
+                                if len(raw_frames) >= 2:
+                                    est_t, est_r_deg = _rough_motion_estimate(raw_frames[-1].pcd, raw_frames[-2].pcd)
+                                    cumulative_yaw_deg += est_r_deg
+                                if m_warn is not None:
+                                    motion_warn_text = m_warn
+                                    motion_warn_until = m_until
+                                logger.info(f"  Captured human frame {len(raw_frames):2d}: {n_pts:>6} pts with RGB-D [OK]")
+
+                # ---- Standard timer-based auto-capture logic --------------------------------
+                elif self.cfg.camera.auto_capture:
                     if now - last_capture_time >= capture_interval:
                         is_duplicate = False
                         if (self.cfg.camera.skip_near_duplicate_frames
@@ -862,7 +1165,7 @@ class ScanPipeline:
                             if now - last_skip_warn_time >= 1.0:
                                 logger.debug("  ... camera hasn't moved enough, still waiting ...")
                                 last_skip_warn_time = now
-                        elif is_human_mode and head_tracker_cfg.capture_gate and (roi_quality and not roi_quality["is_gate_pass"]):
+                        elif is_human_mode and head_tracker_cfg.gate_mode == "hard" and (roi_quality and not roi_quality["is_gate_pass"]):
                             reason = roi_quality["gate_reason"] or "quality criteria failed"
                             if now - last_gate_log_time >= 0.5:
                                 logger.warning(f"  [CAPTURE GATE REJECTED] Frame {len(raw_frames)} attempt blocked: {reason}")
@@ -881,6 +1184,9 @@ class ScanPipeline:
                                     last_n_pts = n_pts
                                     last_capture_time = now
                                     last_captured_depth = depth_m.copy()
+                                    if len(raw_frames) >= 2:
+                                        est_t, est_r_deg = _rough_motion_estimate(raw_frames[-1].pcd, raw_frames[-2].pcd)
+                                        cumulative_yaw_deg += est_r_deg
                                     if m_warn is not None:
                                         motion_warn_text = m_warn
                                         motion_warn_until = m_until
@@ -900,23 +1206,38 @@ class ScanPipeline:
 
                 # ---- Manual capture handling ---------------------------
                 elif key == 32:  # SPACE — manual capture
-                    if is_human_mode and head_tracker_cfg.capture_gate and (roi_quality and not roi_quality["is_gate_pass"]):
-                        reason = roi_quality["gate_reason"] or "quality criteria failed"
-                        logger.warning(f"  [CAPTURE GATE REJECTED] Manual capture attempt blocked: {reason}")
-                        gate_warn_text = f"GATE REJECTED: {reason.upper()} -- RETRYING"
-                        gate_warn_until = now + 1.2
-                    elif is_human_mode:
-                        frame, n_pts, m_warn, m_until = self._try_capture_human_frame(
-                            cam, color_bgr, depth_m, raw_frames, time.time(), roi_quality=roi_quality
-                        )
-                        if frame is not None:
-                            raw_frames.append(frame)
-                            last_n_pts = n_pts
-                            last_captured_depth = depth_m.copy()
-                            if m_warn is not None:
-                                motion_warn_text = m_warn
-                                motion_warn_until = m_until
-                            logger.debug(f"  Captured human frame {len(raw_frames):2d}: {n_pts:>6} pts with RGB-D [OK]")
+                    if is_human_mode:
+                        gate_blocks = False
+                        gate_reason = ""
+                        if head_tracker_cfg.gate_mode == "hard" and roi_quality:
+                            if not roi_quality["is_gate_pass"]:
+                                gate_blocks = True
+                                gate_reason = roi_quality["gate_reason"] or "quality criteria failed"
+
+                        if gate_blocks:
+                            logger.warning(f"  [CAPTURE GATE REJECTED] Manual capture attempt blocked: {gate_reason}")
+                            gate_warn_text = f"GATE REJECTED: {gate_reason.upper()} -- RETRYING"
+                            gate_warn_until = now + 1.2
+                        else:
+                            logger.info(f"  [MANUAL] Capturing burst frame {len(raw_frames) + 1}...")
+                            burst_c, burst_d = self._capture_burst(cam, burst_count=head_tracker_cfg.burst_count)
+                            if burst_c is None:
+                                burst_c, burst_d = color_bgr, depth_m
+                            frame, n_pts, m_warn, m_until = self._try_capture_human_frame(
+                                cam, burst_c, burst_d, raw_frames, time.time(), roi_quality=roi_quality
+                            )
+                            if frame is not None:
+                                raw_frames.append(frame)
+                                last_n_pts = n_pts
+                                last_captured_depth = burst_d.copy()
+                                spacing_satisfied = False
+                                if len(raw_frames) >= 2:
+                                    est_t, est_r_deg = _rough_motion_estimate(raw_frames[-1].pcd, raw_frames[-2].pcd)
+                                    cumulative_yaw_deg += est_r_deg
+                                if m_warn is not None:
+                                    motion_warn_text = m_warn
+                                    motion_warn_until = m_until
+                                logger.info(f"  Captured human frame {len(raw_frames):2d}: {n_pts:>6} pts with RGB-D [OK]")
                     else:
                         pcd, centroid, raw_pts = self._try_capture_object_frame(
                             cam, color_bgr, depth_m, manual_roi, raw_frames,
@@ -987,6 +1308,49 @@ class ScanPipeline:
         if raw_frames and isinstance(raw_frames[0], RGBDFrame):
             isolated_rgbd: list[RGBDFrame] = []
             last_iso_centroid: np.ndarray | None = None
+
+            is_subject_turns = bool(getattr(self.cfg.head_capture, "subject_turns", False))
+            bg_depth = getattr(self.cfg, "background_ref_depth", None)
+            if bg_depth is None:
+                bg_depth = getattr(raw_frames, "background_ref_depth", getattr(raw_frames[0], "background_ref_depth", None))
+
+            if is_subject_turns and bg_depth is not None:
+                from preprocessing import isolate_subject_by_background_subtraction
+                logger.info("  Stage 2: using background-subtraction isolation (fixed-camera subject-turns mode, no 3D DBSCAN).")
+                for i, f in enumerate(raw_frames):
+                    n_before = len(f.pcd.points)
+                    iso, fg_mask = isolate_subject_by_background_subtraction(
+                        f,
+                        bg_depth,
+                        diff_threshold_m=self.cfg.head_capture.bg_diff_threshold_m,
+                        depth_min_m=self.cfg.camera.depth_min_m,
+                        depth_max_m=self.cfg.camera.depth_max_m,
+                    )
+                    f.pcd = iso
+                    f.foreground_mask = fg_mask
+                    n_after = len(iso.points)
+                    if n_after < target_cfg.min_object_points:
+                        logger.debug(f"  frame {i:02d}: {n_before} -> {n_after} pts -- DISCARDED (< {target_cfg.min_object_points})")
+                        continue
+                    isolated_rgbd.append(f)
+
+                if not isolated_rgbd:
+                    raise RuntimeError(
+                        "No frames survived background-subtraction isolation. "
+                        "Ensure the subject is within camera depth range and background reference was captured."
+                    )
+                if self.cfg.show_stage_windows:
+                    show(
+                        color_frames_distinctly([f.pcd for f in isolated_rgbd]),
+                        window_name="Stage 2: preprocessed human frames (background-subtracted)",
+                    )
+                if self.cfg.save_intermediate:
+                    for i, f in enumerate(isolated_rgbd):
+                        out = self.cfg.output_dir / f"frame_{i:02d}_isolated.ply"
+                        o3d.io.write_point_cloud(str(out), f.pcd)
+                        logger.info(f"  Saved: {out}")
+                return isolated_rgbd
+
             use_segmentation = (
                 pre_cfg.isolation_mode == "segmentation"
                 and hasattr(raw_frames[0], "color_bgr")

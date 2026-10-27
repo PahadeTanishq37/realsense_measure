@@ -126,11 +126,21 @@ def save_raw_capture(
 
         frames_meta.append(meta_entry)
 
+    has_bg_ref = False
+    bg_ref_depth = getattr(cfg, "background_ref_depth", None)
+    bg_ref_color = getattr(cfg, "background_ref_color", None)
+    if bg_ref_depth is not None:
+        has_bg_ref = True
+        np.save(str(out_path / "background_depth.npy"), bg_ref_depth.astype(np.float32))
+        if bg_ref_color is not None:
+            cv2.imwrite(str(out_path / "background_color.png"), bg_ref_color)
+
     meta_doc = {
         "intrinsics": intr_meta,
         "camera_config": cam_meta,
         "target_name": cfg.target.name,
         "num_frames": len(raw_frames),
+        "has_background_ref": has_bg_ref,
         "frames": frames_meta,
     }
 
@@ -231,6 +241,22 @@ def load_raw_capture(input_dir: Path | str) -> list[RGBDFrame]:
             quality_metrics=qm,
         )
         raw_frames.append(frame)
+
+    bg_ref_depth = None
+    bg_ref_color = None
+    bg_depth_path = in_path / "background_depth.npy"
+    if bg_depth_path.exists():
+        bg_ref_depth = np.load(str(bg_depth_path)).astype(np.float32)
+        bg_color_path = in_path / "background_color.png"
+        if bg_color_path.exists():
+            bg_ref_color = cv2.imread(str(bg_color_path), cv2.IMREAD_COLOR)
+
+    if bg_ref_depth is not None:
+        setattr(raw_frames, "background_ref_depth", bg_ref_depth)
+        setattr(raw_frames, "background_ref_color", bg_ref_color)
+        for f in raw_frames:
+            setattr(f, "background_ref_depth", bg_ref_depth)
+            setattr(f, "background_ref_color", bg_ref_color)
 
     logger.info(f"  [replay] Rebuilt {len(raw_frames)} frames from {in_path}/ (zero camera dependencies)")
     return raw_frames

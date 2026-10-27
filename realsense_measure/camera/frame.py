@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
-
 from typing import Any
+import warnings
 
 import numpy as np
 import open3d as o3d
@@ -46,6 +46,7 @@ class RGBDFrame:
     timestamp: float
     intrinsics: o3d.camera.PinholeCameraIntrinsic
     quality_metrics: dict[str, Any] | None = None
+    foreground_mask: np.ndarray | None = None
 
     def to_rgbd_image(
         self,
@@ -53,6 +54,7 @@ class RGBDFrame:
         depth_trunc: float = 1.5,
         convert_rgb_to_intensity: bool = False,
         depth_override: np.ndarray | None = None,
+        color_override: np.ndarray | None = None,
     ) -> o3d.geometry.RGBDImage:
         """
         Convert to an Open3D RGBDImage for RGB-D odometry and volumetric integration.
@@ -68,12 +70,15 @@ class RGBDFrame:
             Typically True for RGBDOdometry, False for colored TSDF integration.
         depth_override:
             Optional pre-smoothed or masked depth array to use instead of self.depth_m.
+        color_override:
+            Optional color array to use instead of self.color_bgr (e.g. background set to constant).
 
         Returns
         -------
         o3d.geometry.RGBDImage
         """
-        color_rgb = np.ascontiguousarray(self.color_bgr[:, :, ::-1])
+        active_color = self.color_bgr if color_override is None else color_override
+        color_rgb = np.ascontiguousarray(active_color[:, :, ::-1])
         depth_base = self.depth_m if depth_override is None else depth_override
         depth_clipped = depth_base.copy()
         depth_clipped[depth_clipped < 0.10] = 0.0
@@ -99,7 +104,10 @@ class RGBDFrame:
             pcd=copy.deepcopy(self.pcd),
             timestamp=self.timestamp,
             intrinsics=copy.deepcopy(self.intrinsics),
+            quality_metrics=copy.deepcopy(self.quality_metrics) if self.quality_metrics is not None else None,
+            foreground_mask=self.foreground_mask.copy() if self.foreground_mask is not None else None,
         )
+
 
     def to_point_cloud(
         self,
@@ -118,6 +126,56 @@ class RGBDFrame:
             depth_max_m=depth_max_m,
             roi=roi,
         )
+
+
+def compute_burst_median_frame(
+    burst_colors: list[np.ndarray],
+    burst_depths: list[np.ndarray],
+    min_valid_frac: float = 0.50,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Compute burst-averaged RGB-D frame from N observations.
+
+    Uses the middle colour frame and computes the per-pixel median of valid depth
+    (ignoring zeros). Requires at least ceil(N * min_valid_frac) valid frames for a pixel
+    to have valid depth in the output; otherwise 0.0. Outliers are rejected.
+    Does not invent depth where the burst has none.
+
+    Parameters
+    ----------
+    burst_colors:
+        List of HxWx3 uint8 BGR images.
+    burst_depths:
+        List of HxW float32 metric depth maps.
+    min_valid_frac:
+        Minimum ratio of burst frames that must contain non-zero depth for that pixel.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray]:
+        (middle_color_bgr, median_depth_m)
+    """
+    if not burst_depths:
+        raise ValueError("burst_depths list cannot be empty")
+    n_frames = len(burst_depths)
+    mid_idx = n_frames // 2
+    middle_color = burst_colors[mid_idx].copy()
+
+    depth_stack = np.stack(burst_depths, axis=0)  # (N, H, W)
+    valid_mask = depth_stack > 0.0
+    valid_counts = np.sum(valid_mask, axis=0)
+
+    min_required = int(np.ceil(n_frames * min_valid_frac))
+
+    nan_stack = np.where(valid_mask, depth_stack, np.nan)
+    with warnings.catch_warnings(), np.errstate(all="ignore"):
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        med_depth = np.nanmedian(nan_stack, axis=0)
+
+    med_depth = np.nan_to_num(med_depth, nan=0.0)
+    med_depth[valid_counts < min_required] = 0.0
+
+    return middle_color, med_depth.astype(np.float32)
 
 
 def create_pcd_from_rgbd(

@@ -18,6 +18,11 @@ registration happens.
 
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
+import cv2
 import numpy as np
 import open3d as o3d
 
@@ -497,6 +502,63 @@ def isolate_with_segmentation(
         f"pts_after={n_geo}  centroid={cen_str}"
     )
     return geo_pcd, "geometric_fallback"
+
+
+def isolate_subject_by_background_subtraction(
+    frame: "RGBDFrame",
+    background_depth: np.ndarray,
+    diff_threshold_m: float = 0.05,
+    depth_min_m: float = 0.35,
+    depth_max_m: float = 1.20,
+    morph_kernel_size: int = 7,
+) -> tuple[o3d.geometry.PointCloud, np.ndarray]:
+    """
+    Isolate foreground subject against a pre-captured static background reference.
+
+    Foreground mask:
+      - Valid depth in current frame (depth_min_m <= depth <= depth_max_m)
+      - AND at least diff_threshold_m (default 5 cm) closer than background_depth,
+        OR valid where background reference had none.
+      - Cleaned with 2D morphological close.
+      - Keeps largest 2D connected component.
+      - Builds point cloud from masked depth only (NO 3D DBSCAN).
+
+    Returns
+    -------
+    pcd : o3d.geometry.PointCloud
+        Isolated subject point cloud.
+    fg_mask : np.ndarray
+        2D boolean foreground mask (H x W).
+    """
+    from camera.frame import create_pcd_from_rgbd
+
+    d = frame.depth_m
+    fg_candidate = (d >= depth_min_m) & (d <= depth_max_m)
+    is_nearer = (background_depth <= 0.0) | np.isnan(background_depth) | (d <= (background_depth - diff_threshold_m))
+    raw_fg = fg_candidate & is_nearer
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (morph_kernel_size, morph_kernel_size))
+    closed = cv2.morphologyEx(raw_fg.astype(np.uint8), cv2.MORPH_CLOSE, kernel)
+
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(closed, connectivity=8)
+    if num_labels > 1:
+        largest_label = int(np.argmax(stats[1:, cv2.CC_STAT_AREA])) + 1
+        final_fg = (labels == largest_label)
+    else:
+        final_fg = np.zeros_like(raw_fg, dtype=bool)
+
+    masked_depth = np.where(final_fg, d, 0.0).astype(np.float32)
+    pcd = create_pcd_from_rgbd(
+        color_bgr=frame.color_bgr,
+        depth_m=masked_depth,
+        intrinsics=frame.intrinsics,
+        depth_min_m=depth_min_m,
+        depth_max_m=depth_max_m,
+    )
+    n_pts = len(pcd.points)
+    fid = getattr(frame, "frame_id", 0)
+    logger.info(f"  [subject-turns isolation] Frame {fid:02d}: foreground mask -> {n_pts} points (no 3D DBSCAN)")
+    return pcd, final_fg
 
 
 def isolate_object(

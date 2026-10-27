@@ -89,12 +89,38 @@ class HeadCaptureConfig:
     center_roi_width_frac: float = 0.35        # central ROI width fraction when face is not detected
     center_roi_height_frac: float = 0.45       # central ROI height fraction when face is not detected
 
-    # Capture gate settings (opt-in via --capture-gate or capture_gate=True)
-    capture_gate: bool = False                 # when True, gate blocks saving frames that fail quality criteria
-    gate_min_valid_depth_frac: float = 0.70    # minimum fraction of ROI pixels with non-zero depth
-    gate_min_dist_m: float = 0.55              # minimum allowed working distance for gate (m)
-    gate_max_dist_m: float = 0.95              # maximum allowed working distance for gate (m)
+    # Capture gate settings (opt-in via --gate-mode or --capture-gate)
+    gate_mode: str = "off"                     # "off" (default), "advisory" (shows reasons, allows capture), "hard" (blocks capture)
+    capture_gate: bool = False                 # legacy boolean alias for gate_mode == "hard"
+    gate_min_valid_depth_frac: float = 0.70    # advisory minimum fraction of ROI pixels with non-zero depth
+    gate_min_dist_m: float = 0.55              # advisory minimum allowed working distance for gate (m)
+    gate_max_dist_m: float = 0.95              # advisory maximum allowed working distance for gate (m)
+    gate_hard_min_valid_depth_frac: float = 0.35  # hard-block if ROI valid depth < 35%
+    gate_hard_min_dist_m: float = 0.50            # hard-block if nearest valid depth < 0.50m
     gate_require_face: bool = False            # require face landmark lock when tracker is active (optional, default False)
+    fallback_face_box_max_frames: int = 30        # reuse last known face box for up to 30 frames (~1s)
+
+    # Burst capture settings
+    burst_count: int = 10                         # number of frames in burst
+    burst_min_valid_frac: float = 0.50            # require >= 50% valid depth frames per pixel
+
+    # Stillness-triggered capture (--auto-hold)
+    auto_hold: bool = False
+    stillness_time_s: float = 0.7                 # subject still duration to trigger capture (s)
+    stillness_depth_thresh_m: float = 0.015       # max mean abs depth change within ROI between frames (m)
+    stillness_min_motion_spacing_m: float = 0.025 # required motion before next trigger (m)
+    stillness_min_yaw_spacing_deg: float = 8.0    # required yaw turn before next trigger (deg)
+
+    # Fixed-camera "subject turns" mode (--subject-turns)
+    subject_turns: bool = False
+    bg_diff_threshold_m: float = 0.05             # subject must be at least 5 cm closer than background
+    target_yaw_step_deg: float = 20.0             # target angular step between captures
+
+    def __post_init__(self) -> None:
+        if self.capture_gate and self.gate_mode == "off":
+            self.gate_mode = "hard"
+        elif self.gate_mode == "hard":
+            self.capture_gate = True
 
 
 @dataclass
@@ -105,6 +131,11 @@ class CameraConfig:
     width: int = 848
     height: int = 480
     fps: int = 30
+
+    # Minimum range for resolution checks (metres)
+    min_range_848x480_m: float = 0.35
+    min_range_1280x720_m: float = 0.52
+    resolution_override: str | None = None
 
     # Post-processing filters (applied in order: decimation → spatial →
     # temporal → hole-filling)
@@ -138,8 +169,16 @@ class CameraConfig:
     human_face_quality_mode: bool = False
 
     def resolve_defaults(self, target_name: str = "box") -> "CameraConfig":
-        """Apply human face quality settings when enabled and target is head or body."""
-        if self.human_face_quality_mode and target_name in ("head", "body"):
+        """Apply human face quality and resolution override settings."""
+        if self.resolution_override:
+            try:
+                parts = self.resolution_override.lower().split("x")
+                if len(parts) == 2:
+                    self.width = int(parts[0])
+                    self.height = int(parts[1])
+            except Exception as err:
+                logger.warning(f"  [!] Failed to parse resolution_override '{self.resolution_override}': {err}")
+        elif self.human_face_quality_mode and target_name in ("head", "body"):
             self.use_decimation = False
             self.use_hole_filling = False
             self.width = 1280
@@ -434,6 +473,15 @@ class PipelineConfig:
     replay_batch_dir: Path | None = None
     batch_configs: list[str] | None = None
 
+    # Practical capture modes
+    gate_mode: str = "off"
+    auto_hold: bool = False
+    burst_count: int = 10
+    subject_turns: bool = False
+    resolution: str | None = None
+    background_ref_color: np.ndarray | None = None
+    background_ref_depth: np.ndarray | None = None
+
     def __post_init__(self) -> None:
         # Ensure output_dir is always a Path, even if a plain string was passed.
         self.output_dir = Path(self.output_dir)
@@ -444,6 +492,9 @@ class PipelineConfig:
             self.replay_dir = Path(self.replay_dir)
         if self.replay_batch_dir is not None:
             self.replay_batch_dir = Path(self.replay_batch_dir)
+
+        if self.resolution is not None:
+            self.camera.resolution_override = self.resolution
 
         # Resolve registration target-specific defaults if still None
         self.registration.resolve_defaults(self.target.name)
@@ -462,6 +513,21 @@ class PipelineConfig:
                 self.tsdf_voxel_length_m = 0.004
             if self.tsdf_trunc_m is None:
                 self.tsdf_trunc_m = 0.02
+
+        # Sync practical capture parameters across sub-configs
+        if self.gate_mode != "off":
+            self.head_capture.gate_mode = self.gate_mode
+        if self.auto_hold:
+            self.head_capture.auto_hold = True
+        if self.burst_count != 10:
+            self.head_capture.burst_count = self.burst_count
+        if self.subject_turns:
+            self.head_capture.subject_turns = True
+
+        if self.head_capture.gate_mode == "hard":
+            self.head_capture.capture_gate = True
+        elif self.head_capture.capture_gate and self.head_capture.gate_mode == "off":
+            self.head_capture.gate_mode = "hard"
 
         self.camera.head_capture = self.head_capture
 

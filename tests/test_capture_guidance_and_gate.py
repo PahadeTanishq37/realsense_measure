@@ -108,7 +108,7 @@ def test_gate_no_face():
     assert res["is_gate_pass"] is False
     assert "face not detected" in res["gate_reason"].lower()
     assert res["face_detected"] is False
-    assert res["roi_type"] == "central_roi"
+    assert res["roi_type"] in ("central_roi", "nearest_foreground_roi")
 
 
 def test_hud_state_logic():
@@ -247,7 +247,7 @@ def test_gate_profile_frame_face_requirement():
 
     res_default = compute_head_roi_quality(depth_m, landmarks_px=None, cfg=cfg_default)
     assert res_default["face_detected"] is False
-    assert res_default["roi_type"] == "central_roi"
+    assert res_default["roi_type"] in ("central_roi", "nearest_foreground_roi")
     assert res_default["roi_valid_depth_frac"] == 1.0
     assert 0.65 <= res_default["roi_median_depth_m"] <= 0.85
     assert res_default["is_gate_pass"] is True
