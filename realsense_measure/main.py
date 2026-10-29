@@ -306,9 +306,13 @@ def main() -> None:
     if args.save_raw is not None:
         cfg.save_raw = True
         if args.save_raw.strip():
-            cfg.save_raw_dir = Path(args.save_raw.strip())
+            raw_target = Path(args.save_raw.strip())
+            # If a plain relative name like 'raw_capture_05' is provided, place in raw_captures/
+            if not raw_target.is_absolute() and "raw_captures" not in raw_target.parts:
+                raw_target = Path("raw_captures") / raw_target
+            cfg.save_raw_dir = raw_target
         else:
-            cfg.save_raw_dir = None
+            cfg.save_raw_dir = Path("raw_captures") / "raw_capture"
 
     if args.seed is not None:
         cfg.random_seed = args.seed
@@ -318,7 +322,10 @@ def main() -> None:
         logger.info(f"  Replay mode: defaulting random seed to {cfg.random_seed}")
 
     if args.replay is not None:
-        cfg.replay_dir = Path(args.replay)
+        rep_p = Path(args.replay)
+        if not rep_p.exists() and (Path("raw_captures") / rep_p).exists():
+            rep_p = Path("raw_captures") / rep_p
+        cfg.replay_dir = rep_p
 
     if args.head_only_registration:
         cfg.registration.head_only_registration = True
