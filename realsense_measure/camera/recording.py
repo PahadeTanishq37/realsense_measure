@@ -85,6 +85,7 @@ def save_raw_capture(
         "depth_min_m": cfg.camera.depth_min_m,
         "depth_max_m": cfg.camera.depth_max_m,
         "human_face_quality_mode": cfg.camera.human_face_quality_mode,
+        "rotate_90": getattr(cfg.camera, "rotate_90", None),
     }
 
     frames_meta = []
@@ -123,6 +124,9 @@ def save_raw_capture(
                 meta_entry["face_detected"] = qm["face_detected"]
             if "roi_type" in qm:
                 meta_entry["roi_type"] = qm["roi_type"]
+            for bk in ["burst_frames_used", "burst_elapsed_sec", "burst_motion_mm", "burst_motion_flagged"]:
+                if bk in qm:
+                    meta_entry[bk] = qm[bk]
 
         frames_meta.append(meta_entry)
 
@@ -152,7 +156,10 @@ def save_raw_capture(
     return out_path
 
 
-def load_raw_capture(input_dir: Path | str) -> list[RGBDFrame]:
+def load_raw_capture(
+    input_dir: Path | str,
+    target_name: str | None = None,
+) -> list[RGBDFrame]:
     """
     Load raw RGB-D frames from a previous recording without importing or requiring pyrealsense2.
 
@@ -162,6 +169,8 @@ def load_raw_capture(input_dir: Path | str) -> list[RGBDFrame]:
     ----------
     input_dir:
         Directory containing meta.json, PNG color images, and .npy depth files.
+    target_name:
+        Optional target override ('body', 'head', 'box'). For 'body', sets depth_max_m to 3.0m.
 
     Returns
     -------
@@ -194,9 +203,12 @@ def load_raw_capture(input_dir: Path | str) -> list[RGBDFrame]:
         float(intr_meta["cy"]),
     )
 
+    effective_target = target_name or meta_doc.get("target_name")
     cam_cfg = meta_doc.get("camera_config", {})
     depth_min_m = float(cam_cfg.get("depth_min_m", 0.40))
     depth_max_m = float(cam_cfg.get("depth_max_m", 1.20))
+    if effective_target == "body" and depth_max_m <= 1.20:
+        depth_max_m = 3.00
 
     frames_meta = meta_doc.get("frames", [])
     raw_frames: list[RGBDFrame] = []

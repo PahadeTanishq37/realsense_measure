@@ -262,6 +262,9 @@ class RealSenseCamera:
                 cx=intr.ppx,
                 cy=intr.ppy,
             )
+            if self.cfg.rotate_90 in ("cw", "ccw"):
+                from camera.rotation import rotate_intrinsics
+                self.intrinsics_o3d = rotate_intrinsics(self.intrinsics_o3d, self.cfg.rotate_90)
         except Exception as exc:
             if self._profile is not None:
                 try:
@@ -488,6 +491,10 @@ class RealSenseCamera:
             h, w = color_bgr.shape[:2]
             depth_m = cv2.resize(depth_m, (w, h), interpolation=cv2.INTER_NEAREST)
 
+        if self.cfg.rotate_90 in ("cw", "ccw"):
+            from camera.rotation import rotate_rgbd_arrays
+            color_bgr, depth_m = rotate_rgbd_arrays(color_bgr, depth_m, self.cfg.rotate_90)
+
         return color_bgr, depth_m
 
     def colorize_depth(
@@ -600,6 +607,13 @@ class RealSenseCamera:
                                          interpolation=cv2.INTER_NEAREST)
             depth_color_bgr = cv2.resize(depth_color_bgr, (w, h),
                                          interpolation=cv2.INTER_NEAREST)
+
+        if self.cfg.rotate_90 in ("cw", "ccw"):
+            from camera.rotation import rotate_rgbd_arrays
+            import cv2
+            color_bgr, depth_m = rotate_rgbd_arrays(color_bgr, depth_m, self.cfg.rotate_90)
+            rot_code = cv2.ROTATE_90_CLOCKWISE if self.cfg.rotate_90 == "cw" else cv2.ROTATE_90_COUNTERCLOCKWISE
+            depth_color_bgr = cv2.rotate(depth_color_bgr, rot_code)
 
         return color_bgr, depth_m, depth_color_bgr
 

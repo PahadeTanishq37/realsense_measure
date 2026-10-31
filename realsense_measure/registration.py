@@ -158,7 +158,7 @@ def evaluate_point_set_geometry(
     1. Count and coordinate finiteness.
     2. Number of spatially distinct landmarks (clustering closer than min_unique_dist_m).
     3. Maximum geometric spread (diameter / max pairwise distance).
-    4. Centered SVD singular values for 2D spread and collinearity.
+    4. Centered SVD singular values for 2D spread and collinearity.o-k  \
        - Planar configurations (s3 ~ 0, s2 >= min_secondary_spread_m) are ACCEPTED.
        - Collinear configurations (s2 < min_secondary_spread_m or s1/s2 > max_collinear_ratio)
          are REJECTED.

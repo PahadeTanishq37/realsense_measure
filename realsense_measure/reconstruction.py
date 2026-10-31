@@ -380,14 +380,15 @@ def fuse_tsdf_volume(
 
                     depth_override = depth_clean
 
+            tsdf_depth_trunc = getattr(cfg, "tsdf_depth_trunc_m", 3.0 if getattr(getattr(cfg, "target", None), "name", "") == "body" else 1.5)
             try:
                 rgbd = frame.to_rgbd_image(
-                    depth_trunc=1.5,
+                    depth_trunc=tsdf_depth_trunc,
                     convert_rgb_to_intensity=False,
                     depth_override=depth_override,
                 )
             except TypeError:
-                rgbd = frame.to_rgbd_image(depth_trunc=1.5, convert_rgb_to_intensity=False)
+                rgbd = frame.to_rgbd_image(depth_trunc=tsdf_depth_trunc, convert_rgb_to_intensity=False)
 
             volume.integrate(rgbd, frame.intrinsics, extrinsic)
             integrated_count += 1

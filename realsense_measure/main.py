@@ -266,6 +266,25 @@ def _build_parser() -> argparse.ArgumentParser:
         help="TSDF truncation margin in mm for head refinement (default: 5.0)",
     )
     parser.add_argument(
+        "--rotate-90",
+        choices=["cw", "ccw"],
+        default=None,
+        help="rotate colour and depth after capture and rotate intrinsics accordingly (swap fx/fy, remap cx/cy)",
+    )
+    parser.add_argument(
+        "--yaw-stops",
+        type=int,
+        choices=[4, 8],
+        default=4,
+        help="number of yaw stops for --target body stop-and-hold capture (default: 4, option: 8)",
+    )
+    parser.add_argument(
+        "--burst-seconds",
+        type=float,
+        default=4.0,
+        help="duration in seconds for --target body burst capture (default: 4.0)",
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -302,6 +321,19 @@ def main() -> None:
 
     cfg.target.name        = args.target
     cfg.show_stage_windows = not args.no_viz
+
+    if args.rotate_90 is not None:
+        cfg.rotate_90 = args.rotate_90
+        cfg.camera.rotate_90 = args.rotate_90
+
+    if args.yaw_stops is not None:
+        cfg.yaw_stops = args.yaw_stops
+    if args.burst_seconds is not None:
+        cfg.burst_seconds = args.burst_seconds
+
+    if args.target == "body":
+        cfg.camera.resolve_defaults("body")
+        cfg.registration.resolve_defaults("body")
 
     if args.save_raw is not None:
         cfg.save_raw = True
@@ -438,6 +470,7 @@ def main() -> None:
         cfg.head_refinement.sdf_trunc_mm = args.sdf_trunc_mm
 
     # ---- run -----------------------------------------------------------
+    logger.info(f"Effective depth range: {cfg.camera.depth_min_m:.2f} m - {cfg.camera.depth_max_m:.2f} m (target: {cfg.target.name})")
     try:
         ScanPipeline(cfg).run()
     except KeyboardInterrupt:

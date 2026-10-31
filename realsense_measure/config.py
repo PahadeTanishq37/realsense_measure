@@ -168,8 +168,17 @@ class CameraConfig:
     # High-quality capture mode for human face/head scans
     human_face_quality_mode: bool = False
 
+    # 90-degree portrait orientation rotation ('cw' or 'ccw')
+    rotate_90: str | None = None
+
     def resolve_defaults(self, target_name: str = "box") -> "CameraConfig":
         """Apply human face quality and resolution override settings."""
+        if target_name == "body":
+            if self.depth_max_m == 1.20:
+                self.depth_max_m = 3.00
+            if self.depth_vis.visual_max_m < 3.00:
+                self.depth_vis.visual_max_m = 3.00
+
         if self.resolution_override:
             try:
                 parts = self.resolution_override.lower().split("x")
@@ -512,6 +521,12 @@ class PipelineConfig:
     background_ref_color: np.ndarray | None = None
     background_ref_depth: np.ndarray | None = None
 
+    # Portrait rotation and stop-and-hold yaw stops
+    rotate_90: str | None = None
+    yaw_stops: int = 4
+    burst_seconds: float = 4.0
+    tsdf_depth_trunc_m: float | None = None
+
     # Head Refinement (--refine)
     refine: bool = False
     voxel_length_mm: float = 1.5
@@ -531,11 +546,25 @@ class PipelineConfig:
         if self.resolution is not None:
             self.camera.resolution_override = self.resolution
 
+        if self.rotate_90 is not None:
+            self.camera.rotate_90 = self.rotate_90
+
         # Resolve registration target-specific defaults if still None
         self.registration.resolve_defaults(self.target.name)
 
-        # Resolve camera target-specific defaults (e.g. human face quality mode)
+        # Resolve camera target-specific defaults (e.g. human face quality mode, body depth range)
         self.camera.resolve_defaults(self.target.name)
+
+        # Body target depth range and TSDF depth truncation
+        if self.target.name == "body":
+            if self.tsdf_depth_trunc_m is None:
+                self.tsdf_depth_trunc_m = 3.0
+            if self.camera.depth_max_m == 1.20:
+                self.camera.depth_max_m = 3.00
+            if self.camera.depth_vis.visual_max_m < 3.00:
+                self.camera.depth_vis.visual_max_m = 3.00
+        elif self.tsdf_depth_trunc_m is None:
+            self.tsdf_depth_trunc_m = 1.5
 
         # Human head/body mode: apply finer TSDF voxel resolution if still None
         if self.target.name in ("head", "body") or self.registration.registration_mode == "rgbd_human":

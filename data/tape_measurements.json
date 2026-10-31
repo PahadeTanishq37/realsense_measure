@@ -1,0 +1,48 @@
+{
+  "_instructions": "Enter actual tape measurements in millimetres (mm). Leave as null for unmeasured dimensions. Ensure the subject is in relaxed standing posture.",
+  "subject_id": null,
+  "date": null,
+  "measurements_mm": {
+    "stature": null,
+    "head_circumference": null,
+    "neck_base_circumference": null,
+    "chest_circumference": null,
+    "waist_circumference": null,
+    "hip_circumference": null,
+    "crotch_height": null,
+    "ankle_circumference": null,
+    "shoulder_elbow_length": null,
+    "shoulder_wrist_length": null,
+    "inseam": null,
+    "upper_arm_circumference_left": null,
+    "upper_arm_circumference_right": null,
+    "forearm_circumference_left": null,
+    "forearm_circumference_right": null,
+    "mid_thigh_circumference_left": null,
+    "mid_thigh_circumference_right": null,
+    "max_calf_circumference_left": null,
+    "max_calf_circumference_right": null
+  },
+  "field_notes": {
+    "stature": "Floor to vertex (highest point of head). Subject stands erect, barefoot, heels together, looking straight ahead in Frankfort horizontal plane.",
+    "head_circumference": "Maximum circumference of the head passing immediately superior to the brow ridges (glabella) anteriorly and over the maximal occipital protuberance posteriorly.",
+    "neck_base_circumference": "Circumference at the base of the neck, crossing the cervicale posteriorly and resting in the supraclavicular fossa laterally.",
+    "chest_circumference": "Horizontal circumference of the torso at the level of the nipples / fourth costochondral junction during quiet mid-respiration, arms relaxed at sides.",
+    "waist_circumference": "Horizontal circumference of the torso at the level of noticeable waist narrowing (intermediate between lower rib margin and iliac crest) at end-expiration.",
+    "hip_circumference": "Maximum horizontal circumference around the buttocks / greater trochanters, standing with feet close together.",
+    "crotch_height": "Vertical distance from floor to the perineum / crotch fold, subject standing with feet slightly separated.",
+    "ankle_circumference": "Minimum circumference of the lower leg immediately superior to the medial and lateral malleoli.",
+    "shoulder_elbow_length": "Linear distance from acromion landmark (shoulder tip) to the olecranon process (elbow) with arm bent 90 degrees.",
+    "shoulder_wrist_length": "Linear distance from acromion landmark (shoulder tip) to the styloid process of the ulna / wrist crease with arm extended.",
+    "inseam": "Vertical distance along the medial side of the leg from crotch fold to floor / ankle.",
+    "upper_arm_circumference_left": "Circumference of left arm at midpoint between lateral tip of acromion and olecranon process, arm relaxed at side (rehab monitoring).",
+    "upper_arm_circumference_right": "Circumference of right arm at midpoint between acromion and olecranon, arm relaxed at side (rehab monitoring).",
+    "forearm_circumference_left": "Maximum circumference of left forearm, typically 3-5 cm distal to lateral epicondyle of humerus (rehab monitoring).",
+    "forearm_circumference_right": "Maximum circumference of right forearm (rehab monitoring).",
+    "mid_thigh_circumference_left": "Circumference of left thigh midway between inguinal crease and superior border of patella (rehab monitoring).",
+    "mid_thigh_circumference_right": "Circumference of right thigh midway between inguinal crease and superior border of patella (rehab monitoring).",
+    "max_calf_circumference_left": "Maximum circumference of left calf muscle belly, perpendicular to long axis of lower leg (rehab monitoring).",
+    "max_calf_circumference_right": "Maximum circumference of right calf muscle belly, perpendicular to long axis of lower leg (rehab monitoring)."
+  }
+}
+
