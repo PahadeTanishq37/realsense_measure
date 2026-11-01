@@ -256,3 +256,60 @@ def test_body_capture_report_prints_burst_summary(tmp_path: Path, capsys):
     assert "120 frames" in captured.out
     assert "14.2 mm" in captured.out
     assert "FLAGGED" in captured.out
+
+def test_hands_free_auto_sequencing(monkeypatch):
+    """Verify that --target body automatically sequences through all yaw stops without user keypresses."""
+    from unittest.mock import MagicMock
+    import cv2
+    from realsense_measure.pipeline import ScanPipeline
+    import open3d as o3d
+
+    # Mock cv2 GUI calls so test runs headlessly without opening desktop windows
+    monkeypatch.setattr(cv2, "namedWindow", lambda *a, **k: None)
+    monkeypatch.setattr(cv2, "resizeWindow", lambda *a, **k: None)
+    monkeypatch.setattr(cv2, "imshow", lambda *a, **k: None)
+    monkeypatch.setattr(cv2, "waitKey", lambda *a, **k: 0xFF)  # No keys pressed (255)
+    monkeypatch.setattr(cv2, "destroyWindow", lambda *a, **k: None)
+
+    cfg = PipelineConfig()
+    cfg.target.name = "body"
+    cfg.yaw_stops = 4
+    cfg.buffer_seconds = 0.05   # Fast buffer for unit test
+    cfg.burst_seconds = 0.05    # Fast burst for unit test
+
+    pipeline = ScanPipeline(cfg)
+
+    # Mock camera yielding synthetic frames
+    c_syn, d_syn = _create_synthetic_body_frame(h=120, w=160)
+    dc_syn = np.full((120, 160, 3), 50, dtype=np.uint8)
+
+    mock_cam = MagicMock()
+    mock_cam.read_with_colorized.return_value = (c_syn, d_syn, dc_syn)
+    mock_cam.intrinsics = MagicMock(fx=160.0, fy=160.0, cx=80.0, cy=60.0)
+
+    intr = o3d.camera.PinholeCameraIntrinsic(160, 120, 160.0, 160.0, 80.0, 60.0)
+    def _create_rgbd(color_bgr, depth_m, frame_id, timestamp):
+        return RGBDFrame(
+            color_bgr=color_bgr,
+            depth_m=depth_m,
+            frame_id=frame_id,
+            timestamp=timestamp,
+            pcd=o3d.geometry.PointCloud(),
+            intrinsics=intr,
+        )
+    mock_cam.create_rgbd_frame.side_effect = _create_rgbd
+
+    # Run auto-sequencing capture loop
+    frames = pipeline._capture_frames_body(mock_cam)
+
+    assert len(frames) == 4, f"Expected 4 frames for 4 yaw stops, got {len(frames)}"
+    for i, f in enumerate(frames):
+        assert f.frame_id == i
+        assert "burst_frames_used" in f.quality_metrics
+        assert "burst_elapsed_sec" in f.quality_metrics
+        assert "burst_motion_mm" in f.quality_metrics
+        assert "burst_motion_flagged" in f.quality_metrics
+        assert f.quality_metrics["burst_motion_flagged"] is False
+
+    # Check camera was stopped cleanly
+    mock_cam.stop.assert_called_once()

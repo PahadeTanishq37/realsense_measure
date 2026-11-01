@@ -525,6 +525,7 @@ class PipelineConfig:
     rotate_90: str | None = None
     yaw_stops: int = 4
     burst_seconds: float = 4.0
+    buffer_seconds: float = 4.0
     tsdf_depth_trunc_m: float | None = None
 
     # Head Refinement (--refine)

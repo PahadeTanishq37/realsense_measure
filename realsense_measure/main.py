@@ -1,3 +1,4 @@
+
 """
 Command-line entry point for realsense_measure.
 
@@ -285,6 +286,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="duration in seconds for --target body burst capture (default: 4.0)",
     )
     parser.add_argument(
+        "--buffer-seconds",
+        type=float,
+        default=4.0,
+        help="settling and repositioning buffer duration in seconds between yaw stops for --target body (default: 4.0)",
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -330,6 +337,8 @@ def main() -> None:
         cfg.yaw_stops = args.yaw_stops
     if args.burst_seconds is not None:
         cfg.burst_seconds = args.burst_seconds
+    if getattr(args, "buffer_seconds", None) is not None:
+        cfg.buffer_seconds = args.buffer_seconds
 
     if args.target == "body":
         cfg.camera.resolve_defaults("body")

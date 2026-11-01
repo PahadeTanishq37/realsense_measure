@@ -49,6 +49,7 @@ from registration import (
 from targets.base import get_target
 import targets.box   # noqa: F401 — registers BoxTarget via @register_target
 import targets.head  # noqa: F401 — registers HeadTarget via @register_target
+import targets.body  # noqa: F401 registers BodyTarget
 from visualizer import (
     color_frames_distinctly,
     draw_camera_trajectory,
@@ -954,6 +955,7 @@ class ScanPipeline:
         stop_name: str,
         status_msg: str | None = None,
         countdown_num: int | None = None,
+        countdown_label: str | None = None,
         burst_progress: float | None = None,
         flagged_warning: str | None = None,
     ) -> tuple[np.ndarray, dict[str, Any]]:
@@ -1081,11 +1083,12 @@ class ScanPipeline:
         cx_box = w // 2
         cy_box = h // 2
         if countdown_num is not None:
+            lbl = countdown_label or ("HOLD STILL" if current_stop == 0 else "TURN & POSITION")
             cv2.circle(display_color, (cx_box, cy_box), 65, (20, 20, 20), -1)
             cv2.circle(display_color, (cx_box, cy_box), 65, (0, 255, 255), 4)
             cv2.putText(display_color, str(countdown_num), (cx_box - 24, cy_box + 28), cv2.FONT_HERSHEY_SIMPLEX, 2.8, (0, 255, 255), 5, cv2.LINE_AA)
-            cv2.rectangle(display_color, (cx_box - 130, cy_box - 110), (cx_box + 130, cy_box - 75), (20, 20, 20), -1)
-            cv2.putText(display_color, "HOLD STILL", (cx_box - 90, cy_box - 85), cv2.FONT_HERSHEY_SIMPLEX, 0.70, (0, 255, 255), 2, cv2.LINE_AA)
+            cv2.rectangle(display_color, (cx_box - 160, cy_box - 110), (cx_box + 160, cy_box - 75), (20, 20, 20), -1)
+            cv2.putText(display_color, lbl, (cx_box - 140, cy_box - 85), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 2, cv2.LINE_AA)
 
         elif burst_progress is not None:
             cv2.rectangle(display_color, (cx_box - 170, cy_box - 35), (cx_box + 170, cy_box + 35), (20, 20, 20), -1)
@@ -1096,20 +1099,21 @@ class ScanPipeline:
             cv2.rectangle(display_color, (cx_box - 240, cy_box - 50), (cx_box + 240, cy_box + 50), (0, 0, 180), -1)
             cv2.rectangle(display_color, (cx_box - 240, cy_box - 50), (cx_box + 240, cy_box + 50), (0, 255, 255), 2)
             cv2.putText(display_color, f"SUBJECT MOVED: {flagged_warning}", (cx_box - 215, cy_box - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA)
-            cv2.putText(display_color, "Press 'R' to RETAKE | SPACE to KEEP", (cx_box - 200, cy_box + 26), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2, cv2.LINE_AA)
+            cv2.putText(display_color, "Press 'R' to RETAKE | Auto-continuing...", (cx_box - 220, cy_box + 26), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2, cv2.LINE_AA)
 
         # Bottom Instructions or Status Message
         cv2.rectangle(display_color, (8, h - 36), (w - 8, h - 8), (20, 20, 20), -1)
         if status_msg:
             cv2.putText(display_color, status_msg, (16, h - 16), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (0, 255, 0), 2, cv2.LINE_AA)
         elif countdown_num is not None:
-            cv2.putText(display_color, f"Settling: frame capture starts in {countdown_num}s...", (16, h - 16), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1, cv2.LINE_AA)
+            action_desc = "Get in position" if current_stop == 0 else f"Turn to {stop_name}"
+            cv2.putText(display_color, f"{action_desc}: capture starts in {countdown_num}s... (ESC to abort)", (16, h - 16), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1, cv2.LINE_AA)
         elif burst_progress is not None:
-            cv2.putText(display_color, "Capturing burst at stream FPS... please hold still", (16, h - 16), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1, cv2.LINE_AA)
+            cv2.putText(display_color, f"Capturing {stop_name}... please hold still (ESC to abort)", (16, h - 16), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1, cv2.LINE_AA)
         elif flagged_warning is not None:
-            cv2.putText(display_color, "Motion > 10 mm detected! Press 'R' to Retake or SPACE to Proceed.", (16, h - 16), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1, cv2.LINE_AA)
+            cv2.putText(display_color, f"Motion flagged ({flagged_warning}) - Press 'R' to Retake | ESC to Cancel", (16, h - 16), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1, cv2.LINE_AA)
         else:
-            cv2.putText(display_color, "Press SPACE/ENTER to Capture Burst | ESC to Cancel", (16, h - 16), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (220, 220, 220), 1, cv2.LINE_AA)
+            cv2.putText(display_color, "Hands-Free Auto-Capture Active | Press 'R' to Retake | ESC to Cancel", (16, h - 16), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (220, 220, 220), 1, cv2.LINE_AA)
 
         metrics = {
             "median_dist_m": med_dist,
@@ -1126,8 +1130,19 @@ class ScanPipeline:
 
     def _capture_frames_body(self, cam: RealSenseCamera) -> list[RGBDFrame]:
         """
-        Stop-and-hold capture mode for --target body at N yaw stops with settling
-        countdown (3-2-1), stream-FPS burst capture, per-pixel median depth, and stillness check.
+        Hands-free stop-and-hold capture mode for --target body at N yaw stops.
+
+        Autonomous Sequencing:
+        - Stop 0 (Front): 4.0s settling buffer (starts at 0s, frame capture starts at 4th sec).
+        - 4.0s burst capture at stream FPS.
+        - Per-pixel median depth over valid pixels (>= 50% valid).
+        - Centroid stillness check (> 10 mm flag).
+        - Stops 1..N: 4.0s repositioning buffer for subject to turn and take position.
+        - 4.0s burst capture per stop.
+        - Automatically loops through all yaw stops without requiring ENTER/SPACE keypress.
+        - Press 'R' during repositioning buffer to retake previous stop.
+        - Press SPACE/ENTER to skip countdown early if already in position.
+        - Press ESC to abort capture.
         """
         n_stops = getattr(self.cfg, "yaw_stops", 4)
         if n_stops == 8:
@@ -1150,13 +1165,18 @@ class ScanPipeline:
                 "Left (270 deg)",
             ]
 
+        buffer_sec = float(getattr(self.cfg, "buffer_seconds", 4.0))
+        burst_sec = float(getattr(self.cfg, "burst_seconds", 4.0))
+
         logger.info("\n" + "=" * 60)
-        logger.info(f"  Stage 1: Body Capture ({n_stops} Yaw Stops, Stop-and-Hold)")
+        logger.info(f"  Stage 1: Body Capture ({n_stops} Yaw Stops, Hands-Free Auto-Sequencing)")
         logger.info("  OPERATOR GUIDANCE:")
-        logger.info(f"    * Stop-and-hold at {n_stops} yaw stops: {', '.join(stop_names)}")
-        logger.info("    * Position subject, press SPACE/ENTER -> 3-2-1 countdown -> burst capture.")
-        logger.info(f"    * Burst duration: {getattr(self.cfg, 'burst_seconds', 4.0):.1f}s at stream FPS.")
-        logger.info("    * Stillness check: stops with motion > 10 mm will be flagged for optional retake.")
+        logger.info(f"    * Stops ({n_stops}): {', '.join(stop_names)}")
+        logger.info(f"    * Initial buffer: {buffer_sec:.1f}s (capture starts automatically at 4th second)")
+        logger.info(f"    * Capture duration: {burst_sec:.1f}s at stream FPS per stop")
+        logger.info(f"    * Repositioning buffer: {buffer_sec:.1f}s between stops to turn and settle")
+        logger.info("    * Fully automated: NO ENTER KEY REQUIRED between stops!")
+        logger.info("    * Optional controls: 'R' = retake stop | SPACE = skip buffer timer | ESC = abort")
         logger.info("=" * 60 + "\n")
 
         window_name = f"Stage 1: Body Capture ({n_stops} Yaw Stops)"
@@ -1165,225 +1185,203 @@ class ScanPipeline:
 
         raw_frames: list[RGBDFrame] = []
         current_stop = 0
-        status_msg: str | None = None
-        status_msg_until: float = 0.0
 
         try:
             while current_stop < n_stops:
-                color_bgr, depth_m, depth_color = cam.read_with_colorized()
-                if color_bgr is None or depth_m is None:
-                    k = cv2.waitKey(1) & 0xFF
-                    if k == 27:
-                        logger.info("  Capture aborted by user.")
-                        raise KeyboardInterrupt
-                    time.sleep(0.005)
-                    continue
-
-                now = time.time()
-
-                preview, metrics = self._render_body_hud(
-                    color_bgr, depth_m, depth_color,
-                    current_stop=current_stop,
-                    total_stops=n_stops,
-                    stop_name=stop_names[current_stop],
-                    status_msg=status_msg if now < status_msg_until else None,
+                stop_name = stop_names[current_stop]
+                is_initial = (current_stop == 0)
+                logger.info(
+                    f"\n  ---> [STOP {current_stop + 1}/{n_stops}] {stop_name.upper()} "
+                    f"({'Initial Positioning' if is_initial else 'Turn & Position'}) <---"
                 )
 
-                if not window_initialized:
-                    disp_w = min(1280, preview.shape[1])
-                    disp_h = int(preview.shape[0] * (disp_w / preview.shape[1]))
-                    cv2.resizeWindow(window_name, disp_w, disp_h)
-                    window_initialized = True
+                # ==========================================================
+                # PHASE 1: Buffer / Settling Countdown (default: 4.0 seconds)
+                # ==========================================================
+                cd_label = "HOLD STILL" if is_initial else f"TURN TO {stop_name.split()[0].upper()}"
+                t_buf_start = time.time()
+                aborted = False
+                skip_buffer = False
+                retake_previous = False
 
-                cv2.imshow(window_name, preview)
-                key = cv2.waitKey(1) & 0xFF
+                while True:
+                    c_buf, d_buf, dc_buf = cam.read_with_colorized()
+                    now_buf = time.time()
+                    elapsed_buf = now_buf - t_buf_start
 
-                if key == 27:  # ESC
-                    logger.info("  Capture aborted by user.")
+                    if elapsed_buf >= buffer_sec or skip_buffer:
+                        break
+
+                    remaining_buf = max(0.0, buffer_sec - elapsed_buf)
+                    cd_digit = int(np.ceil(remaining_buf))
+
+                    if c_buf is not None and d_buf is not None:
+                        prev_buf, metrics = self._render_body_hud(
+                            c_buf, d_buf, dc_buf,
+                            current_stop=current_stop,
+                            total_stops=n_stops,
+                            stop_name=stop_name,
+                            countdown_num=cd_digit,
+                            countdown_label=cd_label,
+                        )
+                        if not window_initialized:
+                            disp_w = min(1280, prev_buf.shape[1])
+                            disp_h = int(prev_buf.shape[0] * (disp_w / prev_buf.shape[1]))
+                            cv2.resizeWindow(window_name, disp_w, disp_h)
+                            window_initialized = True
+                        cv2.imshow(window_name, prev_buf)
+
+                    key = cv2.waitKey(1) & 0xFF
+                    if key == 27:  # ESC
+                        aborted = True
+                        break
+                    elif key in (32, 13):  # SPACE or ENTER: skip buffer early if ready
+                        skip_buffer = True
+                        break
+                    elif key in (ord('r'), ord('R')) and current_stop > 0:
+                        retake_previous = True
+                        break
+
+                if aborted:
+                    logger.info("  Capture aborted by user during countdown buffer.")
                     raise KeyboardInterrupt
 
-                if key in (32, 13):  # SPACE or ENTER
-                    logger.info(f"  Starting settling countdown for Stop {current_stop + 1}/{n_stops}: {stop_names[current_stop]} ...")
+                if retake_previous:
+                    current_stop -= 1
+                    popped = raw_frames.pop()
+                    logger.info(f"  [Retake] Backtracking to Stop {current_stop + 1}/{n_stops}: {stop_names[current_stop]}")
+                    continue
 
-                    # 1. Countdown Phase: 3.0 seconds (3-2-1)
-                    t_cd_start = time.time()
-                    aborted = False
-                    while True:
-                        now_cd = time.time()
-                        cd_elapsed = now_cd - t_cd_start
-                        if cd_elapsed >= 3.0:
-                            break
-                        cd_remaining = 3.0 - cd_elapsed
-                        cd_digit = int(np.ceil(cd_remaining))
+                # ==========================================================
+                # PHASE 2: Burst Capture (starts at 4th second, runs 4.0s)
+                # ==========================================================
+                logger.info(
+                    f"  Capturing burst for Stop {current_stop + 1}/{n_stops} ({stop_name}) "
+                    f"for {burst_sec:.1f}s at stream FPS ..."
+                )
+                burst_colors: list[np.ndarray] = []
+                burst_depths: list[np.ndarray] = []
+                burst_timestamps: list[float] = []
+                t_burst_start: float | None = None
+                metrics_last: dict[str, Any] = {}
 
-                        c_cd, d_cd, dc_cd = cam.read_with_colorized()
-                        if c_cd is not None and d_cd is not None:
-                            prev_cd, _ = self._render_body_hud(
-                                c_cd, d_cd, dc_cd,
-                                current_stop=current_stop,
-                                total_stops=n_stops,
-                                stop_name=stop_names[current_stop],
-                                countdown_num=cd_digit,
-                            )
-                            cv2.imshow(window_name, prev_cd)
-                        k_cd = cv2.waitKey(1) & 0xFF
-                        if k_cd == 27:
-                            aborted = True
-                            break
-                    if aborted:
-                        logger.info("  Capture aborted by user during countdown.")
-                        raise KeyboardInterrupt
+                while True:
+                    c_b, d_b, dc_b = cam.read_with_colorized()
+                    now_b = time.time()
+                    if t_burst_start is None:
+                        t_burst_start = now_b
 
-                    # 2. Burst Capture Phase: starts at 4th second (t >= 3.0s)
-                    burst_sec = float(getattr(self.cfg, "burst_seconds", 4.0))
-                    logger.info(
-                        f"  Capturing burst for Stop {current_stop + 1}/{n_stops} "
-                        f"for {burst_sec:.1f}s at stream FPS (starting at 4th second) ..."
-                    )
-                    burst_colors: list[np.ndarray] = []
-                    burst_depths: list[np.ndarray] = []
-                    burst_timestamps: list[float] = []
-                    t_burst_start: float | None = None
+                    if c_b is not None and d_b is not None:
+                        burst_colors.append(c_b)
+                        burst_depths.append(d_b)
+                        burst_timestamps.append(now_b)
 
-                    while True:
-                        c_b, d_b, dc_b = cam.read_with_colorized()
-                        now_b = time.time()
-                        if t_burst_start is None:
-                            t_burst_start = now_b
-                        if c_b is not None and d_b is not None:
-                            burst_colors.append(c_b)
-                            burst_depths.append(d_b)
-                            burst_timestamps.append(now_b)
-
-                            elapsed_b = now_b - t_burst_start
-                            prev_b, _ = self._render_body_hud(
-                                c_b, d_b, dc_b,
-                                current_stop=current_stop,
-                                total_stops=n_stops,
-                                stop_name=stop_names[current_stop],
-                                burst_progress=elapsed_b,
-                            )
-                            cv2.imshow(window_name, prev_b)
-
-                        k_b = cv2.waitKey(1) & 0xFF
-                        if k_b == 27:
-                            aborted = True
-                            break
-                        if (now_b - t_burst_start) >= burst_sec:
-                            break
-
-                    if aborted:
-                        logger.info("  Capture aborted by user during burst.")
-                        raise KeyboardInterrupt
-
-                    if not burst_depths:
-                        logger.warning("  [!] Burst capture failed to acquire frames; try again.")
-                        continue
-
-                    # 3. Log frame count and real elapsed time using timestamps
-                    frames_used = len(burst_depths)
-                    real_elapsed_s = (
-                        float(burst_timestamps[-1] - burst_timestamps[0])
-                        if len(burst_timestamps) >= 2 else float(burst_sec)
-                    )
-                    eff_fps = frames_used / max(1e-3, real_elapsed_s)
-                    logger.info(
-                        f"  [Burst Capture] Stop {current_stop + 1}/{n_stops}: "
-                        f"Captured {frames_used} frames over {real_elapsed_s:.3f}s real elapsed time "
-                        f"(effective FPS: {eff_fps:.1f})"
-                    )
-
-                    # 4. Compute per-pixel median depth over valid pixels (>= 50% valid)
-                    from camera.frame import compute_burst_median_frame
-                    c_median, d_median = compute_burst_median_frame(
-                        burst_colors, burst_depths, min_valid_frac=0.50
-                    )
-
-                    # 5. Stillness check across burst
-                    from body.capture_motion import evaluate_burst_stillness
-                    intr = getattr(cam, "intrinsics", None)
-                    intr_tuple = (intr.fx, intr.fy, intr.cx, intr.cy) if intr else None
-                    bg_ref = getattr(self.cfg, "background_ref_depth", None)
-                    stillness_res = evaluate_burst_stillness(
-                        burst_colors, burst_depths,
-                        burst_timestamps=burst_timestamps,
-                        bg_depth_m=bg_ref,
-                        intrinsics=intr_tuple,
-                        threshold_mm=10.0,
-                    )
-                    motion_mm = stillness_res.motion_mm
-                    is_flagged = stillness_res.is_flagged
-
-                    # 6. If motion > 10 mm, flag in HUD and offer retake
-                    retake = False
-                    if is_flagged:
-                        logger.warning(
-                            f"  [!] STILLNESS WARNING: Subject moved {motion_mm:.1f} mm "
-                            f"(> 10.0 mm threshold) during Stop {current_stop + 1}!"
+                        elapsed_b = now_b - t_burst_start
+                        prev_b, metrics_last = self._render_body_hud(
+                            c_b, d_b, dc_b,
+                            current_stop=current_stop,
+                            total_stops=n_stops,
+                            stop_name=stop_name,
+                            burst_progress=elapsed_b,
                         )
-                        logger.info("  --> Press 'R' to retake stop, or SPACE/ENTER to keep and proceed.")
-                        while True:
-                            c_live, d_live, dc_live = cam.read_with_colorized()
-                            if c_live is None or d_live is None:
-                                c_live, d_live, dc_live = c_median, d_median, d_median
-                            prev_flag, _ = self._render_body_hud(
-                                c_live, d_live, dc_live,
-                                current_stop=current_stop,
-                                total_stops=n_stops,
-                                stop_name=stop_names[current_stop],
-                                flagged_warning=f"{motion_mm:.1f} mm",
-                            )
-                            cv2.imshow(window_name, prev_flag)
-                            rk = cv2.waitKey(20) & 0xFF
-                            if rk in (ord('r'), ord('R')):
-                                retake = True
-                                break
-                            elif rk in (32, 13, ord('c'), ord('C')):
-                                retake = False
-                                break
-                            elif rk == 27:
-                                logger.info("  Capture aborted by user during stillness review.")
-                                raise KeyboardInterrupt
+                        cv2.imshow(window_name, prev_b)
 
-                    if retake:
-                        logger.info(f"  Retaking Stop {current_stop + 1}/{n_stops} Upon Operator Request...")
-                        status_msg = f"Retaking Stop {current_stop + 1}/{n_stops} (Hold Still)"
-                        status_msg_until = time.time() + 2.0
-                        continue
+                    key_b = cv2.waitKey(1) & 0xFF
+                    if key_b == 27:
+                        aborted = True
+                        break
+                    if (now_b - t_burst_start) >= burst_sec:
+                        break
 
-                    # 7. Construct final RGBDFrame for this stop
-                    mid_ts = burst_timestamps[len(burst_timestamps) // 2] if burst_timestamps else now
-                    frame = cam.create_rgbd_frame(
-                        color_bgr=c_median,
-                        depth_m=d_median,
-                        frame_id=len(raw_frames),
-                        timestamp=mid_ts,
+                if aborted:
+                    logger.info("  Capture aborted by user during burst capture.")
+                    raise KeyboardInterrupt
+
+                if not burst_depths:
+                    logger.warning("  [!] Burst capture failed to acquire frames; retrying stop.")
+                    continue
+
+                # ==========================================================
+                # PHASE 3: Median Depth & Stillness Analysis
+                # ==========================================================
+                frames_used = len(burst_depths)
+                real_elapsed_s = (
+                    float(burst_timestamps[-1] - burst_timestamps[0])
+                    if len(burst_timestamps) >= 2 else float(burst_sec)
+                )
+                eff_fps = frames_used / max(1e-3, real_elapsed_s)
+                logger.info(
+                    f"  [Burst Capture] Stop {current_stop + 1}/{n_stops}: "
+                    f"Captured {frames_used} frames over {real_elapsed_s:.3f}s real elapsed time "
+                    f"(effective FPS: {eff_fps:.1f})"
+                )
+
+                # Per-pixel median depth over valid pixels (>= 50% valid)
+                try:
+                    from realsense_measure.camera.frame import compute_burst_median_frame
+                except ModuleNotFoundError:
+                    from camera.frame import compute_burst_median_frame
+
+                c_median, d_median = compute_burst_median_frame(
+                    burst_colors, burst_depths, min_valid_frac=0.50
+                )
+
+                # Stillness check across burst
+                try:
+                    from realsense_measure.body.capture_motion import evaluate_burst_stillness
+                except ModuleNotFoundError:
+                    from body.capture_motion import evaluate_burst_stillness
+                intr = getattr(cam, "intrinsics", None)
+                intr_tuple = (intr.fx, intr.fy, intr.cx, intr.cy) if intr else None
+                bg_ref = getattr(self.cfg, "background_ref_depth", None)
+                stillness_res = evaluate_burst_stillness(
+                    burst_colors, burst_depths,
+                    burst_timestamps=burst_timestamps,
+                    bg_depth_m=bg_ref,
+                    intrinsics=intr_tuple,
+                    threshold_mm=10.0,
+                )
+                motion_mm = stillness_res.motion_mm
+                is_flagged = stillness_res.is_flagged
+
+                if is_flagged:
+                    logger.warning(
+                        f"  [!] STILLNESS WARNING: Subject moved {motion_mm:.1f} mm "
+                        f"(> 10.0 mm threshold) during Stop {current_stop + 1}!"
                     )
-                    # Quality metrics and burst summary
-                    frame.quality_metrics = metrics.copy()
-                    frame.quality_metrics["burst_frames_used"] = frames_used
-                    frame.quality_metrics["burst_elapsed_sec"] = real_elapsed_s
-                    frame.quality_metrics["burst_motion_mm"] = motion_mm
-                    frame.quality_metrics["burst_motion_flagged"] = is_flagged
-
-                    raw_frames.append(frame)
-                    flag_tag = " [FLAGGED >10mm]" if is_flagged else " [STILL <=10mm]"
+                else:
                     logger.info(
-                        f"  --> Saved Stop {current_stop + 1}/{n_stops} [OK] "
-                        f"({frames_used} burst frames, motion: {motion_mm:.1f} mm{flag_tag}, "
-                        f"{len(frame.pcd.points):,} pts, med dist: {metrics['median_dist_m']:.2f}m)"
+                        f"  [Stillness Check] Stop {current_stop + 1}: Subject motion = {motion_mm:.1f} mm (STILL, <= 10.0 mm)."
                     )
-                    current_stop += 1
-                    if current_stop < n_stops:
-                        status_msg = f"STOP {current_stop}/{n_stops} SAVED! Turn to {stop_names[current_stop]}"
-                        status_msg_until = time.time() + 2.5
-                    else:
-                        status_msg = "ALL STOPS CAPTURED! Finishing..."
-                        status_msg_until = time.time() + 1.5
+
+                # Construct RGBDFrame
+                mid_ts = burst_timestamps[len(burst_timestamps) // 2] if burst_timestamps else now_b
+                frame = cam.create_rgbd_frame(
+                    color_bgr=c_median,
+                    depth_m=d_median,
+                    frame_id=len(raw_frames),
+                    timestamp=mid_ts,
+                )
+                frame.quality_metrics = metrics_last.copy()
+                frame.quality_metrics["burst_frames_used"] = frames_used
+                frame.quality_metrics["burst_elapsed_sec"] = real_elapsed_s
+                frame.quality_metrics["burst_motion_mm"] = motion_mm
+                frame.quality_metrics["burst_motion_flagged"] = is_flagged
+
+                raw_frames.append(frame)
+                logger.info(f"  Stop {current_stop + 1}/{n_stops} ({stop_name}) successfully recorded.")
+
+                current_stop += 1
+
+            # All stops completed
+            logger.info(f"\n  [SUCCESS] All {n_stops} yaw stops captured successfully hands-free!")
 
         finally:
             cv2.destroyWindow(window_name)
-            cam.stop()
+            try:
+                cam.stop()
+            except Exception:
+                pass
 
         return raw_frames
 
