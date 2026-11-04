@@ -3022,6 +3022,102 @@ class ScanPipeline:
                 save_dir = self.scan_folder / "raw_capture"
             save_raw_capture(raw_frames, save_dir, self.cfg)
 
+        if getattr(self.cfg, "capture_only", False):
+            # Capture-only mode: perform pre-save/post-save quality checks, write manifest, and exit cleanly
+            try:
+                from realsense_measure.body.capture_session import CaptureQualityChecker, CaptureSessionManifest
+            except ImportError:
+                from body.capture_session import CaptureQualityChecker, CaptureSessionManifest
+
+            save_dir = self.cfg.save_raw_dir
+            if save_dir is None:
+                save_dir = self.scan_folder / "raw_capture"
+
+            # 1. Pre-save diagnostics
+            first_frame = raw_frames[0] if raw_frames else None
+            intr_wh = (first_frame.intrinsics.width, first_frame.intrinsics.height) if first_frame else (1280, 720)
+            pre_diag, warnings, failures = CaptureQualityChecker.evaluate_pre_save(
+                raw_frames,
+                expected_yaw_stops=getattr(self.cfg, "yaw_stops", 4),
+                intrinsics_wh=intr_wh,
+                min_depth_m=self.cfg.camera.depth_min_m,
+                max_depth_m=self.cfg.camera.depth_max_m,
+            )
+
+            # 2. Per-frame and overall depth statistics
+            per_frame_stats = [
+                CaptureQualityChecker.compute_depth_stats(
+                    f.depth_m,
+                    min_valid_m=self.cfg.camera.depth_min_m,
+                    max_valid_m=self.cfg.camera.depth_max_m,
+                )
+                for f in raw_frames if getattr(f, "depth_m", None) is not None
+            ]
+            if raw_frames and getattr(raw_frames[0], "depth_m", None) is not None:
+                # Concatenate depths to compute overall stats
+                stacked_depth = np.concatenate([f.depth_m.flatten() for f in raw_frames])
+                overall_stats = CaptureQualityChecker.compute_depth_stats(
+                    stacked_depth,
+                    min_valid_m=self.cfg.camera.depth_min_m,
+                    max_valid_m=self.cfg.camera.depth_max_m,
+                )
+            else:
+                overall_stats = None
+
+            # 3. Post-save file integrity and SHA-256
+            file_manifest_entries, post_diag = CaptureQualityChecker.evaluate_post_save(save_dir)
+
+            # 4. Generate manifest
+            manifest = CaptureSessionManifest(
+                capture_id=save_dir.name,
+                session_id=getattr(self.cfg, "session_id", None) or f"SESS_{save_dir.name}",
+                subject_id=getattr(self.cfg, "subject_id", None) or "SUBJ_01",
+                operator_id=getattr(self.cfg, "operator_id", None) or "OPERATOR_01",
+                config_id=getattr(self.cfg, "config_id", None) or "CONFIG_STANDARD",
+                repeat_index=getattr(self.cfg, "repeat_index", 1),
+                camera_model="Intel RealSense D455f",
+                rgb_resolution=intr_wh,
+                depth_resolution=intr_wh,
+                is_depth_aligned=True,
+                camera_to_subject_distance_m=getattr(self.cfg, "camera_distance_m", None),
+                camera_height_m=getattr(self.cfg, "camera_height_m", None),
+                camera_pitch_tilt_deg=getattr(self.cfg, "camera_pitch_deg", None),
+                nominal_yaw_stops=[0.0, 90.0, 180.0, 270.0] if getattr(self.cfg, "yaw_stops", 4) == 4 else [0.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0],
+                capture_mode="capture_only",
+                frames_captured=len(raw_frames),
+                expected_frames=getattr(self.cfg, "yaw_stops", 4),
+                depth_statistics_overall=overall_stats,
+                per_frame_depth_statistics=per_frame_stats,
+                quality_diagnostics=pre_diag + post_diag,
+                warnings=warnings,
+                failures=failures,
+                file_manifest=file_manifest_entries,
+                notes="Capture-only workflow. Downstream reconstruction bypassed.",
+            )
+
+            manifest_path = manifest.save(save_dir / "manifest.json")
+
+            logger.info("\n" + "=" * 60)
+            logger.info("  STAGE 10: CAPTURE-ONLY SESSION COMPLETE")
+            logger.info("  ========================================")
+            logger.info(f"  Frames captured : {len(raw_frames)}")
+            logger.info(f"  Raw directory   : {save_dir}")
+            logger.info(f"  Session Manifest: {manifest_path}")
+            logger.info(f"  Quality checks  : {len(pre_diag) + len(post_diag)} evaluated (warnings: {len(warnings)}, failures: {len(failures)})")
+            logger.info("  DOWNSTREAM LEGACY RECONSTRUCTION BYPASSED (No ICP, No TSDF Fusion, No Slicing)")
+            logger.info("=" * 60 + "\n")
+
+            return {
+                "target": self.cfg.target.name,
+                "mode": "capture_only",
+                "status": "capture_complete",
+                "frames_captured": len(raw_frames),
+                "raw_dir": str(save_dir),
+                "manifest_path": str(manifest_path),
+                "warnings": warnings,
+                "failures": failures,
+            }
+
         isolated                    = self.isolate_frames(raw_frames)
         aligned, diagnostics, poses = self.register(isolated)
         fused                       = self.fuse(aligned, diagnostics, raw_frames=isolated, poses=poses)

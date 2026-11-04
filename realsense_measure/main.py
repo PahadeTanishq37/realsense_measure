@@ -164,6 +164,53 @@ def _build_parser() -> argparse.ArgumentParser:
         help="save raw aligned frames (color, depth float32, meta.json) after capture before Stage 2 isolation (default: <scan output folder>/raw_capture)",
     )
     parser.add_argument(
+        "--capture-only",
+        action="store_true",
+        help="stop immediately after Stage 1 capture and saving raw frames; bypass all downstream legacy reconstruction, ICP, fusion, and measurement",
+    )
+    parser.add_argument(
+        "--subject-id",
+        type=str,
+        default=None,
+        help="anonymous subject identifier (e.g. SUBJ_01, ANON_42; PII strictly rejected)",
+    )
+    parser.add_argument(
+        "--session-id",
+        type=str,
+        default=None,
+        help="capture session identifier (e.g. SESS_20261102_01)",
+    )
+    parser.add_argument(
+        "--operator-id",
+        type=str,
+        default=None,
+        help="capture operator identifier (e.g. OPERATOR_01)",
+    )
+    parser.add_argument(
+        "--config-id",
+        type=str,
+        default=None,
+        help="capture experiment configuration identifier (e.g. CONFIG_D220_H100_Y4_R720)",
+    )
+    parser.add_argument(
+        "--camera-distance",
+        type=float,
+        default=None,
+        help="physical camera-to-subject stand-off distance in metres",
+    )
+    parser.add_argument(
+        "--camera-height",
+        type=float,
+        default=None,
+        help="physical camera height from floor in metres",
+    )
+    parser.add_argument(
+        "--camera-pitch",
+        type=float,
+        default=None,
+        help="physical camera downward pitch tilt in degrees (positive = downward toward floor, default: 0.0)",
+    )
+    parser.add_argument(
         "--replay",
         type=str,
         default=None,
@@ -354,6 +401,37 @@ def main() -> None:
             cfg.save_raw_dir = raw_target
         else:
             cfg.save_raw_dir = Path("raw_captures") / "raw_capture"
+
+    if args.capture_only:
+        cfg.capture_only = True
+        # If save_raw was not specified, default to saving raw capture in output_dir
+        if not cfg.save_raw:
+            cfg.save_raw = True
+            cfg.save_raw_dir = cfg.output_dir / "raw_capture"
+
+    if args.subject_id:
+        try:
+            from realsense_measure.body.capture_session import validate_anonymous_subject_id
+        except ImportError:
+            from body.capture_session import validate_anonymous_subject_id
+        validate_anonymous_subject_id(args.subject_id)
+        cfg.subject_id = args.subject_id
+    if args.session_id:
+        cfg.session_id = args.session_id
+    if args.operator_id:
+        cfg.operator_id = args.operator_id
+    if args.config_id:
+        cfg.config_id = args.config_id
+    if args.camera_distance is not None:
+        if args.camera_distance <= 0:
+            parser.error(f"--camera-distance must be > 0, got {args.camera_distance}")
+        cfg.camera_distance_m = args.camera_distance
+    if args.camera_height is not None:
+        if args.camera_height <= 0:
+            parser.error(f"--camera-height must be > 0, got {args.camera_height}")
+        cfg.camera_height_m = args.camera_height
+    if args.camera_pitch is not None:
+        cfg.camera_pitch_deg = args.camera_pitch
 
     if args.seed is not None:
         cfg.random_seed = args.seed

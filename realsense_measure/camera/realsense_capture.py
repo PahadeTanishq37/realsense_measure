@@ -617,6 +617,149 @@ class RealSenseCamera:
 
         return color_bgr, depth_m, depth_color_bgr
 
+    def get_device_info(self) -> dict[str, Any]:
+        """
+        Query connected RealSense device hardware details.
+
+        Returns
+        -------
+        dict with device model, serial, firmware, usb_type, sensors, and depth_scale.
+        """
+        info: dict[str, Any] = {
+            "name": "Unknown RealSense Device",
+            "serial_number": "Unknown",
+            "firmware_version": "Unknown",
+            "usb_type": "Unknown",
+            "sensors": [],
+            "depth_scale_m": self.depth_scale,
+            "asic_temperature_celsius": None,
+            "projector_temperature_celsius": None,
+            "emitter_enabled": None,
+            "laser_power_mw": None,
+        }
+        if rs is None or self._profile is None:
+            return info
+
+        try:
+            dev = self._profile.get_device()
+            if dev.supports(rs.camera_info.name):
+                info["name"] = dev.get_info(rs.camera_info.name)
+            if dev.supports(rs.camera_info.serial_number):
+                info["serial_number"] = dev.get_info(rs.camera_info.serial_number)
+            if dev.supports(rs.camera_info.firmware_version):
+                info["firmware_version"] = dev.get_info(rs.camera_info.firmware_version)
+            if dev.supports(rs.camera_info.usb_type_descriptor):
+                info["usb_type"] = dev.get_info(rs.camera_info.usb_type_descriptor)
+
+            sensors = dev.query_sensors()
+            info["sensors"] = [
+                s.get_info(rs.camera_info.name) for s in sensors if s.supports(rs.camera_info.name)
+            ]
+
+            ds = dev.first_depth_sensor()
+            if ds is not None:
+                if ds.supports(rs.option.asic_temperature):
+                    info["asic_temperature_celsius"] = float(ds.get_option(rs.option.asic_temperature))
+                if ds.supports(rs.option.projector_temperature):
+                    info["projector_temperature_celsius"] = float(ds.get_option(rs.option.projector_temperature))
+                if ds.supports(rs.option.emitter_enabled):
+                    info["emitter_enabled"] = bool(ds.get_option(rs.option.emitter_enabled) > 0.5)
+                if ds.supports(rs.option.laser_power):
+                    info["laser_power_mw"] = float(ds.get_option(rs.option.laser_power))
+        except Exception as exc:
+            logger.warning(f"Error querying RealSense device info: {exc}")
+
+        return info
+
+    def read_with_raw_and_colorized(
+        self,
+    ) -> tuple[
+        np.ndarray | None,
+        np.ndarray | None,
+        np.ndarray | None,
+        np.ndarray | None,
+        np.ndarray | None,
+        dict[str, Any] | None,
+    ]:
+        """
+        Capture one aligned frame pair returning both raw and filtered depth arrays.
+
+        Returns
+        -------
+        color_bgr:
+            HxWx3 uint8 color image.
+        depth_filtered_m:
+            HxW float32 depth in metres with configured filters applied.
+        depth_raw_m:
+            HxW float32 depth in metres without post-processing filters.
+        depth_raw_z16:
+            HxW uint16 raw depth values in native sensor units (typically mm).
+        depth_color_bgr:
+            HxWx3 uint8 SDK-colorized depth image for visualization.
+        frame_meta:
+            dict containing hardware/system timestamps and frame numbers.
+        """
+        if self._profile is None or self.depth_scale is None:
+            raise CameraNotStartedError(
+                "RealSense camera is not started or depth scale is uninitialized. Call start() before reading."
+            )
+
+        frames = self._wait_for_frames(timeout_ms=2000)
+        if frames is None:
+            return None, None, None, None, None, None
+
+        aligned = self.align.process(frames)
+
+        raw_depth_frame = aligned.get_depth_frame()
+        color_frame = aligned.get_color_frame()
+
+        if not raw_depth_frame or not color_frame:
+            return None, None, None, None, None, None
+
+        frame_meta = {
+            "timestamp_ms": frames.get_timestamp(),
+            "frame_number": frames.get_frame_number(),
+            "depth_timestamp_ms": raw_depth_frame.get_timestamp(),
+            "color_timestamp_ms": color_frame.get_timestamp(),
+        }
+
+        # Native raw z16 array (uint16)
+        raw_z16 = np.asanyarray(raw_depth_frame.get_data()).copy()
+        raw_depth_m = raw_z16.astype(np.float32) * self.depth_scale
+        color_bgr = np.asanyarray(color_frame.get_data())
+
+        # Post-processed depth frame
+        filtered_depth_frame = self._filter_depth(raw_depth_frame)
+        depth_color_bgr = self.colorize_depth(filtered_depth_frame)
+        filtered_depth_m = (
+            np.asanyarray(filtered_depth_frame.get_data()).astype(np.float32)
+            * self.depth_scale
+        )
+
+        # Handle decimation resizing if dimensions diverge
+        if filtered_depth_m.shape[:2] != color_bgr.shape[:2]:
+            import cv2
+            h, w = color_bgr.shape[:2]
+            filtered_depth_m = cv2.resize(filtered_depth_m, (w, h), interpolation=cv2.INTER_NEAREST)
+            depth_color_bgr = cv2.resize(depth_color_bgr, (w, h), interpolation=cv2.INTER_NEAREST)
+
+        if raw_depth_m.shape[:2] != color_bgr.shape[:2]:
+            import cv2
+            h, w = color_bgr.shape[:2]
+            raw_depth_m = cv2.resize(raw_depth_m, (w, h), interpolation=cv2.INTER_NEAREST)
+            raw_z16 = cv2.resize(raw_z16, (w, h), interpolation=cv2.INTER_NEAREST)
+
+        if self.cfg.rotate_90 in ("cw", "ccw"):
+            from camera.rotation import rotate_rgbd_arrays
+            import cv2
+            color_bgr, filtered_depth_m = rotate_rgbd_arrays(color_bgr, filtered_depth_m, self.cfg.rotate_90)
+            _, raw_depth_m = rotate_rgbd_arrays(color_bgr, raw_depth_m, self.cfg.rotate_90)
+            rot_code = cv2.ROTATE_90_CLOCKWISE if self.cfg.rotate_90 == "cw" else cv2.ROTATE_90_COUNTERCLOCKWISE
+            raw_z16 = cv2.rotate(raw_z16, rot_code)
+            depth_color_bgr = cv2.rotate(depth_color_bgr, rot_code)
+
+        return color_bgr, filtered_depth_m, raw_depth_m, raw_z16, depth_color_bgr, frame_meta
+
     def to_point_cloud(
         self,
         color_bgr: np.ndarray,
@@ -705,9 +848,21 @@ class RealSenseCamera:
 
         import time
         from camera.frame import RGBDFrame
+        from camera.indexed_pcd import create_indexed_pcd_from_rgbd
 
         pcd = self.to_point_cloud(color_bgr, depth_m)
         ts = time.time() if timestamp is None else timestamp
+        try:
+            indexed_pcd = create_indexed_pcd_from_rgbd(
+                color=color_bgr,
+                depth_m=depth_m,
+                intrinsics=self.intrinsics_o3d,
+                frame_id=frame_id,
+                timestamp=ts,
+                is_bgr=True,
+            )
+        except Exception:
+            indexed_pcd = None
 
         return RGBDFrame(
             frame_id=frame_id,
@@ -716,6 +871,7 @@ class RealSenseCamera:
             pcd=pcd,
             timestamp=ts,
             intrinsics=self.intrinsics_o3d,
+            indexed_pcd=indexed_pcd,
         )
 
     def capture_rgbd_frame(

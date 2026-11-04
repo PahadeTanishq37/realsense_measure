@@ -18,6 +18,7 @@ import numpy as np
 import open3d as o3d
 
 from camera.frame import RGBDFrame, create_pcd_from_rgbd
+from camera.indexed_pcd import create_indexed_pcd_from_rgbd
 
 if TYPE_CHECKING:
     from config import PipelineConfig
@@ -53,6 +54,19 @@ def save_raw_capture(
         Path to the raw capture folder.
     """
     out_path = Path(output_dir)
+
+    allow_overwrite = getattr(cfg, "allow_overwrite", False)
+    if out_path.exists():
+        try:
+            from realsense_measure.body.hardware_smoke_test import check_capture_collision
+        except ImportError:
+            try:
+                from body.hardware_smoke_test import check_capture_collision
+            except ImportError:
+                check_capture_collision = None
+        if check_capture_collision is not None:
+            check_capture_collision(out_path, allow_overwrite=allow_overwrite)
+
     out_path.mkdir(parents=True, exist_ok=True)
 
     if not raw_frames:
@@ -159,6 +173,7 @@ def save_raw_capture(
 def load_raw_capture(
     input_dir: Path | str,
     target_name: str | None = None,
+    allow_aborted: bool = False,
 ) -> list[RGBDFrame]:
     """
     Load raw RGB-D frames from a previous recording without importing or requiring pyrealsense2.
@@ -171,13 +186,88 @@ def load_raw_capture(
         Directory containing meta.json, PNG color images, and .npy depth files.
     target_name:
         Optional target override ('body', 'head', 'box'). For 'body', sets depth_max_m to 3.0m.
+    allow_aborted:
+        If False (default), raises RuntimeError if trial_meta.json indicates the trial was aborted.
+        If True, permits loading incomplete or aborted captures for debugging purposes.
 
     Returns
     -------
     list[RGBDFrame]
         Reconstructed RGBDFrame list ready for Stages 2-5.
+
+    Raises
+    ------
+    FileNotFoundError:
+        If metadata or required frame assets are missing.
+    RuntimeError:
+        If trial_meta.json indicates an aborted or unrecognized trial status and allow_aborted=False.
     """
     in_path = Path(input_dir)
+
+    # Protect replay from aborted trials if trial_meta.json is present
+    trial_meta_path = in_path / "trial_meta.json"
+    if not trial_meta_path.exists():
+        candidate_t = Path(__file__).resolve().parent.parent / input_dir / "trial_meta.json"
+        if candidate_t.exists():
+            trial_meta_path = candidate_t
+            in_path = candidate_t.parent
+
+    if trial_meta_path.exists():
+        try:
+            with open(trial_meta_path, "r", encoding="utf-8") as f:
+                tmeta = json.load(f)
+        except Exception as exc:
+            raise RuntimeError(f"Corrupt or unreadable trial_meta.json in '{in_path}': {exc}") from exc
+
+        t_status = tmeta.get("trial_status")
+        if t_status == "aborted":
+            if not allow_aborted:
+                stage = tmeta.get("failure_stage", "unknown")
+                reason = tmeta.get("failure_reason", "aborted during capture or persistence")
+                raise RuntimeError(
+                    f"Refusing to replay aborted trial at '{in_path}'. "
+                    f"Trial status is 'aborted' (stage: {stage}, reason: {reason}). "
+                    "Pass allow_aborted=True to load this trial for debugging."
+                )
+            logger.warning(f"  [load-raw] Replaying aborted trial at '{in_path}' with allow_aborted=True.")
+        elif t_status == "completed":
+            logger.debug(f"  [load-raw] Verified trial status is 'completed' at '{in_path}'.")
+        else:
+            raise RuntimeError(
+                f"Unrecognized or missing trial_status '{t_status}' in '{trial_meta_path}'. "
+                "Expected 'completed' or 'aborted'."
+            )
+    else:
+        # Check for modern sweet-spot recording evidence before assuming legacy
+        modern_evidence = []
+        if (in_path / "noise_evaluation.json").exists():
+            modern_evidence.append("noise_evaluation.json")
+        filtered_files = list(in_path.glob("*depth_filtered.npy"))
+        if filtered_files:
+            modern_evidence.append(f"{len(filtered_files)} filtered depth file(s)")
+
+        meta_check_path = in_path / "meta.json"
+        if meta_check_path.exists():
+            try:
+                with open(meta_check_path, "r", encoding="utf-8") as f_chk:
+                    meta_chk_doc = json.load(f_chk)
+                first_frame = (meta_chk_doc.get("frames") or [{}])[0]
+                if "depth_filtered_file" in first_frame:
+                    modern_evidence.append("meta.json references depth_filtered_file")
+            except Exception:
+                pass
+
+        if modern_evidence:
+            ev_str = ", ".join(modern_evidence)
+            raise RuntimeError(
+                f"Corrupt or unfinalized modern recording at '{in_path}': "
+                f"modern capture artifacts detected ({ev_str}), but 'trial_meta.json' is missing. "
+                "This recording cannot be treated as a legacy capture because it was aborted, interrupted, or tampered with."
+            )
+
+        # Legacy recording compatibility: genuine pre-Prompt 2E captures lack trial_meta.json
+        logger.debug(f"  [load-raw] No trial_meta.json found at '{in_path}'; loading as legacy completed capture.")
+
     meta_path = in_path / "meta.json"
     if not meta_path.exists():
         candidate = Path(__file__).resolve().parent.parent / input_dir / "meta.json"
@@ -243,6 +333,20 @@ def load_raw_capture(
                 "roi_type": item.get("roi_type", "unknown"),
             }
 
+        try:
+            indexed_pcd = create_indexed_pcd_from_rgbd(
+                color=color_bgr,
+                depth_m=depth_m,
+                intrinsics=intr,
+                depth_min_m=depth_min_m,
+                depth_max_m=depth_max_m,
+                frame_id=fid,
+                timestamp=ts,
+                is_bgr=True,
+            )
+        except Exception:
+            indexed_pcd = None
+
         frame = RGBDFrame(
             frame_id=fid,
             color_bgr=color_bgr,
@@ -251,6 +355,7 @@ def load_raw_capture(
             timestamp=ts,
             intrinsics=intr,
             quality_metrics=qm,
+            indexed_pcd=indexed_pcd,
         )
         raw_frames.append(frame)
 

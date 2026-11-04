@@ -9,11 +9,14 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 import warnings
 
 import numpy as np
 import open3d as o3d
+
+if TYPE_CHECKING:
+    from camera.indexed_pcd import IndexedPointCloud
 
 
 @dataclass
@@ -47,6 +50,7 @@ class RGBDFrame:
     intrinsics: o3d.camera.PinholeCameraIntrinsic
     quality_metrics: dict[str, Any] | None = None
     foreground_mask: np.ndarray | None = None
+    indexed_pcd: "IndexedPointCloud | None" = None
 
     def to_rgbd_image(
         self,
@@ -106,6 +110,7 @@ class RGBDFrame:
             intrinsics=copy.deepcopy(self.intrinsics),
             quality_metrics=copy.deepcopy(self.quality_metrics) if self.quality_metrics is not None else None,
             foreground_mask=self.foreground_mask.copy() if self.foreground_mask is not None else None,
+            indexed_pcd=self.indexed_pcd.clone() if self.indexed_pcd is not None else None,
         )
 
 
@@ -125,6 +130,62 @@ class RGBDFrame:
             depth_min_m=depth_min_m,
             depth_max_m=depth_max_m,
             roi=roi,
+        )
+
+    def to_indexed_point_cloud(
+        self,
+        depth_min_m: float = 0.10,
+        depth_max_m: float = 3.00,
+        roi: tuple[int, int, int, int] | None = None,
+        mask: np.ndarray | None = None,
+    ) -> "IndexedPointCloud":
+        """
+        Compute or retrieve provenance-preserving IndexedPointCloud from color and depth.
+        """
+        from camera.indexed_pcd import create_indexed_pcd_from_rgbd
+
+        effective_mask = self.foreground_mask if mask is None else mask
+        return create_indexed_pcd_from_rgbd(
+            color=self.color_bgr,
+            depth_m=self.depth_m,
+            intrinsics=self.intrinsics,
+            depth_min_m=depth_min_m,
+            depth_max_m=depth_max_m,
+            roi=roi,
+            mask=effective_mask,
+            frame_id=self.frame_id,
+            timestamp=self.timestamp,
+            is_bgr=True,
+        )
+
+    def get_point_index_at_pixel(self, u: int, v: int, unambiguous_only: bool = True) -> int:
+        """
+        Return the 0-based point index in self.indexed_pcd at pixel (u, v), or -1 if none exists.
+        """
+        if self.indexed_pcd is None:
+            self.indexed_pcd = self.to_indexed_point_cloud()
+        return self.indexed_pcd.get_point_index_at_pixel(
+            u, v, frame_id=self.frame_id, unambiguous_only=unambiguous_only
+        )
+
+    def get_point_at_pixel(self, u: int, v: int, unambiguous_only: bool = True) -> np.ndarray | None:
+        """
+        Return the 3D metric coordinate (3,) for pixel (u, v) in self.indexed_pcd, or None if invalid.
+        """
+        if self.indexed_pcd is None:
+            self.indexed_pcd = self.to_indexed_point_cloud()
+        return self.indexed_pcd.get_point_at_pixel(
+            u, v, frame_id=self.frame_id, unambiguous_only=unambiguous_only
+        )
+
+    def get_pixel_index_map(self, unambiguous_only: bool = True) -> np.ndarray:
+        """
+        Return the (H, W) int32 lookup map for this frame.
+        """
+        if self.indexed_pcd is None:
+            self.indexed_pcd = self.to_indexed_point_cloud()
+        return self.indexed_pcd.get_pixel_index_map(
+            frame_id=self.frame_id, unambiguous_only=unambiguous_only
         )
 
 

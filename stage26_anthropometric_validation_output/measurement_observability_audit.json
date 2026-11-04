@@ -1,0 +1,116 @@
+{
+  "categories_defined": [
+    "DIRECTLY_OBSERVED",
+    "PARTIALLY_OBSERVED",
+    "MODEL_PRIOR_DERIVED",
+    "UNOBSERVED",
+    "INVALID_MEASUREMENT"
+  ],
+  "observability_breakdown": [
+    {
+      "name": "overall_body_height",
+      "display_name": "Overall Body Height (Stature)",
+      "category": "MODEL_PRIOR_DERIVED",
+      "observed_coverage_pct": 0.0,
+      "prior_coverage_pct": 100.0
+    },
+    {
+      "name": "shoulder_breadth",
+      "display_name": "Shoulder Breadth (Biacromial)",
+      "category": "DIRECTLY_OBSERVED",
+      "observed_coverage_pct": 92.5,
+      "prior_coverage_pct": 7.5
+    },
+    {
+      "name": "torso_length",
+      "display_name": "Torso Length (Trunk Height)",
+      "category": "DIRECTLY_OBSERVED",
+      "observed_coverage_pct": 88.0,
+      "prior_coverage_pct": 12.0
+    },
+    {
+      "name": "upper_arm_length_left",
+      "display_name": "Upper Arm Length (Left)",
+      "category": "PARTIALLY_OBSERVED",
+      "observed_coverage_pct": 65.0,
+      "prior_coverage_pct": 35.0
+    },
+    {
+      "name": "upper_arm_length_right",
+      "display_name": "Upper Arm Length (Right)",
+      "category": "PARTIALLY_OBSERVED",
+      "observed_coverage_pct": 65.0,
+      "prior_coverage_pct": 35.0
+    },
+    {
+      "name": "forearm_length_left",
+      "display_name": "Forearm Length (Left)",
+      "category": "PARTIALLY_OBSERVED",
+      "observed_coverage_pct": 55.0,
+      "prior_coverage_pct": 45.0
+    },
+    {
+      "name": "forearm_length_right",
+      "display_name": "Forearm Length (Right)",
+      "category": "PARTIALLY_OBSERVED",
+      "observed_coverage_pct": 55.0,
+      "prior_coverage_pct": 45.0
+    },
+    {
+      "name": "upper_leg_length_left",
+      "display_name": "Upper Leg Length (Femur, Left)",
+      "category": "PARTIALLY_OBSERVED",
+      "observed_coverage_pct": 45.0,
+      "prior_coverage_pct": 55.0
+    },
+    {
+      "name": "upper_leg_length_right",
+      "display_name": "Upper Leg Length (Femur, Right)",
+      "category": "PARTIALLY_OBSERVED",
+      "observed_coverage_pct": 45.0,
+      "prior_coverage_pct": 55.0
+    },
+    {
+      "name": "lower_leg_length_left",
+      "display_name": "Lower Leg Length (Tibia, Left)",
+      "category": "MODEL_PRIOR_DERIVED",
+      "observed_coverage_pct": 0.0,
+      "prior_coverage_pct": 100.0
+    },
+    {
+      "name": "lower_leg_length_right",
+      "display_name": "Lower Leg Length (Tibia, Right)",
+      "category": "MODEL_PRIOR_DERIVED",
+      "observed_coverage_pct": 0.0,
+      "prior_coverage_pct": 100.0
+    },
+    {
+      "name": "chest_circumference",
+      "display_name": "Chest Circumference",
+      "category": "PARTIALLY_OBSERVED",
+      "observed_coverage_pct": 79.02521561587754,
+      "prior_coverage_pct": 20.974784384122458
+    },
+    {
+      "name": "waist_circumference",
+      "display_name": "Waist Circumference",
+      "category": "DIRECTLY_OBSERVED",
+      "observed_coverage_pct": 92.34234336495913,
+      "prior_coverage_pct": 7.6576566350408655
+    },
+    {
+      "name": "hip_circumference",
+      "display_name": "Hip Circumference",
+      "category": "PARTIALLY_OBSERVED",
+      "observed_coverage_pct": 70.74032272585016,
+      "prior_coverage_pct": 29.259677274149837
+    },
+    {
+      "name": "head_circumference",
+      "display_name": "Head Circumference",
+      "category": "MODEL_PRIOR_DERIVED",
+      "observed_coverage_pct": 0.0,
+      "prior_coverage_pct": 100.0
+    }
+  ]
+}

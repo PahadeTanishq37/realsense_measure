@@ -533,6 +533,19 @@ class PipelineConfig:
     voxel_length_mm: float = 1.5
     sdf_trunc_mm: float = 5.0
 
+    # Capture-Only Mode (--capture-only)
+    capture_only: bool = False
+    allow_overwrite: bool = False
+    subject_id: str | None = None
+    session_id: str | None = None
+    operator_id: str | None = None
+    config_id: str | None = None
+    repeat_index: int = 1
+    camera_distance_m: float | None = None
+    camera_height_m: float | None = None
+    camera_pitch_deg: float | None = None
+    clothing_condition: str | None = None
+
     def __post_init__(self) -> None:
         # Ensure output_dir is always a Path, even if a plain string was passed.
         self.output_dir = Path(self.output_dir)

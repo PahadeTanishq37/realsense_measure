@@ -1,0 +1,29 @@
+{
+  "rotation_matrix": [
+    [
+      1.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ],
+    [
+      0.0,
+      -1.0,
+      0.0
+    ]
+  ],
+  "determinant": 1.0,
+  "is_pure_rotation": true,
+  "is_right_handed": true,
+  "orthogonality_error": 0.0,
+  "cross_product_consistency_error": 0.0,
+  "axes_semantics": {
+    "+X": "Subject Lateral (Right -> Left; Left > 0)",
+    "+Y": "Subject Superior (Inferior -> Superior / Up)",
+    "+Z": "Subject Anterior (Posterior -> Anterior / Forward)"
+  }
+}

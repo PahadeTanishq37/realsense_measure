@@ -1,0 +1,163 @@
+{
+  "verified_landmarks_count": 18,
+  "verified_smpl_landmarks": {
+    "crown": {
+      "index": 411,
+      "name": "Vertex (Crown / Top of Head)",
+      "definition": "Highest anatomical surface point on cranium along superior axis.",
+      "anatomical_region": "head",
+      "bilateral": false
+    },
+    "plantar_left": {
+      "index": 6754,
+      "name": "Left Plantar Sole Landmark",
+      "definition": "Inferior plantar boundary of left heel/foot.",
+      "anatomical_region": "foot_left",
+      "bilateral": true
+    },
+    "plantar_right": {
+      "index": 3387,
+      "name": "Right Plantar Sole Landmark",
+      "definition": "Inferior plantar boundary of right heel/foot.",
+      "anatomical_region": "foot_right",
+      "bilateral": true
+    },
+    "suprasternale": {
+      "index": 3506,
+      "name": "Suprasternale (Jugular Sternal Notch)",
+      "definition": "Midline palpable notch on superior border of manubrium sterni.",
+      "anatomical_region": "anterior_torso",
+      "bilateral": false
+    },
+    "substernale": {
+      "index": 3500,
+      "name": "Substernale (Xiphisternal Joint)",
+      "definition": "Inferior margin of corpus sterni at junction with xiphoid process.",
+      "anatomical_region": "anterior_torso",
+      "bilateral": false
+    },
+    "perineum": {
+      "index": 3170,
+      "name": "Perineum (Pelvic Floor / Crotch Floor)",
+      "definition": "Lowest central pelvic surface point between the thighs at crotch junction.",
+      "anatomical_region": "pelvic_floor",
+      "bilateral": false
+    },
+    "acromion_left": {
+      "index": 1903,
+      "name": "Left Acromiale",
+      "definition": "Most lateral and superior palpable point on the acromial process of the left scapula.",
+      "anatomical_region": "shoulder_left",
+      "bilateral": true
+    },
+    "acromion_right": {
+      "index": 5363,
+      "name": "Right Acromiale",
+      "definition": "Most lateral and superior palpable point on the acromial process of the right scapula.",
+      "anatomical_region": "shoulder_right",
+      "bilateral": true
+    },
+    "radiale_left": {
+      "index": 1944,
+      "name": "Left Radiale (Lateral Elbow)",
+      "definition": "Most proximal and lateral margin of the head of the radius / lateral epicondyle.",
+      "anatomical_region": "elbow_left",
+      "bilateral": true
+    },
+    "radiale_right": {
+      "index": 5406,
+      "name": "Right Radiale (Lateral Elbow)",
+      "definition": "Most proximal and lateral margin of the head of the radius / lateral epicondyle.",
+      "anatomical_region": "elbow_right",
+      "bilateral": true
+    },
+    "stylion_left": {
+      "index": 2506,
+      "name": "Left Stylion (Radial Styloid)",
+      "definition": "Most distal palpable point on the styloid process of the left radius.",
+      "anatomical_region": "wrist_left",
+      "bilateral": true
+    },
+    "stylion_right": {
+      "index": 5967,
+      "name": "Right Stylion (Radial Styloid)",
+      "definition": "Most distal palpable point on the styloid process of the right radius.",
+      "anatomical_region": "wrist_right",
+      "bilateral": true
+    },
+    "trochanterion_left": {
+      "index": 847,
+      "name": "Left Trochanterion (Greater Trochanter)",
+      "definition": "Most superior lateral point on the greater trochanter of the left femur.",
+      "anatomical_region": "hip_left",
+      "bilateral": true
+    },
+    "trochanterion_right": {
+      "index": 4333,
+      "name": "Right Trochanterion (Greater Trochanter)",
+      "definition": "Most superior lateral point on the greater trochanter of the right femur.",
+      "anatomical_region": "hip_right",
+      "bilateral": true
+    },
+    "tibiale_left": {
+      "index": 1067,
+      "name": "Left Tibiale Laterale (Lateral Knee)",
+      "definition": "Most lateral point on the upper margin of the lateral condyle of the left tibia.",
+      "anatomical_region": "knee_left",
+      "bilateral": true
+    },
+    "tibiale_right": {
+      "index": 4553,
+      "name": "Right Tibiale Laterale (Lateral Knee)",
+      "definition": "Most lateral point on the upper margin of the lateral condyle of the right tibia.",
+      "anatomical_region": "knee_right",
+      "bilateral": true
+    },
+    "sphyrion_left": {
+      "index": 3327,
+      "name": "Left Sphyrion Fibulare (Lateral Malleolus)",
+      "definition": "Most distal point on the lateral malleolus of the left fibula.",
+      "anatomical_region": "ankle_left",
+      "bilateral": true
+    },
+    "sphyrion_right": {
+      "index": 6728,
+      "name": "Right Sphyrion Fibulare (Lateral Malleolus)",
+      "definition": "Most distal point on the lateral malleolus of the right fibula.",
+      "anatomical_region": "ankle_right",
+      "bilateral": true
+    }
+  },
+  "critical_corrections_made": [
+    {
+      "landmark": "perineum",
+      "faulty_stage25_index": 3171,
+      "faulty_anatomical_location": "Chin / Submental Notch (Z = +0.530m)",
+      "corrected_stage26_index": 3170,
+      "corrected_anatomical_location": "Pelvic Floor / Crotch Seam (Y = -0.041m)",
+      "impact": "Resolved torso length collapse (156 mm -> 490 mm) and waist/hip plane shift"
+    },
+    {
+      "landmark": "trochanterion_left",
+      "faulty_stage25_index": 1383,
+      "faulty_anatomical_location": "Left Clavicle (Y = +0.430m)",
+      "corrected_stage26_index": 847,
+      "corrected_anatomical_location": "Superior margin of greater trochanter of left femur",
+      "impact": "Resolved upper leg length distortion (measured from clavicle to knee)"
+    },
+    {
+      "landmark": "acromion_left / acromion_right",
+      "faulty_stage25_index": [
+        1378,
+        4851
+      ],
+      "faulty_anatomical_location": "Extreme lateral deltoid muscle border",
+      "corrected_stage26_index": [
+        1903,
+        5363
+      ],
+      "corrected_anatomical_location": "Palpable acromial process crest on top of shoulder girdle",
+      "impact": "Resolved shoulder breadth inflation (632 mm -> 396/466 mm)"
+    }
+  ]
+}

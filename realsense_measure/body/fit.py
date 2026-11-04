@@ -239,6 +239,7 @@ class DifferentiableBodyFitter:
         multi_starts: int = 3,
         seed: int = 42,
         ablation_remove_term: Optional[str] = None,
+        loss_convergence_threshold: float = 20.0,
     ) -> FitResult:
         """
         Execute multi-start coarse-to-fine optimization with complete loss formulation.
@@ -277,7 +278,15 @@ class DifferentiableBodyFitter:
         top_obs_z = float(torch.max(all_obs_z).item())
         floor_val = float(ref_floor_z) if ref_floor_z is not None else float(torch.min(all_obs_z).item())
         stature_obs_mm = (top_obs_z - floor_val) * 1000.0
-        h_from_depth = float(np.clip((stature_obs_mm - 1360.0) / 960.0, 0.05, 0.95))
+        if stature_obs_mm < 1300.0:
+            logger.info(
+                "Vertical observation extent (%.2f m) indicates upper-body / truncated framing; "
+                "initializing height phenotype to neutral adult prior (0.50).",
+                stature_obs_mm / 1000.0,
+            )
+            h_from_depth = 0.50
+        else:
+            h_from_depth = float(np.clip((stature_obs_mm - 1360.0) / 960.0, 0.05, 0.95))
 
         # Initial candidates for multi-start
         init_phenos = [
@@ -587,7 +596,7 @@ class DifferentiableBodyFitter:
             per_stop_poses=per_stop_poses,
             final_loss=best_loss,
             loss_breakdown=best_breakdown,
-            converged=best_loss < 8.0,
+            converged=best_loss < loss_convergence_threshold,
             iterations=n_coarse_iter + n_fine_iter,
             elapsed_sec=elapsed,
         )

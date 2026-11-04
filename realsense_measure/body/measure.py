@@ -320,14 +320,140 @@ def _chain_segments(
     return loops
 
 
-def _loop_perimeter(loop: np.ndarray) -> float:
-    """Surface-path perimeter of a closed 3D polygon (metres)."""
+def is_contour_closed(
+    contour: np.ndarray,
+    tol: float = 1e-4,
+    max_gap_ratio: float = 1.8,
+    min_isoperimetric_quotient: float = 0.10,
+) -> Tuple[bool, str]:
+    """
+    Explicit contour-closure validation for anthropometric cross-sections.
+
+    Distinguishes genuinely closed loops from open arcs, gap-broken contours,
+    degenerate geometries, and close-endpoint open folds (hairpins).
+
+    Parameters
+    ----------
+    contour : np.ndarray
+        Array of shape (N, 3) or (N, 2) containing sequentially ordered vertices.
+    tol : float, default=1e-4
+        Tolerance for detecting explicit duplicate closure points (m).
+    max_gap_ratio : float, default=1.8
+        Maximum allowable ratio of endpoint gap to maximum adjacent segment step.
+    min_isoperimetric_quotient : float, default=0.10
+        Minimum isoperimetric circularity (4*pi*Area / P^2) required to exclude
+        collapsed geometries, self-intersecting loops, or razor-thin hairpins.
+
+    Returns
+    -------
+    is_closed : bool
+        True if the contour forms a genuinely closed, non-degenerate anatomical loop.
+    reason : str
+        Diagnostic description of the closure status or failure mode.
+    """
+    if contour is None:
+        return False, "Contour is None"
+
+    pts = np.asarray(contour, dtype=np.float64)
+    if pts.ndim != 2 or pts.shape[1] < 2:
+        return False, f"Invalid contour array shape {pts.shape}"
+
+    N = len(pts)
+    if N < 3:
+        return False, f"Too few points ({N} < 3)"
+
+    if np.any(np.isnan(pts)) or np.any(np.isinf(pts)):
+        return False, "Contour contains NaN or Inf coordinates"
+
+    # Filter consecutive duplicate points
+    diffs = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+    keep = np.ones(N, dtype=bool)
+    keep[1:] = diffs > 1e-9
+    clean = pts[keep]
+    if len(clean) < 3:
+        return False, "Degenerate contour: fewer than 3 distinct points"
+
+    # Check explicit closure
+    explicitly_closed = (np.linalg.norm(clean[-1] - clean[0]) <= tol)
+    eval_pts = clean[:-1] if explicitly_closed else clean
+    N_eval = len(eval_pts)
+    if N_eval < 3:
+        return False, "Fewer than 3 distinct points"
+
+    seg_lens = np.linalg.norm(np.diff(eval_pts, axis=0), axis=1)
+    if np.all(seg_lens < 1e-8):
+        return False, "Zero-length segments: collapsed contour"
+
+    med_step = float(np.median(seg_lens))
+    max_step = float(np.max(seg_lens))
+    gap = float(np.linalg.norm(eval_pts[-1] - eval_pts[0]))
+
+    if not explicitly_closed:
+        allowed_gap = max(max_step * max_gap_ratio, tol)
+        if gap > allowed_gap:
+            return False, f"Endpoint gap ({gap*1000:.1f} mm) exceeds allowed step ({allowed_gap*1000:.1f} mm)"
+
+    # Project to 2D best-fit plane
+    centered = eval_pts - np.mean(eval_pts, axis=0)
+    cov = np.cov(centered, rowvar=False)
+    if cov.shape == (3, 3):
+        evals, evecs = np.linalg.eigh(cov)
+        p2d = centered @ evecs[:, [1, 2]]
+    else:
+        p2d = centered[:, :2]
+
+    # Area & isoperimetric quotient
+    x = p2d[:, 0]
+    y = p2d[:, 1]
+    shoelace_area = 0.5 * abs(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
+    perim = float(np.sum(seg_lens)) + (0.0 if explicitly_closed else gap)
+    if perim < 1e-6:
+        return False, "Zero perimeter"
+
+    iq = (4.0 * np.pi * shoelace_area) / (perim ** 2)
+    if iq < min_isoperimetric_quotient:
+        return False, f"Isoperimetric quotient ({iq:.4f}) < {min_isoperimetric_quotient}: geometry collapsed, folded, or open hairpin"
+
+    # Polar angular sweep along the open sequence around centroid
+    angles = np.arctan2(y, x)
+    d_a = (angles[1:] - angles[:-1] + np.pi) % (2 * np.pi) - np.pi
+    total_sweep = float(abs(np.sum(d_a)))
+    min_sweep = np.radians(200.0) if N_eval <= 4 else np.radians(270.0)
+    if total_sweep < min_sweep:
+        return False, f"Angular sweep ({np.degrees(total_sweep):.1f} deg) < {np.degrees(min_sweep):.1f} deg: incomplete angular coverage"
+
+    return True, "Closed"
+
+
+def _loop_perimeter(loop: np.ndarray, require_closed: bool = True) -> float:
+    """
+    Surface-path perimeter of a closed 3D polygon (metres).
+
+    Parameters
+    ----------
+    loop : np.ndarray
+        Array of shape (N, 3) or (N, 2).
+    require_closed : bool, default=True
+        If True, validates that the contour is genuinely closed using
+        is_contour_closed(). Returns float("nan") if open, incomplete,
+        degenerate, or unclosed fold.
+        If False, calculates the path length along the open polyline
+        without adding an artificial straight-line chord.
+    """
     if loop is None or len(loop) < 2:
-        return 0.0
+        return float("nan") if require_closed else 0.0
+
     pts = np.asarray(loop, dtype=np.float64)
+    if require_closed:
+        closed, _ = is_contour_closed(pts)
+        if not closed:
+            return float("nan")
+
     diffs = np.diff(pts, axis=0)
     perimeter = float(np.sum(np.linalg.norm(diffs, axis=1)))
-    perimeter += float(np.linalg.norm(pts[-1] - pts[0]))
+    closing_gap = float(np.linalg.norm(pts[-1] - pts[0]))
+    if require_closed and closing_gap > 1e-6:
+        perimeter += closing_gap
     return perimeter
 
 
@@ -343,23 +469,26 @@ def _loop_area_xy(loop: np.ndarray) -> float:
 def _select_torso_loop(loops: List[np.ndarray], origin_xy: Tuple[float, float] = (0.0, 0.0)) -> Optional[np.ndarray]:
     """
     Select the loop enclosing the spine/torso axis (X=origin_x, Y=origin_y).
-    Falls back to largest XY area if multiple enclose or none enclose.
+    Filters out unclosed loops and falls back to largest XY area.
     """
     if not loops:
         return None
-    if len(loops) == 1:
-        return loops[0]
+    valid_loops = [lp for lp in loops if is_contour_closed(lp)[0]]
+    if not valid_loops:
+        return None
+    if len(valid_loops) == 1:
+        return valid_loops[0]
 
     ox, oy = origin_xy
     enclosing = []
-    for lp in loops:
+    for lp in valid_loops:
         pts2d = lp[:, :2] - np.array([ox, oy])
         if _point_in_polygon_2d(pts2d):
             enclosing.append(lp)
 
     if enclosing:
         return max(enclosing, key=_loop_area_xy)
-    return max(loops, key=_loop_area_xy)
+    return max(valid_loops, key=_loop_area_xy)
 
 
 # ---------------------------------------------------------------------------
@@ -490,10 +619,16 @@ class LandmarkHeights:
         joint_names: List[str],
         vertices: np.ndarray,  # (V, 3)
     ) -> None:
-        self.joints = joints
+        j = np.asarray(joints)
+        if j.ndim == 3 and len(j) == 1:
+            j = j[0]
+        v = np.asarray(vertices)
+        if v.ndim == 3 and len(v) == 1:
+            v = v[0]
+        self.joints = j
         self.joint_names = joint_names
         self.jmap = {name: i for i, name in enumerate(joint_names)}
-        self.verts = vertices
+        self.verts = v
 
     def _j(self, *candidates: str) -> Optional[np.ndarray]:
         for c in candidates:
@@ -518,23 +653,26 @@ class LandmarkHeights:
             return float(neck_pt[2])
         return self.head_top_z() - (self.head_top_z() - self.floor_z()) * 0.14
 
-    def acromion_landmark(self, side: str = "L") -> np.ndarray:
+    def acromion_landmark(self, side: str = "L") -> Optional[np.ndarray]:
         """
         Anatomical acromion landmark (shoulder tip).
         Located as the local surface peak on the mesh directly superior/lateral
         to the glenohumeral joint (upperarm01).
         Offset from upperarm01 is approximately 74 mm.
+        Returns None if shoulder joint or mesh vertices are missing.
         """
-        up01 = self._j(f"upperarm01.{side}", f"UpperArm.{side}")
+        if len(self.verts) == 0:
+            return None
+        up01 = self._j(f"upperarm01.{side}", f"UpperArm.{side}", f"shoulder.{side}", f"Shoulder.{side}")
         if up01 is None:
-            up01 = np.array([0.165 if side == "L" else -0.165, -0.013, 0.427])
+            return None
 
         # Find nearby mesh vertices within 80 mm
         dists = np.linalg.norm(self.verts - up01, axis=1)
         nearby = np.where(dists < 0.080)[0]
         if len(nearby) > 0:
             return self.verts[nearby[np.argmax(self.verts[nearby, 2])]]
-        # Fallback offset
+        # Fallback anatomical offset from joint if mesh is coarse
         sign = 1.0 if side == "L" else -1.0
         return up01 + np.array([-0.025 * sign, 0.028, 0.064])
 
@@ -684,6 +822,10 @@ def measure_mesh(
 
     chest_loops = _slice_mesh_at_z(torso_verts, torso_faces, chest_z)
     chest_loop = _select_torso_loop(chest_loops, origin_xy=(0.0, float(sp01[1]) if sp01 is not None else 0.0))
+    if chest_loop is None:
+        # Fallback to watertight whole-body mesh if axillary filtering punched a hole in the chest wall
+        chest_loops = _slice_mesh_at_z(verts, faces, chest_z)
+        chest_loop = _select_torso_loop(chest_loops, origin_xy=(0.0, float(sp01[1]) if sp01 is not None else 0.0))
     chest_mm = _loop_perimeter(chest_loop) * 1000.0 if chest_loop is not None else float("nan")
     _add("chest_circumference", chest_mm, "surface_path_loop_torso",
          f"Plane Z={chest_z*1000:.1f} mm (mid-sternum/spine01); arm vertices excluded; surface path.")
@@ -748,34 +890,64 @@ def measure_mesh(
     _add("ankle_circumference", ankle_mm, "perpendicular_limb_mean",
          "Mean of left and right ankle circumferences sliced perpendicular to tibia; surface path.")
 
-    # 9. Shoulder–elbow length
-    # 3D Euclidean distance from acromion surface landmark to elbow joint
+    # 9. Shoulder breadth (biacromial breadth)
+    # 3D Euclidean distance between left and right acromion surface landmarks
     acromion_l = lm.acromion_landmark("L")
-    el_l = lm._j("lowerarm01.L", "forearm.L", "LowerArm.L")
-    se_mm = float(np.linalg.norm(el_l - acromion_l) * 1000.0) if el_l is not None else float("nan")
-    _add("shoulder_elbow_length", se_mm, "3d_acromion_to_elbow",
-         "3D distance from acromion surface landmark to elbow joint (lowerarm01.L).")
-
-    # 10. Shoulder–wrist length
-    # Kinematic length along the arm: acromion → elbow + elbow → wrist
-    wr_l = lm._j("wrist.L", "hand.L", "Wrist.L", "Hand.L")
-    if el_l is not None and wr_l is not None:
-        sw_mm = float((np.linalg.norm(el_l - acromion_l) + np.linalg.norm(wr_l - el_l)) * 1000.0)
+    acromion_r = lm.acromion_landmark("R")
+    if acromion_l is not None and acromion_r is not None:
+        sb_mm = float(np.linalg.norm(acromion_r - acromion_l) * 1000.0)
+        _add("shoulder_breadth", sb_mm, "3d_biacromial_distance",
+             "3D Euclidean distance between left and right acromion surface landmarks (biacromial breadth).")
     else:
-        sw_mm = float("nan")
-    _add("shoulder_wrist_length", sw_mm, "3d_acromion_elbow_wrist_chain",
-         "3D kinematic distance from acromion to elbow + elbow to wrist (left arm).")
+        _add("shoulder_breadth", float("nan"), "3d_biacromial_distance",
+             "Acromion surface landmarks unavailable; shoulder breadth cannot be determined.")
 
-    # 11. Inseam
-    # 3D distance along inner leg: crotch landmark → knee + knee → ankle
+    # 10. Shoulder–elbow length (Bilateral)
+    # Left:
+    el_l = lm._j("lowerarm01.L", "forearm.L", "LowerArm.L", "Elbow.L", "elbow.L")
+    se_l_mm = float(np.linalg.norm(el_l - acromion_l) * 1000.0) if (el_l is not None and acromion_l is not None) else float("nan")
+    _add("shoulder_to_elbow_length_left", se_l_mm, "3d_acromion_to_elbow",
+         "3D distance from left acromion surface landmark to left elbow joint.")
+    _add("shoulder_elbow_length", se_l_mm, "3d_acromion_to_elbow",
+         "Legacy alias for shoulder_to_elbow_length_left (left arm).")
+
+    # Right:
+    el_r = lm._j("lowerarm01.R", "forearm.R", "LowerArm.R", "Elbow.R", "elbow.R")
+    se_r_mm = float(np.linalg.norm(el_r - acromion_r) * 1000.0) if (el_r is not None and acromion_r is not None) else float("nan")
+    _add("shoulder_to_elbow_length_right", se_r_mm, "3d_acromion_to_elbow",
+         "3D distance from right acromion surface landmark to right elbow joint.")
+
+    # 11. Shoulder–wrist length (Bilateral)
+    # Left:
+    wr_l = lm._j("wrist.L", "hand.L", "Wrist.L", "Hand.L")
+    if el_l is not None and wr_l is not None and acromion_l is not None:
+        sw_l_mm = float((np.linalg.norm(el_l - acromion_l) + np.linalg.norm(wr_l - el_l)) * 1000.0)
+    else:
+        sw_l_mm = float("nan")
+    _add("shoulder_to_wrist_length_left", sw_l_mm, "3d_acromion_elbow_wrist_chain",
+         "3D kinematic distance from left acromion to elbow + elbow to wrist (left arm).")
+    _add("shoulder_wrist_length", sw_l_mm, "3d_acromion_elbow_wrist_chain",
+         "Legacy alias for shoulder_to_wrist_length_left (left arm).")
+
+    # Right:
+    wr_r = lm._j("wrist.R", "hand.R", "Wrist.R", "Hand.R")
+    if el_r is not None and wr_r is not None and acromion_r is not None:
+        sw_r_mm = float((np.linalg.norm(el_r - acromion_r) + np.linalg.norm(wr_r - el_r)) * 1000.0)
+    else:
+        sw_r_mm = float("nan")
+    _add("shoulder_to_wrist_length_right", sw_r_mm, "3d_acromion_elbow_wrist_chain",
+         "3D kinematic distance from right acromion to elbow + elbow to wrist (right arm).")
+
+    # 12. Inseam
+    # Single midline-to-distal leg anthropometric measurement: crotch landmark → knee → ankle
     kn_l = lm._j("lowerleg01.L", "shin.L", "LowerLeg.L")
     ft_l = lm._j("foot.L", "ankle.L", "Foot.L")
-    if kn_l is not None and ft_l is not None:
+    if kn_l is not None and ft_l is not None and crotch_pt is not None:
         inseam_mm = float((np.linalg.norm(kn_l - crotch_pt) + np.linalg.norm(ft_l - kn_l)) * 1000.0)
     else:
         inseam_mm = float("nan")
     _add("inseam", inseam_mm, "3d_crotch_knee_ankle_chain",
-         "3D distance along leg from perineum crotch landmark to knee to ankle (left leg).")
+         "3D distance along leg from midline perineum crotch landmark to knee to ankle (left leg path).")
 
     # ==================================================================
     # Set B: Limb circumferences (Left & Right separate, NO symmetry prior)

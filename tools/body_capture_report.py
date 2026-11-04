@@ -47,6 +47,14 @@ except Exception:
     except Exception:
         SEGMENTATION_AVAILABLE = False
 
+try:
+    from camera.recording import load_raw_capture
+except Exception:
+    try:
+        from realsense_measure.camera.recording import load_raw_capture
+    except Exception:
+        load_raw_capture = None
+
 
 def extract_person_mask(
     color_bgr: np.ndarray,
@@ -299,48 +307,54 @@ def plot_coverage_report(
 def generate_body_report(
     raw_dir: Path | str,
     out_dir: Optional[Path | str] = None,
+    allow_aborted: bool = False,
 ) -> List[Dict[str, Any]]:
     """
     Run body capture report on a directory containing recorded raw RGB-D frames.
+    Validates trial status via load_raw_capture() before consuming recorded frame data.
     """
     raw_path = Path(raw_dir)
     if not raw_path.exists():
         raise FileNotFoundError(f"Raw directory does not exist: {raw_path}")
 
+    # Re-use load_raw_capture to validate trial status and load raw frames
+    if load_raw_capture is not None:
+        raw_frames = load_raw_capture(raw_path, target_name="body", allow_aborted=allow_aborted)
+    else:
+        raise RuntimeError("load_raw_capture is not available.")
+
+    if not raw_frames:
+        raise ValueError(f"No frames loaded from {raw_path}")
+
+    # Read meta.json for optional burst capture metrics
     meta_path = raw_path / "meta.json"
-    if not meta_path.exists():
-        raise FileNotFoundError(f"meta.json not found in {raw_path}")
-
-    with open(meta_path, "r", encoding="utf-8") as f:
-        meta_doc = json.load(f)
-
-    frames_meta = meta_doc.get("frames", [])
-    if not frames_meta:
-        raise ValueError(f"No frames recorded in {meta_path}")
+    frames_meta_by_id: Dict[int, Dict[str, Any]] = {}
+    if meta_path.exists():
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta_doc = json.load(f)
+            for item in meta_doc.get("frames", []):
+                fid = int(item.get("frame_id", item.get("order", 0)))
+                frames_meta_by_id[fid] = item
+        except Exception:
+            pass
 
     # Check background reference
-    bg_depth_m = None
-    bg_depth_file = raw_path / "background_depth.npy"
-    if bg_depth_file.exists():
-        bg_depth_m = np.load(str(bg_depth_file)).astype(np.float32)
+    bg_depth_m = getattr(raw_frames, "background_ref_depth", None)
+    if bg_depth_m is None and len(raw_frames) > 0:
+        bg_depth_m = getattr(raw_frames[0], "background_ref_depth", None)
 
     results: List[Dict[str, Any]] = []
 
-    print(f"\nAnalyzing {len(frames_meta)} frames from: {raw_path}/ ...")
+    print(f"\nAnalyzing {len(raw_frames)} frames from: {raw_path}/ ...")
 
-    for item in frames_meta:
-        fid = int(item["order"])
-        color_file = raw_path / item["color_file"]
-        depth_file = raw_path / item["depth_file"]
-
-        color_bgr = cv2.imread(str(color_file))
-        if color_bgr is None:
-            print(f"  [!] Missing color file: {color_file}")
-            continue
-
-        depth_m = np.load(str(depth_file)).astype(np.float32)
+    for f in raw_frames:
+        fid = f.frame_id
+        color_bgr = f.color_bgr
+        depth_m = f.depth_m
 
         res = analyze_body_frame(fid, color_bgr, depth_m, bg_depth_m)
+        item = frames_meta_by_id.get(fid, {})
         res["burst_frames_used"] = item.get("burst_frames_used")
         res["burst_motion_mm"] = item.get("burst_motion_mm")
         res["burst_motion_flagged"] = item.get("burst_motion_flagged")
@@ -452,15 +466,20 @@ def generate_body_report(
     return results
 
 
+# Documented alias
+generate_body_report_from_raw = generate_body_report
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Analyze body capture depth completeness, vertical bands, and dark clothing hypothesis."
     )
     parser.add_argument("raw_dir", help="Path to raw capture directory")
     parser.add_argument("--out-dir", default=None, help="Directory to save coverage_by_frame.png and CSV (default: <raw_dir>)")
+    parser.add_argument("--allow-aborted", action="store_true", help="Allow analyzing aborted or incomplete captures")
 
     args = parser.parse_args()
-    generate_body_report(args.raw_dir, args.out_dir)
+    generate_body_report(args.raw_dir, args.out_dir, allow_aborted=args.allow_aborted)
 
 
 if __name__ == "__main__":
