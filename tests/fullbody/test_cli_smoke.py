@@ -7,6 +7,7 @@ Smoke tests for fullbody CLI argument parsing and execution.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -28,6 +29,7 @@ def test_cli_parser_build():
         "validate": ["validate", "--scan", "foo"],
         "sweet-spot": ["sweet-spot", "--scan", "foo"],
         "review": ["review", "--scan", "foo"],
+        "keypoints-check": ["keypoints-check", "dummy.png"],
     }
     for sub, argv in subcommands.items():
         args = parser.parse_args(argv)
@@ -83,3 +85,13 @@ def test_cli_module_execution():
     )
     assert res.returncode == 0
     assert "Model-free metric full-body scanning" in res.stdout
+
+
+@pytest.mark.skipif("FULLBODY_SAMPLE_IMAGE" not in os.environ, reason="FULLBODY_SAMPLE_IMAGE not set")
+def test_cli_keypoints_check_with_sample_image(tmp_path: Path):
+    """Verify 'keypoints-check' executes on real or provided sample image."""
+    sample_img = os.environ["FULLBODY_SAMPLE_IMAGE"]
+    out_overlay = tmp_path / "overlay.png"
+    exit_code = main(["keypoints-check", sample_img, "--out", str(out_overlay)])
+    assert exit_code == 0
+    assert out_overlay.exists()

@@ -80,34 +80,59 @@ def build_articulated_humanoid_mesh(
     m_head.translate([0.0, 1.65, 0.0])
     meshes.append(m_head)
 
+    # Highest point visible from camera (geometric horizon)
+    # Camera at (0, 0.90, -1.30), sphere center (0, 1.65, 0), radius 0.10
+    dy_cam = 0.90 - 1.65
+    dz_cam = -1.30
+    d_cam = math.sqrt(dy_cam**2 + dz_cam**2)
+    theta_cam = math.atan2(abs(dy_cam), abs(dz_cam))
+    alpha_cam = math.acos(0.10 / d_cam)
+    phi_apex = math.pi / 2.0 - (alpha_cam - theta_cam)
+    y_vis_max = 1.65 + 0.10 * math.cos(phi_apex)
+    ground_truth["highest_visible_apex_mm"] = y_vis_max * 1000.0  # ~1733 mm
+
     # Legs: cylinders radius 0.06 m down to Y = 0.04 m (feet on floor)
     r_leg = 0.06
     ground_truth["thigh_circumference"] = 2.0 * math.pi * r_leg * 1000.0
     ground_truth["calf_circumference"] = 2.0 * math.pi * r_leg * 1000.0
+    ground_truth["thigh_left_circumference"] = 2.0 * math.pi * r_leg * 1000.0
+    ground_truth["thigh_right_circumference"] = 2.0 * math.pi * r_leg * 1000.0
+    ground_truth["calf_left_circumference"] = 2.0 * math.pi * r_leg * 1000.0
+    ground_truth["calf_right_circumference"] = 2.0 * math.pi * r_leg * 1000.0
+
+    R_z_to_y = o3d.geometry.get_rotation_matrix_from_xyz([np.pi / 2, 0, 0])
 
     m_leg_l = o3d.geometry.TriangleMesh.create_cylinder(radius=r_leg, height=0.76, resolution=20)
-    m_leg_l.translate([-0.09, 0.42, 0.0])
+    m_leg_l.rotate(R_z_to_y, center=[0, 0, 0])
+    m_leg_l.translate([0.09, 0.42, 0.0])
     m_leg_r = o3d.geometry.TriangleMesh.create_cylinder(radius=r_leg, height=0.76, resolution=20)
-    m_leg_r.translate([0.09, 0.42, 0.0])
+    m_leg_r.rotate(R_z_to_y, center=[0, 0, 0])
+    m_leg_r.translate([-0.09, 0.42, 0.0])
     meshes.extend([m_leg_l, m_leg_r])
 
     # Arms in A-pose with adjustable abduction and per-stop jitter
     r_arm = 0.04
     ground_truth["arm_circumference"] = 2.0 * math.pi * r_arm * 1000.0
+    ground_truth["upper_arm_left_circumference"] = 2.0 * math.pi * r_arm * 1000.0
+    ground_truth["upper_arm_right_circumference"] = 2.0 * math.pi * r_arm * 1000.0
+    ground_truth["forearm_left_circumference"] = 2.0 * math.pi * r_arm * 1000.0
+    ground_truth["forearm_right_circumference"] = 2.0 * math.pi * r_arm * 1000.0
     abd_l = np.deg2rad(arm_abduction_deg + arm_jitter_deg)
     abd_r = np.deg2rad(arm_abduction_deg - arm_jitter_deg)
 
-    # Left arm
+    # Left arm: rotate to Y then abduct in XY (outward toward positive X)
     m_arm_l = o3d.geometry.TriangleMesh.create_cylinder(radius=r_arm, height=0.55, resolution=20)
+    m_arm_l.rotate(R_z_to_y, center=[0, 0, 0])
     R_l = m_arm_l.get_rotation_matrix_from_xyz([0.0, 0.0, abd_l])
     m_arm_l.rotate(R_l, center=[0, 0, 0])
-    m_arm_l.translate([-0.18 - 0.27 * np.sin(abd_l), 1.40 - 0.27 * np.cos(abd_l), 0.0])
+    m_arm_l.translate([0.18 + 0.275 * np.sin(abd_l), 1.40 - 0.275 * np.cos(abd_l), 0.0])
 
-    # Right arm
+    # Right arm: rotate to Y then abduct in XY (outward toward negative X)
     m_arm_r = o3d.geometry.TriangleMesh.create_cylinder(radius=r_arm, height=0.55, resolution=20)
+    m_arm_r.rotate(R_z_to_y, center=[0, 0, 0])
     R_r = m_arm_r.get_rotation_matrix_from_xyz([0.0, 0.0, -abd_r])
     m_arm_r.rotate(R_r, center=[0, 0, 0])
-    m_arm_r.translate([0.18 + 0.27 * np.sin(abd_r), 1.40 - 0.27 * np.cos(abd_r), 0.0])
+    m_arm_r.translate([-0.18 - 0.275 * np.sin(abd_r), 1.40 - 0.275 * np.cos(abd_r), 0.0])
     meshes.extend([m_arm_l, m_arm_r])
 
     # Floor plane: quad at Y = 0.0 with upward normal (+Y)
@@ -128,22 +153,22 @@ def build_articulated_humanoid_mesh(
         combined += m
     combined.compute_vertex_normals()
 
-    # Skeleton landmarks in canonical frame
+    # Skeleton landmarks in canonical ISB frame (+X left, +Y up, +Z chest)
     skeleton["nose"] = np.array([0.0, 1.65, 0.10], dtype=np.float64)
-    skeleton["left_shoulder"] = np.array([-0.18, 1.40, 0.0], dtype=np.float64)
-    skeleton["right_shoulder"] = np.array([0.18, 1.40, 0.0], dtype=np.float64)
+    skeleton["left_shoulder"] = np.array([0.18, 1.40, 0.0], dtype=np.float64)
+    skeleton["right_shoulder"] = np.array([-0.18, 1.40, 0.0], dtype=np.float64)
     skeleton["mid_shoulder"] = np.array([0.0, 1.40, 0.0], dtype=np.float64)
-    skeleton["left_elbow"] = np.array([-0.18 - 0.28 * np.sin(abd_l), 1.40 - 0.28 * np.cos(abd_l), 0.0], dtype=np.float64)
-    skeleton["right_elbow"] = np.array([0.18 + 0.28 * np.sin(abd_r), 1.40 - 0.28 * np.cos(abd_r), 0.0], dtype=np.float64)
-    skeleton["left_wrist"] = np.array([-0.18 - 0.55 * np.sin(abd_l), 1.40 - 0.55 * np.cos(abd_l), 0.0], dtype=np.float64)
-    skeleton["right_wrist"] = np.array([0.18 + 0.55 * np.sin(abd_r), 1.40 - 0.55 * np.cos(abd_r), 0.0], dtype=np.float64)
-    skeleton["left_hip"] = np.array([-0.10, 0.82, 0.0], dtype=np.float64)
-    skeleton["right_hip"] = np.array([0.10, 0.82, 0.0], dtype=np.float64)
+    skeleton["left_elbow"] = np.array([0.18 + 0.28 * np.sin(abd_l), 1.40 - 0.28 * np.cos(abd_l), 0.0], dtype=np.float64)
+    skeleton["right_elbow"] = np.array([-0.18 - 0.28 * np.sin(abd_r), 1.40 - 0.28 * np.cos(abd_r), 0.0], dtype=np.float64)
+    skeleton["left_wrist"] = np.array([0.18 + 0.55 * np.sin(abd_l), 1.40 - 0.55 * np.cos(abd_l), 0.0], dtype=np.float64)
+    skeleton["right_wrist"] = np.array([-0.18 - 0.55 * np.sin(abd_r), 1.40 - 0.55 * np.cos(abd_r), 0.0], dtype=np.float64)
+    skeleton["left_hip"] = np.array([0.10, 0.82, 0.0], dtype=np.float64)
+    skeleton["right_hip"] = np.array([-0.10, 0.82, 0.0], dtype=np.float64)
     skeleton["mid_hip"] = np.array([0.0, 0.82, 0.0], dtype=np.float64)
-    skeleton["left_knee"] = np.array([-0.09, 0.44, 0.0], dtype=np.float64)
-    skeleton["right_knee"] = np.array([0.09, 0.44, 0.0], dtype=np.float64)
-    skeleton["left_ankle"] = np.array([-0.09, 0.06, 0.0], dtype=np.float64)
-    skeleton["right_ankle"] = np.array([0.09, 0.06, 0.0], dtype=np.float64)
+    skeleton["left_knee"] = np.array([0.09, 0.44, 0.0], dtype=np.float64)
+    skeleton["right_knee"] = np.array([-0.09, 0.44, 0.0], dtype=np.float64)
+    skeleton["left_ankle"] = np.array([0.09, 0.06, 0.0], dtype=np.float64)
+    skeleton["right_ankle"] = np.array([-0.09, 0.06, 0.0], dtype=np.float64)
 
     return combined, ground_truth, skeleton
 
@@ -214,13 +239,13 @@ class SyntheticHumanoidCaptureRenderer:
             # 1. Build mesh for this stop with slight arm jitter
             mesh_stop, _, skel_stop = build_articulated_humanoid_mesh(arm_jitter_deg=arm_jit)
 
-            # Rotate body around Y, then translate
+            # Rotate body around Y (clockwise looking from above: +Z rotates toward -X)
             yaw_rad = np.deg2rad(actual_yaw)
             c, s = np.cos(yaw_rad), np.sin(yaw_rad)
             R_body = np.array([
-                [c, 0, s],
-                [0, 1, 0],
-                [-s, 0, c],
+                [ c, 0, -s],
+                [ 0, 1,  0],
+                [ s, 0,  c],
             ], dtype=np.float64)
 
             # Apply body pose to mesh
@@ -231,9 +256,9 @@ class SyntheticHumanoidCaptureRenderer:
             # Transform mesh into camera optical frame:
             # World: +Y up, origin on floor at (0, 0, 0).
             # Camera: position at (0, cam_height, -cam_dist), looking down +Z.
-            # In camera frame: X_cam = X_world, Y_cam = cam_height - Y_world, Z_cam = Z_world + cam_dist.
+            # In camera frame: X_cam = -X_world (right-handed optical frame), Y_cam = cam_height - Y_world, Z_cam = Z_world + cam_dist.
             T_cam_world = np.array([
-                [ 1.0,  0.0, 0.0,  0.0],
+                [-1.0,  0.0, 0.0,  0.0],
                 [ 0.0, -1.0, 0.0,  self.cam_height],
                 [ 0.0,  0.0, 1.0,  self.cam_dist],
                 [ 0.0,  0.0, 0.0,  1.0],
@@ -312,6 +337,13 @@ class SyntheticHumanoidCaptureRenderer:
             )
             gt_keypoints_list.append(kpts_cam)
 
+            # Compute ground truth transform camera -> canonical
+            T_canonical_world = np.eye(4, dtype=np.float64)
+            T_canonical_world[:3, :3] = R_body.T
+            T_canonical_world[:3, 3] = -R_body.T @ np.array([dx, 0.0, dz])
+            T_canonical_cam_gt = T_canonical_world @ np.linalg.inv(T_cam_world)
+            gt_canonical_yaw = (180.0 - actual_yaw + 360.0) % 360.0
+
             stop_data = StopData(
                 stop_id=stop_idx,
                 nominal_angle_deg=nominal_yaw,
@@ -321,6 +353,9 @@ class SyntheticHumanoidCaptureRenderer:
                 keypoints_camera=kpts_cam,
                 raw_burst_colors=burst_colors,
                 raw_burst_depths=burst_depths,
+                gt_yaw_deg=gt_canonical_yaw,
+                gt_translation_m=np.array([dx, 0.0, dz]),
+                gt_T_canonical_camera=T_canonical_cam_gt,
             )
             stops.append(stop_data)
 

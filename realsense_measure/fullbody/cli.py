@@ -70,6 +70,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_rev = subparsers.add_parser("review", help="Review fused 3D assets in Open3D.")
     p_rev.add_argument("--scan", type=str, required=True, help="Scan output directory.")
 
+    # 6. keypoints-check
+    p_kpt = subparsers.add_parser(
+        "keypoints-check",
+        help="Run MediaPipe Pose on color image, overlay 33 joints, and print confidence.",
+    )
+    p_kpt.add_argument("color", type=str, help="Path to input color image (PNG/JPG).")
+    p_kpt.add_argument("depth", type=str, nargs="?", default=None, help="Optional path to depth array (.npy).")
+    p_kpt.add_argument("--out", type=str, default=None, help="Optional output image path for skeleton overlay.")
+
     return parser
 
 
@@ -141,7 +150,7 @@ def run_pipeline(capture_dir: Path, out_dir: Path, cfg: FullBodyConfig) -> ScanR
     # Anthropometric measurements
     logger.info("Extracting tape-style anthropometric measurements ...")
     ref_kpts = aligned[0].keypoints_canonical if aligned else None
-    measurements = measure_fused_scan(fused_pcd, ref_kpts, cfg)
+    measurements = measure_fused_scan(fused_pcd, ref_kpts, cfg, hole_map=hole_map)
 
     scan_res = ScanResult(
         subject_id="subject_01",
@@ -214,6 +223,100 @@ def main(argv: Optional[List[str]] = None) -> int:
         else:
             print("No 3D mesh or point cloud found to review.")
         return 0
+
+    elif args.subcommand == "keypoints-check":
+        c_path = Path(args.color)
+        d_path = Path(args.depth) if args.depth else None
+        o_path = Path(args.out) if args.out else None
+        return _run_keypoints_check(c_path, d_path, o_path)
+
+    return 0
+
+
+def _run_keypoints_check(color_path: Path, depth_path: Optional[Path], out_path: Optional[Path]) -> int:
+    """Execute MediaPipe Pose detection on a single frame, print confidence table, and write overlay."""
+    color = cv2.imread(str(color_path))
+    if color is None:
+        print(f"Error: Could not read color image from {color_path}", file=sys.stderr)
+        return 1
+    h, w = color.shape[:2]
+
+    try:
+        import mediapipe as mp
+    except ImportError:
+        print("Error: mediapipe is not installed.", file=sys.stderr)
+        return 1
+
+    if not hasattr(mp, "solutions") or not hasattr(mp.solutions, "pose"):
+        print("Error: MediaPipe solutions.pose is not available in installed mediapipe build.", file=sys.stderr)
+        return 1
+
+    mp_pose_names = [
+        "nose", "left_eye_inner", "left_eye", "left_eye_outer",
+        "right_eye_inner", "right_eye", "right_eye_outer",
+        "left_ear", "right_ear", "mouth_left", "mouth_right",
+        "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
+        "left_wrist", "right_wrist", "left_pinky", "right_pinky",
+        "left_index", "right_index", "left_thumb", "right_thumb",
+        "left_hip", "right_hip", "left_knee", "right_knee",
+        "left_ankle", "right_ankle", "left_heel", "right_heel",
+        "left_foot_index", "right_foot_index"
+    ]
+
+    with mp.solutions.pose.Pose(static_image_mode=True, model_complexity=1) as pose:
+        rgb = cv2.cvtColor(color, cv2.COLOR_BGR2RGB)
+        res = pose.process(rgb)
+
+    if not res.pose_landmarks:
+        print("No human pose detected by MediaPipe in image.", file=sys.stderr)
+        return 1
+
+    depth = np.load(str(depth_path)) if depth_path and depth_path.exists() else None
+
+    print("\n" + "=" * 82)
+    print(f"MEDIAPIPE POSE 33-LANDMARK AUDIT: {color_path.name}")
+    print("=" * 82)
+    if depth is not None:
+        print(f"{'Idx':<4} | {'Landmark':<20} | {'u (px)':>7} | {'v (px)':>7} | {'Conf':>6} | {'Vis':>6} | {'Depth (m)':>9}")
+    else:
+        print(f"{'Idx':<4} | {'Landmark':<20} | {'u (px)':>7} | {'v (px)':>7} | {'Conf':>6} | {'Vis':>6}")
+    print("-" * 82)
+
+    vis_img = color.copy()
+    for idx, lm in enumerate(res.pose_landmarks.landmark):
+        name = mp_pose_names[idx] if idx < len(mp_pose_names) else f"joint_{idx}"
+        u = float(lm.x * (w - 1))
+        v = float(lm.y * (h - 1))
+        conf = float(lm.presence if hasattr(lm, "presence") and lm.presence > 0 else (1.0 if lm.visibility > 0.5 else lm.visibility))
+        vis = float(lm.visibility)
+
+        if depth is not None:
+            iu = int(np.clip(round(u), 0, w - 1))
+            iv = int(np.clip(round(v), 0, h - 1))
+            zv = float(depth[iv, iu])
+            d_str = f"{zv:.3f}" if zv > 0 else "0.000"
+            print(f"{idx:<4} | {name:<20} | {u:>7.1f} | {v:>7.1f} | {conf:>6.2f} | {vis:>6.2f} | {d_str:>9}")
+        else:
+            print(f"{idx:<4} | {name:<20} | {u:>7.1f} | {v:>7.1f} | {conf:>6.2f} | {vis:>6.2f}")
+
+        cv2.circle(vis_img, (int(round(u)), int(round(v))), 4, (0, 255, 0), -1)
+        cv2.putText(vis_img, str(idx), (int(round(u)) + 5, int(round(v)) + 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 255, 255), 1)
+
+    if hasattr(mp.solutions.pose, "POSE_CONNECTIONS"):
+        for a, b in mp.solutions.pose.POSE_CONNECTIONS:
+            lm_a = res.pose_landmarks.landmark[a]
+            lm_b = res.pose_landmarks.landmark[b]
+            pt_a = (int(round(lm_a.x * (w - 1))), int(round(lm_a.y * (h - 1))))
+            pt_b = (int(round(lm_b.x * (w - 1))), int(round(lm_b.y * (h - 1))))
+            cv2.line(vis_img, pt_a, pt_b, (0, 200, 255), 2)
+
+    print("=" * 82 + "\n")
+
+    out_file = out_path if out_path else color_path.parent / f"{color_path.stem}_keypoints.png"
+    cv2.imwrite(str(out_file), vis_img)
+    print(f"Saved annotated keypoint overlay to: {out_file}")
+    return 0
 
     return 0
 

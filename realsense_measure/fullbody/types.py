@@ -105,6 +105,9 @@ class StopData:
     pcd: Optional[o3d.geometry.PointCloud] = None
     raw_burst_colors: List[np.ndarray] = field(default_factory=list)
     raw_burst_depths: List[np.ndarray] = field(default_factory=list)
+    gt_yaw_deg: Optional[float] = None
+    gt_translation_m: Optional[np.ndarray] = None
+    gt_T_canonical_camera: Optional[np.ndarray] = None
 
 
 @dataclass

@@ -23,6 +23,8 @@ class FullBodyConfig:
     # -------------------------------------------------------------------------
     num_stops: int = 8
     expected_step_deg: float = 45.0
+    turn_direction: str = "cw"                   # "cw" (clockwise from above) or "ccw"
+    camera_portrait_rotation: str = "cw"         # "cw" (90 deg clockwise) or "ccw" (90 deg counter-clockwise)
     max_angle_deviation_deg: float = 25.0
     burst_frame_count: int = 30
     camera_height_m: float = 0.90
@@ -78,8 +80,8 @@ class FullBodyConfig:
     # -------------------------------------------------------------------------
     # Multi-Stop Alignment
     # -------------------------------------------------------------------------
-    alignment_max_yaw_correction_deg: float = 30.0
-    alignment_max_translation_correction_m: float = 0.10
+    alignment_max_yaw_correction_deg: float = 8.0
+    alignment_max_translation_correction_m: float = 0.04
     alignment_icp_distance_threshold_m: float = 0.04
     alignment_max_iterations: int = 15
     alignment_convergence_eps: float = 1e-4
@@ -104,6 +106,7 @@ class FullBodyConfig:
     num_angular_bins: int = 180         # 2 deg resolution
     min_angular_coverage_for_ok: float = 0.70
     min_angular_coverage_for_partial: float = 0.35
+    crown_hole_threshold: float = 0.20  # hole map fraction above which crown is flagged unobserved
     bootstrap_iterations: int = 200
     crown_edge_margin_px: int = 12
 

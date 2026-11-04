@@ -35,6 +35,7 @@ def measure_fused_scan(
     keypoints: Optional[Keypoints3D],
     cfg: FullBodyConfig,
     crown_clipped_in_camera: bool = False,
+    hole_map: Optional[Dict[str, float]] = None,
 ) -> Dict[str, MeasurementResult]:
     """
     Extract all anthropometric measurements from the canonical fused point cloud.
@@ -55,19 +56,31 @@ def measure_fused_scan(
 
     # 3. Stature
     y_floor = levels.get("floor", 0.0)
-    y_crown = levels.get("crown", float(np.percentile(pts[:, 1], 99.8)))
+    y_crown = levels.get("crown", float(np.percentile(pts[:, 1], 99.95)))
     stature_mm = (y_crown - y_floor) * 1000.0
-    stature_flag = QualityFlag.OK.value
-    stature_notes = ""
+
+    crown_hole = hole_map.get("crown", 0.0) if hole_map is not None else 0.0
     if crown_clipped_in_camera:
         stature_flag = QualityFlag.PARTIAL.value
         stature_notes = "crown_clipped (top of head touched camera FOV boundary)"
+        stature_cov = 0.85
+    elif crown_hole > cfg.crown_hole_threshold:
+        stature_flag = QualityFlag.PARTIAL.value
+        stature_notes = (
+            f"crown_unobserved (missing fraction {crown_hole:.2f} > {cfg.crown_hole_threshold:.2f} "
+            f"due to camera viewing horizon)"
+        )
+        stature_cov = float(max(0.0, 1.0 - crown_hole))
+    else:
+        stature_flag = QualityFlag.OK.value
+        stature_notes = ""
+        stature_cov = 1.0
 
     results["stature"] = MeasurementResult(
         name="stature",
         value_mm=stature_mm,
         method="vertical_height",
-        coverage=1.0 if not crown_clipped_in_camera else 0.85,
+        coverage=stature_cov,
         interpolated_fraction=0.0,
         quality_flag=stature_flag,
         uncertainty_mm=3.0,
@@ -146,21 +159,27 @@ def extract_ring_circumference(
     # 1. Project points onto plane
     diff = points - plane.origin
     dist_to_plane = np.dot(diff, plane.normal)
-    slab_mask = np.abs(dist_to_plane) <= (cfg.slice_thickness_m * 0.5)
+    thickness = cfg.slice_thickness_m if not plane.is_limb else max(0.025, cfg.slice_thickness_m * 1.5)
+    slab_mask = np.abs(dist_to_plane) <= (thickness * 0.5)
 
     # 2. Filter points belonging to other body parts (mask arms from torso rings)
     if not plane.is_limb:
         if labels is not None:
-            # Mask out arm points so arms never bridge into the chest/waist ring
-            slab_mask &= (~is_arm_point(labels))
+            # Mask out arm points so arms never bridge into the chest/waist ring.
+            # Points within trunk boundary (|X| <= 0.20m) are protected from arm labeling.
+            is_arm = is_arm_point(labels) & (np.abs(points[:, 0]) > 0.20)
+            slab_mask &= (~is_arm)
         # Exclude extreme lateral points
         slab_mask &= (np.abs(points[:, 0]) < 0.28)
     else:
-        # For limb rings, only take points within local cylinder radius 15 cm
-        slab_mask &= (np.linalg.norm(diff - dist_to_plane[:, np.newaxis] * plane.normal, axis=1) < 0.15)
+        # For limb rings, isolate limb from adjacent anatomy using limb-appropriate radial bounds
+        limb_rad_max = 0.09 if "thigh" in plane.name else 0.07
+        dist_rad = np.linalg.norm(diff - dist_to_plane[:, np.newaxis] * plane.normal, axis=1)
+        slab_mask &= (dist_rad < limb_rad_max)
 
     pts_slab = points[slab_mask]
-    if len(pts_slab) < 15:
+    min_pts_required = 15 if not plane.is_limb else 8
+    if len(pts_slab) < min_pts_required:
         res_empty = MeasurementResult(
             name=plane.name,
             value_mm=float("nan"),
@@ -185,8 +204,8 @@ def extract_ring_circumference(
     angles = np.arctan2(dv, du)  # [-pi, pi]
     radii = np.sqrt(du ** 2 + dv ** 2)
 
-    # 3. Bin into M angular sectors
-    M = cfg.num_angular_bins
+    # 3. Bin into M angular sectors (torso uses dense bins; limbs use 36 bins matched to limb point spacing)
+    M = cfg.num_angular_bins if not plane.is_limb else 36
     bin_edges = np.linspace(-np.pi, np.pi, M + 1)
     bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
     bin_indices = np.digitize(angles, bin_edges) - 1

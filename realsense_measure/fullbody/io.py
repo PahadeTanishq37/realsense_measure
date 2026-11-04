@@ -104,6 +104,9 @@ def _load_meta_json_session(
     n_frames = len(frames)
     step_deg = 360.0 / max(1, n_frames)
 
+    turn_dir = meta.get("turn_direction", cfg.turn_direction)
+    cam_rot = meta.get("camera_portrait_rotation", cfg.camera_portrait_rotation)
+
     for i, f_entry in enumerate(frames):
         c_rel = f_entry.get("color_file", f"frame_{i:02d}_color.png")
         d_rel = f_entry.get("depth_file", f"frame_{i:02d}_depth.npy")
@@ -131,7 +134,7 @@ def _load_meta_json_session(
                 color_bgr.shape[1], color_bgr.shape[0], fx, fy, cx, cy
             )
 
-        nominal_angle = i * step_deg
+        nominal_angle = (i * step_deg) if turn_dir == "cw" else (-i * step_deg) % 360.0
         t_stamp = float(f_entry.get("timestamp", 0.0))
 
         stops.append(
@@ -179,10 +182,11 @@ def _load_subdirs_session(
         cy = float(h / 2.0)
         intrinsics = o3d.camera.PinholeCameraIntrinsic(w, h, fx, fy, cx, cy)
 
+        nominal_angle = (i * step_deg) if cfg.turn_direction == "cw" else (-i * step_deg) % 360.0
         stops.append(
             StopData(
                 stop_id=i,
-                nominal_angle_deg=i * step_deg,
+                nominal_angle_deg=nominal_angle,
                 color=color_bgr,
                 depth=depth_m,
                 intrinsics=intrinsics,

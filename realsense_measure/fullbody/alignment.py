@@ -133,7 +133,10 @@ def align_stops(
         else:
             kpts_grav = Keypoints3D([], np.zeros((0, 3)), np.zeros(0), np.zeros(0), "gravity")
 
-        nominal_canonical = (180.0 - s.nominal_angle_deg + 360.0) % 360.0
+        if cfg.turn_direction == "cw":
+            nominal_canonical = (180.0 - s.nominal_angle_deg + 360.0) % 360.0
+        else:
+            nominal_canonical = (180.0 + s.nominal_angle_deg + 360.0) % 360.0
         prior_yaw, center, is_kpt_valid = compute_keypoint_prior_yaw(kpts_grav, nominal_canonical, cfg)
 
         # Check deviation against nominal canonical yaw
@@ -161,6 +164,8 @@ def align_stops(
 
         T_canon_cam = T_canon_grav @ T_grav_cam
 
+        kpts_can = kpts_cam.transform(T_canon_cam, "canonical") if kpts_cam else None
+
         # Transform point cloud to canonical frame
         pcd_can = None
         labels = None
@@ -168,7 +173,6 @@ def align_stops(
             pcd_can = o3d.geometry.PointCloud(s.pcd)
             pcd_can.transform(T_canon_cam)
             pts_np = np.asarray(pcd_can.points)
-            kpts_can = kpts_cam.transform(T_canon_cam, "canonical") if kpts_cam else None
             if kpts_can:
                 labels = label_points_by_body_part(pts_np, kpts_can, cfg)
 
@@ -186,6 +190,7 @@ def align_stops(
                 inlier_fraction=1.0,
                 accepted=True,
                 pcd_canonical=pcd_can,
+                keypoints_canonical=kpts_can,
                 body_part_labels=labels,
             )
         )
@@ -264,6 +269,8 @@ def _refine_alignment_multiview(
                inlier_frac >= cfg.alignment_min_inlier_fraction:
                 stop.T_canonical_camera = delta_T @ stop.T_canonical_camera
                 stop.pcd_canonical.transform(delta_T)
+                if stop.keypoints_canonical is not None:
+                    stop.keypoints_canonical = stop.keypoints_canonical.transform(delta_T, "canonical")
                 stop.refined_yaw_deg += d_yaw
                 stop.refined_translation_m += d_trans
                 max_correction = max(max_correction, abs(d_yaw))

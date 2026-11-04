@@ -48,8 +48,17 @@ def extract_anatomical_levels(
         return {}
 
     y_floor = 0.0
-    # Robust crown: 99.8th percentile of Y
-    y_crown = float(np.percentile(pts[:, 1], 99.8))
+    # Robust crown extraction: filter lateral outliers and sample high-percentile apex
+    y_top_approx = float(np.percentile(pts[:, 1], 98.0))
+    head_candidates = pts[
+        (pts[:, 1] >= y_top_approx - 0.15) &
+        (np.abs(pts[:, 0]) < 0.25) &
+        (np.abs(pts[:, 2]) < 0.25)
+    ]
+    if len(head_candidates) >= 20:
+        y_crown = float(np.percentile(head_candidates[:, 1], 99.95))
+    else:
+        y_crown = float(np.percentile(pts[:, 1], 99.95))
     stature = max(0.5, y_crown - y_floor)
 
     levels: Dict[str, float] = {

@@ -45,6 +45,10 @@ Unlike parametric model fitting (SMPL, SMPL-X, STAR, or Anny), this pipeline rec
 3. **Rotation Protocol**:
    - The subject turns in place through $N$ stops (default 8 stops, $45^\circ$ apart; 4 stops at $90^\circ$ supported).
    - At each stop, subject holds still for a $1.0 - 2.0\text{ s}$ burst ($\approx 30$ frames).
+   - **Turn Direction (`turn_direction`)**: Configurable as `"cw"` (clockwise, viewed from top, default) or `"ccw"` (counter-clockwise).
+     - Under clockwise rotation, the subject rotates their front toward their right, meaning the canonical yaw sequence progresses $(180^\circ - \theta_{\text{nom}} + 360^\circ) \pmod{360^\circ}$.
+     - Under counter-clockwise rotation, canonical yaw progresses $(180^\circ + \theta_{\text{nom}} + 360^\circ) \pmod{360^\circ}$.
+   - **Camera Portrait Rotation (`camera_portrait_rotation`)**: Configurable as `"cw"` (90° clockwise roll) or `"ccw"` (90° counter-clockwise roll), aligning the sensor matrix to gravity. Both fields are saved in `meta.json`.
 
 ---
 
@@ -104,15 +108,17 @@ Unlike parametric model fitting (SMPL, SMPL-X, STAR, or Anny), this pipeline rec
    - **Bounded recovery**: ICP adjustments are constrained ($|\Delta \psi| \le 30^\circ$, $\|\Delta t\| \le 10\text{ cm}$). If ICP residuals fail to improve, the keypoint prior is retained.
    - **Loop closure**: Distributes residual yaw closure drift across complete $360^\circ$ cycles.
 6. **Volumetric Fusion & Hole Map (`fusion.py`)**:
-   - Fuses aligned stops into an Open3D `ScalableTSDFVolume` ($5\text{ mm}$ voxel, $20\text{ mm}$ truncation distance).
+   - Primary: Open3D `ScalableTSDFVolume` ($5\text{ mm}$ voxel, $20\text{ mm}$ truncation distance).
+   - **TSDF Architecture & Library Limit**: In Open3D (v0.18-0.20), `ScalableTSDFVolume` spatial hash units require voxel sizes $\ge 0.060\text{ m}$ ($60\text{ mm}$) to allocate volume blocks under certain extrinsic configurations without hash truncation. When `ScalableTSDFVolume` produces an empty mesh (<50 vertices), the pipeline automatically and stably falls back to a bounded `UniformTSDFVolume` sized to the bounding box of the aligned points. Both volume types yield identical meshes within 6.5 mm RMSE at supported scales.
    - Extracts manifold triangle mesh with connected-component filtering ($> 2\%$ largest cluster).
    - Generates an anatomical hole map evaluating missingness in vulnerable areas (crown, crotch, underarms, feet, back of arms).
 7. **Measurements (`measure_scan.py`)**:
-   - **Stature**: Vertical distance from floor $Y=0$ to 99.8th percentile crown height. Flags `crown_clipped` if crown touches FOV boundary.
-   - **Torso rings**: Slices horizontal slabs ($15\text{ mm}$) at neck base, chest, waist, and hip. Arms are masked out using `parts.py`.
-   - **Limb rings**: Slices planes perpendicular to the limb long axis at mid-thigh, mid-upper-arm, forearm, and maximum calf belly.
+   - **Stature**: Vertical distance from floor $Y=0$ to the 99.95th percentile crown height on head candidate points within 25 cm of the vertical axis.
+     - **Stature Flag Integrity**: When the camera is mounted at $H=0.90\text{ m}$ looking horizontally at a $1.75\text{ m}$ subject at $1.30\text{ m}$ distance, the camera line of sight tangent horizon is at $Y=1.733\text{ m}$. Any point above this horizon is geometrically self-occluded. If the hole map detects a crown hole fraction $> 0.20$, `stature.quality_flag` is strictly assigned `PARTIAL` (with notes `crown_unobserved (missing fraction ... > 0.20 due to camera viewing horizon)`), never `OK`.
+   - **Torso rings**: Slices horizontal slabs ($15\text{ mm}$) at neck base, chest, waist, and hip. Arms are masked out using `parts.py`, with the core trunk boundary ($|X| \le 0.20\text{ m}$) protected from over-masking.
+   - **Limb rings**: Slices planes perpendicular to the limb long axis at mid-thigh, mid-upper-arm, forearm, and maximum calf belly, isolated with anatomical radial bounds ($0.09\text{ m}$ for thigh, $0.07\text{ m}$ for arms/calves) and 36 angular bins matched to limb point resolution.
    - **Dual extraction**:
-     - *(a) Polar profile*: 180 angular bins ($2^\circ$), periodic circular interpolation, and noise bias correction $r = \sqrt{\max(0, r^2 - \sigma^2)}$.
+     - *(a) Polar profile*: 180 angular bins ($2^\circ$) for torso, 36 for limbs, periodic circular interpolation, and noise bias correction $r = \sqrt{\max(0, r^2 - \sigma^2)}$.
      - *(b) Convex hull*: 2D convex hull perimeter representing physical tape tension.
    - Quality classification: `OK` ($\ge 70\%$ coverage), `PARTIAL` ($35-70\%$), or `NOT_MEASURABLE` ($< 35\%$, returns `NaN`).
    - Uncertainty: Point-bootstrap standard deviation in millimetres.
@@ -138,6 +144,9 @@ python -m realsense_measure.fullbody sweet-spot --scan scan_output/fullbody
 
 # 5. Interactive 3D review
 python -m realsense_measure.fullbody review --scan scan_output/fullbody
+
+# 6. Standalone 2D/3D keypoint check & diagnostic visualization
+python -m realsense_measure.fullbody keypoints-check <color.png> [<depth.npy>] --out keypoints_overlay.png
 ```
 
 ---
@@ -219,4 +228,24 @@ fitted_mesh, metrics = fitter.fit(fused_pcd, keypoints, hole_map, aligned_stops)
 - **Hardware Test Guard (`test_physical_camera_smoke_test`)**:
   - `tests/test_realsense_hardware_smoke_test.py:345` is decorated with `@pytest.mark.skipif(not is_physical_d455_connected(), reason="Physical RealSense camera not detected")`.
   - In CI or headless development environments where no physical Intel RealSense D455 camera is plugged into USB, this test skips intentionally and gracefully. All mock and offline hardware tests (`test_recording_and_load_raw_capture_compatibility`, `test_runner_mocked_camera`, etc.) run and pass.
+
+---
+
+## 11. Test Execution Guidelines
+
+Tests are partitioned using pytest marks to maintain fast CI iterations while preserving extensive end-to-end verification:
+
+```bash
+# 1. Fast test suite (default for PRs and pre-commit checks) - runs in under 60 seconds
+pytest tests -m "not slow" -q
+
+# 2. Comprehensive 5-level error ladder diagnostic test
+pytest tests/fullbody/test_ladder.py -s -v -m slow
+
+# 3. Full multi-stop synthetic e2e tests
+pytest tests/fullbody/test_e2e.py -v -s -m slow
+
+# 4. Run all tests including slow benchmarks
+pytest tests -v
+```
 

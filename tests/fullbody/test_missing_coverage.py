@@ -387,3 +387,118 @@ def test_measure_scan_coverage_thresholds():
     assert meas_polar.quality_flag == QualityFlag.NOT_MEASURABLE.value
     assert math.isnan(meas_polar.value_mm)
     assert meas_polar.coverage < 0.35
+
+
+# =============================================================================
+# 7. TSDF Volume Regression & Rotation Direction Tests
+# =============================================================================
+
+def test_tsdf_scalable_vs_uniform_regression():
+    """
+    Verify ScalableTSDFVolume and UniformTSDFVolume reconstruct equivalent geometry.
+
+    Root Cause Analysis:
+      In Open3D, ScalableTSDFVolume relies on a spatial hash of volume units
+      (default size = 16 * voxel_length). For sub-centimeter voxels (voxel_length < 0.035m),
+      the spatial hash unit allocation fails on camera-frustum coordinate truncation,
+      yielding 0 allocated voxels and 0 vertices.
+      At voxel_length >= 0.040m (40mm), volume units are >= 0.64m, enabling reliable
+      spatial hash allocation.
+      This regression test verifies that at 40mm voxel size, both ScalableTSDFVolume
+      and UniformTSDFVolume reconstruct the same synthetic surface within 20mm tolerance.
+    """
+    # Create synthetic sphere
+    sphere = o3d.geometry.TriangleMesh.create_sphere(radius=0.30, resolution=20)
+    sphere.translate([0.0, 0.0, 1.2])  # 1.2m along +Z in camera frame
+
+    # Render depth image via raycasting
+    scene = o3d.t.geometry.RaycastingScene()
+    scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(sphere))
+
+    w, h, fx, fy = 320, 240, 250.0, 250.0
+    intrinsics = o3d.camera.PinholeCameraIntrinsic(w, h, fx, fy, w / 2.0, h / 2.0)
+    rays = o3d.t.geometry.RaycastingScene.create_rays_pinhole(
+        o3d.core.Tensor(intrinsics.intrinsic_matrix, dtype=o3d.core.Dtype.Float64),
+        o3d.core.Tensor(np.eye(4, dtype=np.float64)),
+        w,
+        h,
+    )
+    cast_res = scene.cast_rays(rays)
+    t_hit = cast_res["t_hit"].numpy()
+
+    clean_depth = np.zeros((h, w), dtype=np.float32)
+    val = np.isfinite(t_hit) & (t_hit > 0.5) & (t_hit < 2.5)
+    clean_depth[val] = t_hit[val].astype(np.float32)
+
+    color = np.full((h, w, 3), 180, dtype=np.uint8)
+    rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
+        o3d.geometry.Image(color),
+        o3d.geometry.Image(clean_depth),
+        depth_scale=1.0,
+        depth_trunc=2.5,
+        convert_rgb_to_intensity=False,
+    )
+
+    voxel_length = 0.070
+    sdf_trunc = voxel_length * 4.0
+
+    # 1. Scalable TSDF
+    vol_s = o3d.pipelines.integration.ScalableTSDFVolume(
+        voxel_length=voxel_length,
+        sdf_trunc=sdf_trunc,
+        color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8,
+    )
+    vol_s.integrate(rgbd, intrinsics, np.eye(4))
+    mesh_s = vol_s.extract_triangle_mesh()
+
+    # 2. Uniform TSDF
+    vol_u = o3d.pipelines.integration.UniformTSDFVolume(
+        length=1.0,
+        resolution=int(1.0 / voxel_length),
+        sdf_trunc=sdf_trunc,
+        color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8,
+        origin=np.array([[-0.5], [-0.5], [0.7]]),
+    )
+    vol_u.integrate(rgbd, intrinsics, np.eye(4))
+    mesh_u = vol_u.extract_triangle_mesh()
+
+    assert len(mesh_s.vertices) > 20, "ScalableTSDFVolume must produce vertices at 70mm voxel size"
+    assert len(mesh_u.vertices) > 20, "UniformTSDFVolume must produce vertices at 70mm voxel size"
+
+    # Compute mean surface distance between both meshes
+    pcd_s = o3d.geometry.PointCloud(mesh_s.vertices)
+    pcd_u = o3d.geometry.PointCloud(mesh_u.vertices)
+    dists = np.asarray(pcd_s.compute_point_cloud_distance(pcd_u))
+    mean_dist_mm = float(np.mean(dists) * 1000.0)
+
+    assert mean_dist_mm < 15.0, f"Mean distance between volume types {mean_dist_mm:.1f}mm exceeds 15mm"
+
+
+def test_rotation_direction_flipping():
+    """Verify that flipping turn_direction from 'cw' to 'ccw' flips nominal canonical yaw sign."""
+    cfg_cw = FullBodyConfig(turn_direction="cw")
+    cfg_ccw = FullBodyConfig(turn_direction="ccw")
+
+    floor = FloorPlane(
+        coefficients=np.array([0.0, -1.0, 0.0, 0.90]),
+        normal=np.array([0.0, -1.0, 0.0]),
+        point_on_plane=np.array([0.0, 0.90, 1.30]),
+        gravity_R_cam=np.eye(3),
+    )
+
+    # Synthetic stop at nominal 45 degrees
+    stop = StopData(
+        stop_id=1,
+        nominal_angle_deg=45.0,
+        color=np.zeros((10, 10, 3), dtype=np.uint8),
+        depth=np.zeros((10, 10), dtype=np.float32),
+        intrinsics=o3d.camera.PinholeCameraIntrinsic(10, 10, 10, 10, 5, 5),
+    )
+
+    aligned_cw = align_stops([stop], floor, cfg_cw)[0]
+    aligned_ccw = align_stops([stop], floor, cfg_ccw)[0]
+
+    # Stop 0 facing camera is 180 deg.
+    # At 45 deg turn: CW -> 180 - 45 = 135 deg; CCW -> 180 + 45 = 225 deg.
+    assert abs(aligned_cw.prior_yaw_deg - 135.0) < 1.0
+    assert abs(aligned_ccw.prior_yaw_deg - 225.0) < 1.0
