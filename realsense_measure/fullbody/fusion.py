@@ -72,9 +72,55 @@ def fuse_aligned_stops(
     mesh = volume.extract_triangle_mesh()
     pcd = volume.extract_point_cloud()
 
+    # Fallback to bounded UniformTSDFVolume if ScalableTSDF yielded empty geometry
+    if len(mesh.vertices) == 0:
+        logger.info("  [fusion] ScalableTSDF yielded 0 vertices; attempting bounded UniformTSDFVolume.")
+        pts_list = [
+            np.asarray(a.pcd_canonical.points)
+            for a in aligned_stops
+            if a.pcd_canonical is not None and len(a.pcd_canonical.points) > 0
+        ]
+        if pts_list:
+            all_pts = np.vstack(pts_list)
+            min_b = np.min(all_pts, axis=0) - 0.05
+            max_b = np.max(all_pts, axis=0) + 0.05
+            length = float(np.max(max_b - min_b))
+            res = int(np.clip(round(length / cfg.tsdf_voxel_length_m), 128, 384))
+            vol_u = o3d.pipelines.integration.UniformTSDFVolume(
+                length=length,
+                resolution=res,
+                sdf_trunc=cfg.tsdf_sdf_trunc_m,
+                color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8,
+                origin=min_b.reshape(3, 1),
+            )
+            for s, a in zip(stops, aligned_stops):
+                if not a.accepted or a.T_canonical_camera is None:
+                    continue
+                extrinsic = np.linalg.inv(a.T_canonical_camera)
+                color_rgb = np.ascontiguousarray(s.color[:, :, ::-1])
+                depth = s.depth.copy()
+                if s.confidence_map is not None:
+                    depth[s.confidence_map < cfg.min_confidence_threshold] = 0.0
+                depth_o3d = o3d.geometry.Image(depth.astype(np.float32))
+                color_o3d = o3d.geometry.Image(color_rgb.astype(np.uint8))
+                rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
+                    color_o3d,
+                    depth_o3d,
+                    depth_scale=1.0,
+                    depth_trunc=cfg.tsdf_depth_trunc_m,
+                    convert_rgb_to_intensity=False,
+                )
+                try:
+                    vol_u.integrate(rgbd, s.intrinsics, extrinsic)
+                except Exception as exc:
+                    logger.debug(f"  [fusion uniform fallback] Stop {s.stop_id} failed: {exc}")
+            mesh = vol_u.extract_triangle_mesh()
+            if len(pcd.points) == 0:
+                pcd = vol_u.extract_point_cloud()
+
     # Fallback to concatenated point clouds if volume extraction is empty
     if len(pcd.points) == 0:
-        logger.info("  [fusion] ScalableTSDF yielded 0 points, falling back to direct point union.")
+        logger.info("  [fusion] TSDF yielded 0 points, falling back to direct point union.")
         pcd = o3d.geometry.PointCloud()
         for a in aligned_stops:
             if a.pcd_canonical is not None:
@@ -83,7 +129,13 @@ def fuse_aligned_stops(
 
     # Clean up small disconnected components from mesh
     if len(mesh.vertices) > 0 and len(mesh.triangles) > 0:
-        mesh = _clean_mesh_components(mesh, min_ratio=cfg.min_mesh_component_ratio)
+        mesh.remove_duplicated_vertices()
+        mesh.remove_degenerate_triangles()
+        mesh = _clean_mesh_components(
+            mesh,
+            min_ratio=cfg.min_mesh_component_ratio,
+            keep_dominant_only=cfg.keep_dominant_mesh_component,
+        )
         mesh.compute_vertex_normals()
 
     if len(pcd.points) > 0:
@@ -96,6 +148,7 @@ def fuse_aligned_stops(
 def _clean_mesh_components(
     mesh: o3d.geometry.TriangleMesh,
     min_ratio: float = 0.02,
+    keep_dominant_only: bool = False,
 ) -> o3d.geometry.TriangleMesh:
     """Remove disconnected triangle clusters smaller than min_ratio of the largest cluster."""
     try:
@@ -106,13 +159,20 @@ def _clean_mesh_components(
         if len(num_triangles) <= 1:
             return mesh
 
-        largest_cluster_size = float(np.max(num_triangles))
+        largest_cluster_idx = int(np.argmax(num_triangles))
+        largest_cluster_size = float(num_triangles[largest_cluster_idx])
         min_size = largest_cluster_size * min_ratio
 
-        triangles_to_remove = [
-            i for i, cluster_idx in enumerate(triangle_clusters)
-            if num_triangles[cluster_idx] < min_size
-        ]
+        if keep_dominant_only:
+            triangles_to_remove = [
+                i for i, cluster_idx in enumerate(triangle_clusters)
+                if cluster_idx != largest_cluster_idx
+            ]
+        else:
+            triangles_to_remove = [
+                i for i, cluster_idx in enumerate(triangle_clusters)
+                if num_triangles[cluster_idx] < min_size
+            ]
         mesh.remove_triangles_by_index(triangles_to_remove)
         mesh.remove_unreferenced_vertices()
     except Exception as exc:

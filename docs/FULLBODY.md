@@ -207,3 +207,16 @@ fitted_mesh, metrics = fitter.fit(fused_pcd, keypoints, hole_map, aligned_stops)
    *Decision*: Output both periodic-interpolated polar radius perimeter and 2D convex hull perimeter.
    *Reasoning*: Physical measuring tapes span concavities under tension (closer to a convex hull), whereas 3D geometric surfaces follow depressions (closer to the polar radius contour). Providing both allows transparent calibration.
 
+---
+
+## 10. Synthetic Verification & Hardware Guards
+
+- **Synthetic Humanoid Verification Suite** (`tests/fullbody/synth_humanoid.py`, `test_e2e.py`, `test_missing_coverage.py`):
+  - Procedural humanoid generator with lofted elliptical torso/pelvis (analytic Ramanujan perimeters for chest, waist, and hip), ellipsoid head, and cylindrical limbs in A-pose.
+  - Open3D `RaycastingScene` multi-stop renderer from a fixed portrait camera ($H=0.90\text{ m}, D=1.30\text{ m}$) simulating 4 and 8 stops.
+  - Injected sensor error model: distance quadratic noise $\sigma(z) = 0.001 \cdot (z/0.6)^2$, 10% dropouts, edge flying pixels, per-stop yaw jitter ($\pm 4^\circ$), translation jitter ($\pm 2\text{ cm}$), and inter-stop arm posture changes ($\pm 3^\circ$).
+  - Validates full algorithmic chain: burst median $\to$ floor RANSAC $\to$ confidence weighting $\to$ 3D skeletal lifting $\to$ 4-DoF bounded alignment $\to$ TSDF fusion $\to$ anatomical landmark slicing $\to$ tape comparison API and CLI commands (`scan`, `measure`).
+- **Hardware Test Guard (`test_physical_camera_smoke_test`)**:
+  - `tests/test_realsense_hardware_smoke_test.py:345` is decorated with `@pytest.mark.skipif(not is_physical_d455_connected(), reason="Physical RealSense camera not detected")`.
+  - In CI or headless development environments where no physical Intel RealSense D455 camera is plugged into USB, this test skips intentionally and gracefully. All mock and offline hardware tests (`test_recording_and_load_raw_capture_compatibility`, `test_runner_mocked_camera`, etc.) run and pass.
+

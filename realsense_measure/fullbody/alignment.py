@@ -88,9 +88,9 @@ def compute_keypoint_prior_yaw(
         return nominal_deg, np.array([0.0, 0.9, 1.3], dtype=np.float64), False
     lat /= norm_lat
 
-    # Anterior vector: cross(UP, lateral) where UP is [0, 1, 0]
-    # cross([0, 1, 0], [lx, 0, lz]) = [lz, 0, -lx]
-    ant = np.array([lat[2], 0.0, -lat[0]], dtype=np.float64)
+    # Anterior vector: cross(lateral, UP) where UP is [0, 1, 0]
+    # cross([lx, 0, lz], [0, 1, 0]) = [-lz, 0, lx]
+    ant = np.array([-lat[2], 0.0, lat[0]], dtype=np.float64)
 
     # Disambiguate front vs back using nose position relative to shoulders
     center = np.mean(centers, axis=0)
@@ -133,16 +133,17 @@ def align_stops(
         else:
             kpts_grav = Keypoints3D([], np.zeros((0, 3)), np.zeros(0), np.zeros(0), "gravity")
 
-        prior_yaw, center, is_kpt_valid = compute_keypoint_prior_yaw(kpts_grav, s.nominal_angle_deg, cfg)
+        nominal_canonical = (180.0 - s.nominal_angle_deg + 360.0) % 360.0
+        prior_yaw, center, is_kpt_valid = compute_keypoint_prior_yaw(kpts_grav, nominal_canonical, cfg)
 
-        # Check deviation against nominal
-        diff = (prior_yaw - s.nominal_angle_deg + 180.0) % 360.0 - 180.0
+        # Check deviation against nominal canonical yaw
+        diff = (prior_yaw - nominal_canonical + 180.0) % 360.0 - 180.0
         if abs(diff) > cfg.max_angle_deviation_deg:
             logger.info(
                 f"  [align] Stop {s.stop_id} yaw prior {prior_yaw:.1f} deg deviates by {diff:.1f} deg "
-                f"from nominal {s.nominal_angle_deg:.1f} deg; clamping prior to nominal."
+                f"from nominal {nominal_canonical:.1f} deg; clamping prior to nominal."
             )
-            prior_yaw = s.nominal_angle_deg
+            prior_yaw = nominal_canonical
 
         # Canonical transform: rotates yaw, centers X-Z body axis, sets floor at Y=0
         yaw_rad = np.deg2rad(prior_yaw)

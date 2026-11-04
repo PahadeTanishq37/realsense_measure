@@ -65,6 +65,14 @@ class Keypoints3D:
 
     def transform(self, T: np.ndarray, new_frame: str) -> Keypoints3D:
         """Transform all points by 4x4 matrix T and return new Keypoints3D."""
+        if len(self.points) == 0 or self.points.ndim < 2 or self.points.shape[1] != 3:
+            return Keypoints3D(
+                names=list(self.names),
+                points=np.zeros((0, 3), dtype=np.float32),
+                confidence=self.confidence.copy(),
+                visibility=self.visibility.copy(),
+                frame=new_frame,
+            )
         R = T[:3, :3]
         t = T[:3, 3]
         new_pts = (R @ self.points.T).T + t

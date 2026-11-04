@@ -50,7 +50,7 @@ class FullBodyConfig:
     # -------------------------------------------------------------------------
     # Confidence weighting
     # -------------------------------------------------------------------------
-    min_confidence_threshold: float = 0.15
+    min_confidence_threshold: float = 0.08
     incidence_angle_power: float = 2.0
     edge_distance_falloff_px: float = 5.0
     noise_sigma_base_m: float = 0.001            # 1 mm at 0.6 m
@@ -95,6 +95,7 @@ class FullBodyConfig:
     tsdf_sdf_trunc_m: float = 0.020     # 20 mm (4x voxel)
     tsdf_depth_trunc_m: float = 2.50
     min_mesh_component_ratio: float = 0.02
+    keep_dominant_mesh_component: bool = False
 
     # -------------------------------------------------------------------------
     # Anthropometric Measurements
