@@ -731,7 +731,10 @@ def measure_body(
     if hasattr(output, "numpy_vertices"):
         verts = output.numpy_vertices(batch_idx)   # (V, 3) metres
         jts = output.numpy_joints(batch_idx)       # (J, 3) metres
-        fcs = output.faces.cpu().numpy()           # (F, 3)
+        if hasattr(output, "numpy_faces"):
+            fcs = output.numpy_faces()
+        else:
+            fcs = output.faces.cpu().numpy() if hasattr(output.faces, "cpu") else np.asarray(output.faces)
         jnames = output.joint_names
         raw = output.raw if hasattr(output, "raw") else {}
         return measure_mesh(verts, jts, fcs, jnames, raw)

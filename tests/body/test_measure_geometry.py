@@ -479,7 +479,6 @@ class TestMeasureBodySyntheticHumanoid:
         Left leg:  cylinder at X=-0.10, radius=0.07, Z=[-1.40, -0.80]
         Right leg: cylinder at X=+0.10, radius=0.07, Z=[-1.40, -0.80]
         """
-        import torch
         from realsense_measure.body.model import BodyOutput
 
         def _cyl(cx, cy, r, z_bot, z_top, n=64):
@@ -544,14 +543,10 @@ class TestMeasureBodySyntheticHumanoid:
             [-0.30, 0.0,   0.00], # upperarm01.L
         ], dtype=np.float32)
 
-        verts_t  = torch.from_numpy(verts_np).unsqueeze(0)   # (1, V, 3)
-        joints_t = torch.from_numpy(joints_np).unsqueeze(0)  # (1, J, 3)
-        faces_t  = torch.from_numpy(faces_np)                # (F, 3)
-
         body_out = BodyOutput(
-            vertices=verts_t,
-            faces=faces_t,
-            joints=joints_t,
+            vertices=verts_np[np.newaxis, ...],
+            faces=faces_np,
+            joints=joints_np[np.newaxis, ...],
             joint_names=bone_names,
             phenotypes={"test": True},
             raw={},
