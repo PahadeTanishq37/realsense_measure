@@ -38,22 +38,15 @@ for p in [str(REPO_ROOT), str(SCRIPT_DIR)]:
         sys.path.insert(0, p)
 
 try:
-    from segmentation import get_person_mask, is_model_available
+    from realsense_measure.segmentation import get_person_mask, is_model_available
     SEGMENTATION_AVAILABLE = True
 except Exception:
-    try:
-        from realsense_measure.segmentation import get_person_mask, is_model_available
-        SEGMENTATION_AVAILABLE = True
-    except Exception:
-        SEGMENTATION_AVAILABLE = False
+    SEGMENTATION_AVAILABLE = False
 
 try:
-    from camera.recording import load_raw_capture
+    from realsense_measure.camera.recording import load_raw_capture
 except Exception:
-    try:
-        from realsense_measure.camera.recording import load_raw_capture
-    except Exception:
-        load_raw_capture = None
+    load_raw_capture = None
 
 
 def extract_person_mask(
