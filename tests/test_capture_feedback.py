@@ -14,8 +14,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from config import HeadCaptureConfig, PipelineConfig, TargetConfig
-from pipeline import HeadCaptureTracker, ScanPipeline
+from realsense_measure.config import HeadCaptureConfig, PipelineConfig, TargetConfig
+from realsense_measure.pipeline import HeadCaptureTracker, ScanPipeline
 
 
 def _make_frontal_landmarks(offset_x: float = 0.0, offset_y: float = 0.0) -> dict[str, np.ndarray]:

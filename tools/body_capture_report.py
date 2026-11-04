@@ -30,12 +30,6 @@ from typing import Any, Dict, List, Optional
 import cv2
 import numpy as np
 
-# Ensure realsense_measure package and repo root are in sys.path
-SCRIPT_DIR = Path(__file__).resolve().parent
-REPO_ROOT = SCRIPT_DIR.parent
-for p in [str(REPO_ROOT), str(SCRIPT_DIR)]:
-    if p not in sys.path:
-        sys.path.insert(0, p)
 
 try:
     from realsense_measure.segmentation import get_person_mask, is_model_available

@@ -44,14 +44,6 @@ from typing import Any
 import cv2
 import numpy as np
 
-# Ensure repository paths are configured on sys.path
-SCRIPT_DIR = Path(__file__).resolve().parent
-REPO_ROOT = SCRIPT_DIR.parent
-PACKAGE_DIR = REPO_ROOT / "realsense_measure"
-for p in [str(REPO_ROOT), str(PACKAGE_DIR)]:
-    if p not in sys.path:
-        sys.path.insert(0, p)
-
 try:
     import pyrealsense2 as rs
     PYREALSENSE_AVAILABLE = True
@@ -59,24 +51,14 @@ except ImportError:
     rs = None
     PYREALSENSE_AVAILABLE = False
 
-try:
-    from config import CameraConfig
-    from camera.realsense_capture import (
-        CameraError,
-        CameraNotStartedError,
-        DeviceDisconnectedError,
-        RealSenseCamera,
-        StreamNegotiationError,
-    )
-except ImportError:
-    from realsense_measure.config import CameraConfig
-    from realsense_measure.camera.realsense_capture import (
-        CameraError,
-        CameraNotStartedError,
-        DeviceDisconnectedError,
-        RealSenseCamera,
-        StreamNegotiationError,
-    )
+from realsense_measure.config import CameraConfig
+from realsense_measure.camera.realsense_capture import (
+    CameraError,
+    CameraNotStartedError,
+    DeviceDisconnectedError,
+    RealSenseCamera,
+    StreamNegotiationError,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("realsense_smoke_test")

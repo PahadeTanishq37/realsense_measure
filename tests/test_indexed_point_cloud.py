@@ -28,20 +28,20 @@ import numpy as np
 import open3d as o3d
 import pytest
 
-from camera.frame import RGBDFrame
-from camera.indexed_pcd import (
+from realsense_measure.camera.frame import RGBDFrame
+from realsense_measure.camera.indexed_pcd import (
     FrameMetadata,
     IndexedPointCloud,
     create_indexed_pcd_from_rgbd,
 )
-from camera.recording import load_raw_capture, save_raw_capture
-from config import CameraConfig, LandmarkConfig, PipelineConfig, PreprocessConfig, TargetConfig
-from preprocessing import (
+from realsense_measure.camera.recording import load_raw_capture, save_raw_capture
+from realsense_measure.config import CameraConfig, LandmarkConfig, PipelineConfig, PreprocessConfig, TargetConfig
+from realsense_measure.preprocessing import (
     downsample_and_denoise,
     extract_largest_cluster,
     remove_dominant_plane,
 )
-from landmarks import LandmarkSample3D, sample_landmark_3d
+from realsense_measure.landmarks import LandmarkSample3D, sample_landmark_3d
 
 
 @pytest.fixture
@@ -1378,7 +1378,7 @@ def test_is_valid_false_with_available_point_3d():
     - has_point_3d is True
     - point_3d is populated (available for inspection/diagnostics)
     """
-    from config import LandmarkConfig
+    from realsense_measure.config import LandmarkConfig
 
     intr = o3d.camera.PinholeCameraIntrinsic(100, 100, 50.0, 50.0, 50.0, 50.0)
     depth = np.ones((100, 100), dtype=np.float32) * 1.0
@@ -1698,7 +1698,7 @@ def test_invalid_quality_sample_index_validity():
     - source_point_index preserves the raw point index for debugging/diagnostics.
     - has_point_3d is True.
     """
-    from config import LandmarkConfig
+    from realsense_measure.config import LandmarkConfig
 
     intr = o3d.camera.PinholeCameraIntrinsic(100, 100, 50.0, 50.0, 50.0, 50.0)
     color = np.full((100, 100, 3), 200, dtype=np.uint8)

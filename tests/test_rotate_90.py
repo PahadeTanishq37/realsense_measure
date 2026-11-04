@@ -14,8 +14,8 @@ import numpy as np
 import open3d as o3d
 import pytest
 
-from camera.frame import create_pcd_from_rgbd
-from camera.rotation import rotate_intrinsics, rotate_rgbd_arrays
+from realsense_measure.camera.frame import create_pcd_from_rgbd
+from realsense_measure.camera.rotation import rotate_intrinsics, rotate_rgbd_arrays
 
 
 @pytest.mark.parametrize("mode", ["cw", "ccw"])

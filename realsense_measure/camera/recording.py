@@ -17,11 +17,11 @@ import cv2
 import numpy as np
 import open3d as o3d
 
-from camera.frame import RGBDFrame, create_pcd_from_rgbd
-from camera.indexed_pcd import create_indexed_pcd_from_rgbd
+from realsense_measure.camera.frame import RGBDFrame, create_pcd_from_rgbd
+from realsense_measure.camera.indexed_pcd import create_indexed_pcd_from_rgbd
 
 if TYPE_CHECKING:
-    from config import PipelineConfig
+    from realsense_measure.config import PipelineConfig
 
 logger = logging.getLogger(__name__)
 
@@ -57,15 +57,8 @@ def save_raw_capture(
 
     allow_overwrite = getattr(cfg, "allow_overwrite", False)
     if out_path.exists():
-        try:
-            from realsense_measure.body.hardware_smoke_test import check_capture_collision
-        except ImportError:
-            try:
-                from body.hardware_smoke_test import check_capture_collision
-            except ImportError:
-                check_capture_collision = None
-        if check_capture_collision is not None:
-            check_capture_collision(out_path, allow_overwrite=allow_overwrite)
+        from realsense_measure.body.hardware_smoke_test import check_capture_collision
+        check_capture_collision(out_path, allow_overwrite=allow_overwrite)
 
     out_path.mkdir(parents=True, exist_ok=True)
 
@@ -444,8 +437,8 @@ def run_replay_batch(
     Path
         Path to comparison_summary.csv.
     """
-    from config import PipelineConfig
-    from pipeline import ScanPipeline
+    from realsense_measure.config import PipelineConfig
+    from realsense_measure.pipeline import ScanPipeline
 
     raw_path = Path(raw_dir)
     out_base = Path(output_base_dir)

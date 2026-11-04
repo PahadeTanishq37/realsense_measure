@@ -23,7 +23,7 @@ import numpy as np
 import open3d as o3d
 
 if TYPE_CHECKING:
-    from config import LandmarkConfig
+    from realsense_measure.config import LandmarkConfig
 
 MODEL_DIR = os.path.join(os.path.dirname(__file__), "models")
 MODEL_PATH = os.path.join(MODEL_DIR, "face_landmarker.task")

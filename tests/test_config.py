@@ -11,7 +11,7 @@ Fix #1 replaced equality-to-default checks with None-sentinel checks so that:
 from pathlib import Path
 import pytest
 
-from config import (
+from realsense_measure.config import (
     CameraConfig,
     DepthVisConfig,
     HeadCaptureConfig,

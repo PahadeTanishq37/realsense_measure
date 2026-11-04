@@ -21,16 +21,16 @@ import cv2
 import numpy as np
 import open3d as o3d
 
-from camera.frame import RGBDFrame
-from camera.realsense_capture import (
+from realsense_measure.camera.frame import RGBDFrame
+from realsense_measure.camera.realsense_capture import (
     DeviceDisconnectedError,
     RealSenseCamera,
     StreamNegotiationError,
 )
-from config import HeadCaptureConfig, PipelineConfig
-from landmarks import detect_face_landmarks_3d, project_landmarks_3d_to_pixel
-from preprocessing import isolate_object, isolate_with_segmentation, reject_positional_outliers
-from reconstruction import (
+from realsense_measure.config import HeadCaptureConfig, PipelineConfig
+from realsense_measure.landmarks import detect_face_landmarks_3d, project_landmarks_3d_to_pixel
+from realsense_measure.preprocessing import isolate_object, isolate_with_segmentation, reject_positional_outliers
+from realsense_measure.reconstruction import (
     compute_reconstruction_quality_metrics,
     filter_depth_pixel_quality,
     fuse_head_scalable_tsdf,
@@ -39,18 +39,18 @@ from reconstruction import (
     mask_frame_to_head_roi,
     refine_poses_model_based,
 )
-from registration import (
+from realsense_measure.registration import (
     compute_rotation_deg,
     register_frame_pair,
     register_sequence,
     register_sequence_multiway,
     register_sequence_rgbd_human,
 )
-from targets.base import get_target
-import targets.box   # noqa: F401 — registers BoxTarget via @register_target
-import targets.head  # noqa: F401 — registers HeadTarget via @register_target
-import targets.body  # noqa: F401 registers BodyTarget
-from visualizer import (
+from realsense_measure.targets.base import get_target
+import realsense_measure.targets.box   # noqa: F401 — registers BoxTarget via @register_target
+import realsense_measure.targets.head  # noqa: F401 — registers HeadTarget via @register_target
+import realsense_measure.targets.body  # noqa: F401 registers BodyTarget
+from realsense_measure.visualizer import (
     color_frames_distinctly,
     draw_camera_trajectory,
     obb_lineset,
@@ -848,7 +848,7 @@ class ScanPipeline:
             time.sleep(0.008)
         if not burst_depths:
             return None, None
-        from camera.frame import compute_burst_median_frame
+        from realsense_measure.camera.frame import compute_burst_median_frame
         min_v = getattr(self.cfg.head_capture, "burst_min_valid_frac", 0.50)
         return compute_burst_median_frame(burst_colors, burst_depths, min_valid_frac=min_v)
 
@@ -1317,20 +1317,14 @@ class ScanPipeline:
                 )
 
                 # Per-pixel median depth over valid pixels (>= 50% valid)
-                try:
-                    from realsense_measure.camera.frame import compute_burst_median_frame
-                except ModuleNotFoundError:
-                    from camera.frame import compute_burst_median_frame
+                from realsense_measure.camera.frame import compute_burst_median_frame
 
                 c_median, d_median = compute_burst_median_frame(
                     burst_colors, burst_depths, min_valid_frac=0.50
                 )
 
                 # Stillness check across burst
-                try:
-                    from realsense_measure.body.capture_motion import evaluate_burst_stillness
-                except ModuleNotFoundError:
-                    from body.capture_motion import evaluate_burst_stillness
+                from realsense_measure.body.capture_motion import evaluate_burst_stillness
                 intr = getattr(cam, "intrinsics", None)
                 intr_tuple = (intr.fx, intr.fy, intr.cx, intr.cy) if intr else None
                 bg_ref = getattr(self.cfg, "background_ref_depth", None)
@@ -1397,7 +1391,7 @@ class ScanPipeline:
             depth, point clouds with normals, timestamps, and intrinsics.
         """
         if self.cfg.replay_dir is not None:
-            from camera.recording import load_raw_capture
+            from realsense_measure.camera.recording import load_raw_capture
             logger.info(f"\n  [REPLAY MODE] Loading raw frames from: {self.cfg.replay_dir}")
             return load_raw_capture(self.cfg.replay_dir)
 
@@ -1768,7 +1762,7 @@ class ScanPipeline:
                 bg_depth = getattr(raw_frames, "background_ref_depth", getattr(raw_frames[0], "background_ref_depth", None))
 
             if is_subject_turns and bg_depth is not None:
-                from preprocessing import isolate_subject_by_background_subtraction
+                from realsense_measure.preprocessing import isolate_subject_by_background_subtraction
                 logger.info("  Stage 2: using background-subtraction isolation (fixed-camera subject-turns mode, no 3D DBSCAN).")
                 for i, f in enumerate(raw_frames):
                     n_before = len(f.pcd.points)
@@ -2247,7 +2241,7 @@ class ScanPipeline:
             residuals = self.last_registration_stats.get("residuals") or self.last_registration_stats.get("frame_residuals", {})
             frame_methods = self.last_registration_stats.get("frame_methods", {})
 
-        from registration import is_upper_face_frame
+        from realsense_measure.registration import is_upper_face_frame
 
         accepted_indices = []
         gate_report_records = []
@@ -3016,7 +3010,7 @@ class ScanPipeline:
         raw_frames = self.capture_frames()
 
         if self.cfg.save_raw:
-            from camera.recording import save_raw_capture
+            from realsense_measure.camera.recording import save_raw_capture
             save_dir = self.cfg.save_raw_dir
             if save_dir is None:
                 save_dir = self.scan_folder / "raw_capture"
@@ -3024,10 +3018,7 @@ class ScanPipeline:
 
         if getattr(self.cfg, "capture_only", False):
             # Capture-only mode: perform pre-save/post-save quality checks, write manifest, and exit cleanly
-            try:
-                from realsense_measure.body.capture_session import CaptureQualityChecker, CaptureSessionManifest
-            except ImportError:
-                from body.capture_session import CaptureQualityChecker, CaptureSessionManifest
+            from realsense_measure.body.capture_session import CaptureQualityChecker, CaptureSessionManifest
 
             save_dir = self.cfg.save_raw_dir
             if save_dir is None:

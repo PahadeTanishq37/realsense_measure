@@ -18,11 +18,11 @@ import numpy as np
 import open3d as o3d
 import pytest
 
-from camera.frame import RGBDFrame, compute_burst_median_frame, create_pcd_from_rgbd
-from config import CameraConfig, HeadCaptureConfig, PipelineConfig, RegistrationConfig
-from pipeline import HeadCaptureTracker, _depth_mean_diff, compute_head_roi_quality
-from preprocessing import isolate_subject_by_background_subtraction
-from registration import compute_rotation_deg, register_rgbd_pair
+from realsense_measure.camera.frame import RGBDFrame, compute_burst_median_frame, create_pcd_from_rgbd
+from realsense_measure.config import CameraConfig, HeadCaptureConfig, PipelineConfig, RegistrationConfig
+from realsense_measure.pipeline import HeadCaptureTracker, _depth_mean_diff, compute_head_roi_quality
+from realsense_measure.preprocessing import isolate_subject_by_background_subtraction
+from realsense_measure.registration import compute_rotation_deg, register_rgbd_pair
 from open3d.pipelines.odometry import (
     OdometryOption,
     RGBDOdometryJacobianFromColorTerm,

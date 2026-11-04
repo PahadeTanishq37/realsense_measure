@@ -25,7 +25,7 @@ try:
 except ImportError:
     rs = None
 
-from config import CameraConfig, DepthVisConfig
+from realsense_measure.config import CameraConfig, DepthVisConfig
 
 
 # ---------------------------------------------------------------------------
@@ -263,7 +263,7 @@ class RealSenseCamera:
                 cy=intr.ppy,
             )
             if self.cfg.rotate_90 in ("cw", "ccw"):
-                from camera.rotation import rotate_intrinsics
+                from realsense_measure.camera.rotation import rotate_intrinsics
                 self.intrinsics_o3d = rotate_intrinsics(self.intrinsics_o3d, self.cfg.rotate_90)
         except Exception as exc:
             if self._profile is not None:
@@ -492,7 +492,7 @@ class RealSenseCamera:
             depth_m = cv2.resize(depth_m, (w, h), interpolation=cv2.INTER_NEAREST)
 
         if self.cfg.rotate_90 in ("cw", "ccw"):
-            from camera.rotation import rotate_rgbd_arrays
+            from realsense_measure.camera.rotation import rotate_rgbd_arrays
             color_bgr, depth_m = rotate_rgbd_arrays(color_bgr, depth_m, self.cfg.rotate_90)
 
         return color_bgr, depth_m
@@ -609,7 +609,7 @@ class RealSenseCamera:
                                          interpolation=cv2.INTER_NEAREST)
 
         if self.cfg.rotate_90 in ("cw", "ccw"):
-            from camera.rotation import rotate_rgbd_arrays
+            from realsense_measure.camera.rotation import rotate_rgbd_arrays
             import cv2
             color_bgr, depth_m = rotate_rgbd_arrays(color_bgr, depth_m, self.cfg.rotate_90)
             rot_code = cv2.ROTATE_90_CLOCKWISE if self.cfg.rotate_90 == "cw" else cv2.ROTATE_90_COUNTERCLOCKWISE
@@ -750,7 +750,7 @@ class RealSenseCamera:
             raw_z16 = cv2.resize(raw_z16, (w, h), interpolation=cv2.INTER_NEAREST)
 
         if self.cfg.rotate_90 in ("cw", "ccw"):
-            from camera.rotation import rotate_rgbd_arrays
+            from realsense_measure.camera.rotation import rotate_rgbd_arrays
             import cv2
             color_bgr, filtered_depth_m = rotate_rgbd_arrays(color_bgr, filtered_depth_m, self.cfg.rotate_90)
             _, raw_depth_m = rotate_rgbd_arrays(color_bgr, raw_depth_m, self.cfg.rotate_90)
@@ -795,7 +795,7 @@ class RealSenseCamera:
                 "Ensure start() completed successfully before calling to_point_cloud()."
             )
 
-        from camera.frame import create_pcd_from_rgbd
+        from realsense_measure.camera.frame import create_pcd_from_rgbd
 
         return create_pcd_from_rgbd(
             color_bgr=color_bgr,
@@ -847,8 +847,8 @@ class RealSenseCamera:
             )
 
         import time
-        from camera.frame import RGBDFrame
-        from camera.indexed_pcd import create_indexed_pcd_from_rgbd
+        from realsense_measure.camera.frame import RGBDFrame
+        from realsense_measure.camera.indexed_pcd import create_indexed_pcd_from_rgbd
 
         pcd = self.to_point_cloud(color_bgr, depth_m)
         ts = time.time() if timestamp is None else timestamp

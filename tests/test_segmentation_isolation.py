@@ -18,10 +18,10 @@ import numpy as np
 import open3d as o3d
 import pytest
 
-from camera.frame import RGBDFrame, create_pcd_from_rgbd
-from config import PreprocessConfig, TargetConfig
-from preprocessing import isolate_object, isolate_with_segmentation
-from segmentation import is_model_available
+from realsense_measure.camera.frame import RGBDFrame, create_pcd_from_rgbd
+from realsense_measure.config import PreprocessConfig, TargetConfig
+from realsense_measure.preprocessing import isolate_object, isolate_with_segmentation
+from realsense_measure.segmentation import is_model_available
 
 
 def _make_test_rgbd_frame(
@@ -85,7 +85,7 @@ def test_segmentation_depth_zeroing():
     half_mask = np.zeros((100, 100), dtype=bool)
     half_mask[:, :50] = True
 
-    with patch("segmentation.get_person_mask", return_value=half_mask):
+    with patch("realsense_measure.segmentation.get_person_mask", return_value=half_mask):
         isolated_pcd, method = isolate_with_segmentation(frame, cfg, target_cfg)
 
     assert method == "segmentation"
@@ -109,7 +109,7 @@ def test_segmentation_fragment_merging():
     )
     target_cfg = TargetConfig(name="head", min_object_points=20)
 
-    with patch("segmentation.get_person_mask", return_value=full_mask):
+    with patch("realsense_measure.segmentation.get_person_mask", return_value=full_mask):
         pcd_merged, method = isolate_with_segmentation(frame, cfg_merged, target_cfg)
 
     # With tiny merge radius (0.001m), only primary cluster should be kept
@@ -119,7 +119,7 @@ def test_segmentation_fragment_merging():
         cluster_min_points=20,
         seg_merge_radius_m=0.001,
     )
-    with patch("segmentation.get_person_mask", return_value=full_mask):
+    with patch("realsense_measure.segmentation.get_person_mask", return_value=full_mask):
         pcd_single, _ = isolate_with_segmentation(frame, cfg_single, target_cfg)
 
     assert method == "segmentation"
@@ -136,7 +136,7 @@ def test_segmentation_fallback_on_none_mask():
 
     expected_geo = isolate_object(frame.pcd, cfg, target_cfg)
 
-    with patch("segmentation.get_person_mask", return_value=None):
+    with patch("realsense_measure.segmentation.get_person_mask", return_value=None):
         isolated_pcd, method = isolate_with_segmentation(frame, cfg, target_cfg)
 
     assert method == "geometric_fallback"
@@ -158,7 +158,7 @@ def test_segmentation_fallback_on_insufficient_points():
     tiny_mask = np.zeros((100, 100), dtype=bool)
     tiny_mask[50:55, 50:55] = True
 
-    with patch("segmentation.get_person_mask", return_value=tiny_mask):
+    with patch("realsense_measure.segmentation.get_person_mask", return_value=tiny_mask):
         isolated_pcd, method = isolate_with_segmentation(frame, cfg, target_cfg)
 
     assert method == "geometric_fallback"
@@ -181,7 +181,7 @@ def test_isolation_mode_geometric_unchanged():
 )
 def test_real_model_inference_if_available():
     """Runs actual model inference if the .tflite model exists on disk."""
-    from segmentation import get_person_mask
+    from realsense_measure.segmentation import get_person_mask
 
     dummy_bgr = np.zeros((240, 320, 3), dtype=np.uint8)
     mask = get_person_mask(dummy_bgr)

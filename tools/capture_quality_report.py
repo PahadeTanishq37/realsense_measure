@@ -32,34 +32,24 @@ import cv2
 import numpy as np
 import open3d as o3d
 
-# Ensure repository root and package are on sys.path
-REPO_ROOT = Path(__file__).resolve().parent.parent
-PACKAGE_DIR = REPO_ROOT / "realsense_measure"
-for p in [str(PACKAGE_DIR), str(REPO_ROOT)]:
-    if p not in sys.path:
-        sys.path.insert(0, p)
+from realsense_measure.camera.recording import load_raw_capture
 
 try:
-    from camera.recording import load_raw_capture
-except ImportError:
-    from realsense_measure.camera.recording import load_raw_capture
-
-try:
-    from segmentation import get_person_mask
+    from realsense_measure.segmentation import get_person_mask
     SEGMENTATION_AVAILABLE = True
 except Exception as e:
     SEGMENTATION_AVAILABLE = False
     _seg_err = e
 
 try:
-    import landmarks
+    import realsense_measure.landmarks as landmarks
     LANDMARKS_AVAILABLE = True
 except Exception as e:
     LANDMARKS_AVAILABLE = False
     _landmarks_err = e
 
 try:
-    from registration import compute_rotation_deg, compute_translation_mm
+    from realsense_measure.registration import compute_rotation_deg, compute_translation_mm
 except Exception:
     def compute_translation_mm(T: np.ndarray) -> float:
         return float(np.linalg.norm(T[:3, 3]) * 1000.0)

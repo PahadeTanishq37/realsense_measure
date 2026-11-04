@@ -23,10 +23,10 @@ import numpy as np
 import open3d as o3d
 import pytest
 
-from camera.frame import RGBDFrame
-from config import RegistrationConfig
-import registration
-from registration import (
+from realsense_measure.camera.frame import RGBDFrame
+from realsense_measure.config import RegistrationConfig
+import realsense_measure.registration as registration
+from realsense_measure.registration import (
     build_pose_graph_rgbd,
     register_sequence_rgbd_human,
     optimize_pose_graph,

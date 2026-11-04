@@ -18,8 +18,8 @@ from unittest.mock import patch
 import numpy as np
 import open3d as o3d
 
-from config import RegistrationConfig
-import registration as reg
+from realsense_measure.config import RegistrationConfig
+import realsense_measure.registration as reg
 
 TOL_MM = 3.0
 
@@ -102,7 +102,7 @@ def main() -> int:
             failures.append(f"junk frame / {name}")
 
     # 3) pose-jump bounds scaling for human pose-graph (TASK 3)
-    from camera.frame import RGBDFrame
+    from realsense_measure.camera.frame import RGBDFrame
 
     cfg_jump = RegistrationConfig()
     cfg_jump.max_pose_jump_translation_m = 0.15

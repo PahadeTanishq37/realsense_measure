@@ -12,10 +12,10 @@ import numpy as np
 import open3d as o3d
 import pytest
 
-from camera.frame import RGBDFrame
-from camera.recording import load_raw_capture, save_raw_capture
-from config import HeadCaptureConfig, PipelineConfig
-from pipeline import _draw_hud, compute_head_roi_quality
+from realsense_measure.camera.frame import RGBDFrame
+from realsense_measure.camera.recording import load_raw_capture, save_raw_capture
+from realsense_measure.config import HeadCaptureConfig, PipelineConfig
+from realsense_measure.pipeline import _draw_hud, compute_head_roi_quality
 
 
 def test_gate_pass_nominal():

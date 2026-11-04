@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import numpy as np
 import open3d as o3d
-from targets.head import HeadTarget
+from realsense_measure.targets.head import HeadTarget
 
 
 def create_synthetic_head(
@@ -250,10 +250,10 @@ def test_neck_region_preservation_isolate_register_fuse() -> None:
     print("  Testing Neck-to-Head Preservation through Isolate -> Register -> Fuse Pipeline")
     print("=" * 115)
     import copy
-    from config import PreprocessConfig, RegistrationConfig, TargetConfig
-    from preprocessing import isolate_object
-    from registration import register_frame_pair
-    from reconstruction import fuse_point_clouds
+    from realsense_measure.config import PreprocessConfig, RegistrationConfig, TargetConfig
+    from realsense_measure.preprocessing import isolate_object
+    from realsense_measure.registration import register_frame_pair
+    from realsense_measure.reconstruction import fuse_point_clouds
 
     np.random.seed(42)
     o3d.utility.random.seed(42)

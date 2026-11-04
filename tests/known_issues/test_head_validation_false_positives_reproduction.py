@@ -24,7 +24,7 @@ import numpy as np
 import open3d as o3d
 import pytest
 
-from targets.head import HeadTarget
+from realsense_measure.targets.head import HeadTarget
 from test_head_synthetic import create_synthetic_head
 
 

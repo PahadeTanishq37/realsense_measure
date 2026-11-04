@@ -9,7 +9,7 @@ from __future__ import annotations
 import numpy as np
 import open3d as o3d
 
-from targets.base import Target, register_target
+from realsense_measure.targets.base import Target, register_target
 
 
 @register_target

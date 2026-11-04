@@ -12,7 +12,7 @@ import cv2
 import numpy as np
 import pytest
 
-from camera.realsense_capture import (
+from realsense_measure.camera.realsense_capture import (
     CameraError,
     CameraNotStartedError,
     DEVICE_DISCONNECTED,
@@ -20,7 +20,7 @@ from camera.realsense_capture import (
     RealSenseCamera,
     StreamNegotiationError,
 )
-from config import CameraConfig, DepthVisConfig
+from realsense_measure.config import CameraConfig, DepthVisConfig
 
 
 # ===========================================================================

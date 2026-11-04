@@ -18,9 +18,9 @@ import numpy as np
 import open3d as o3d
 import pytest
 
-from camera.frame import RGBDFrame
-from config import HeadRefinementConfig, PipelineConfig
-from reconstruction import (
+from realsense_measure.camera.frame import RGBDFrame
+from realsense_measure.config import HeadRefinementConfig, PipelineConfig
+from realsense_measure.reconstruction import (
     compute_reconstruction_quality_metrics,
     count_mesh_holes,
     filter_depth_pixel_quality,

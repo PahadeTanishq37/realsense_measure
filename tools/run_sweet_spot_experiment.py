@@ -43,14 +43,6 @@ import cv2
 import numpy as np
 import open3d as o3d
 
-# Ensure repository root and realsense_measure package are on sys.path
-SCRIPT_DIR = Path(__file__).resolve().parent
-REPO_ROOT = SCRIPT_DIR.parent
-PACKAGE_DIR = REPO_ROOT / "realsense_measure"
-for p in [str(REPO_ROOT), str(PACKAGE_DIR)]:
-    if p not in sys.path:
-        sys.path.insert(0, p)
-
 try:
     import pyrealsense2 as rs
     PYREALSENSE_AVAILABLE = True
@@ -58,39 +50,20 @@ except ImportError:
     rs = None
     PYREALSENSE_AVAILABLE = False
 
-try:
-    from config import CameraConfig, PipelineConfig
-except ImportError:
-    from realsense_measure.config import CameraConfig, PipelineConfig
-
-try:
-    from camera.frame import RGBDFrame
-    from camera.realsense_capture import (
-        CameraNotStartedError,
-        DeviceDisconnectedError,
-        RealSenseCamera,
-        StreamNegotiationError,
-    )
-    from camera.rotation import rotate_intrinsics, rotate_rgbd_arrays
-    from diagnostics.temporal_noise import (
-        MatchedPopulationComparison,
-        TemporalNoiseComparison,
-        compare_raw_vs_filtered_noise,
-    )
-except ImportError:
-    from realsense_measure.camera.frame import RGBDFrame
-    from realsense_measure.camera.realsense_capture import (
-        CameraNotStartedError,
-        DeviceDisconnectedError,
-        RealSenseCamera,
-        StreamNegotiationError,
-    )
-    from realsense_measure.camera.rotation import rotate_intrinsics, rotate_rgbd_arrays
-    from realsense_measure.diagnostics.temporal_noise import (
-        MatchedPopulationComparison,
-        TemporalNoiseComparison,
-        compare_raw_vs_filtered_noise,
-    )
+from realsense_measure.config import CameraConfig, PipelineConfig
+from realsense_measure.camera.frame import RGBDFrame
+from realsense_measure.camera.realsense_capture import (
+    CameraNotStartedError,
+    DeviceDisconnectedError,
+    RealSenseCamera,
+    StreamNegotiationError,
+)
+from realsense_measure.camera.rotation import rotate_intrinsics, rotate_rgbd_arrays
+from realsense_measure.diagnostics.temporal_noise import (
+    MatchedPopulationComparison,
+    TemporalNoiseComparison,
+    compare_raw_vs_filtered_noise,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("sweet_spot_runner")
@@ -431,7 +404,7 @@ def extract_evaluation_mask(
 
     # Human subject: try MediaPipe or fallback connected component
     try:
-        from body.capture_motion import extract_subject_mask
+        from realsense_measure.body.capture_motion import extract_subject_mask
         mask = extract_subject_mask(color_bgr, depth_m)
         if mask is not None and np.sum(mask) >= 50:
             return mask

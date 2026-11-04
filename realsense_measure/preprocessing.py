@@ -26,8 +26,8 @@ import cv2
 import numpy as np
 import open3d as o3d
 
-from camera.frame import create_pcd_from_rgbd
-from config import PreprocessConfig, TargetConfig
+from realsense_measure.camera.frame import create_pcd_from_rgbd
+from realsense_measure.config import PreprocessConfig, TargetConfig
 
 
 def downsample_and_denoise(
@@ -369,8 +369,8 @@ def isolate_with_segmentation(
         "segmentation" if the mask path succeeded, "geometric_fallback"
         if we fell back.
     """
-    from camera.frame import RGBDFrame as _RGBDFrame
-    from segmentation import get_person_mask
+    from realsense_measure.camera.frame import RGBDFrame as _RGBDFrame
+    from realsense_measure.segmentation import get_person_mask
 
     min_pts = (target_cfg.min_object_points if target_cfg is not None else 200)
     cam_cfg_min = 0.40
@@ -530,7 +530,7 @@ def isolate_subject_by_background_subtraction(
     fg_mask : np.ndarray
         2D boolean foreground mask (H x W).
     """
-    from camera.frame import create_pcd_from_rgbd
+    from realsense_measure.camera.frame import create_pcd_from_rgbd
 
     d = frame.depth_m
     fg_candidate = (d >= depth_min_m) & (d <= depth_max_m)

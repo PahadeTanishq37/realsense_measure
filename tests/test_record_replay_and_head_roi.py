@@ -25,16 +25,16 @@ import numpy as np
 import open3d as o3d
 import pytest
 
-from camera.frame import RGBDFrame, create_pcd_from_rgbd
-from camera.recording import (
+from realsense_measure.camera.frame import RGBDFrame, create_pcd_from_rgbd
+from realsense_measure.camera.recording import (
     load_raw_capture,
     parse_named_config,
     run_replay_batch,
     save_raw_capture,
 )
-from config import PipelineConfig, RegistrationConfig
-from pipeline import ScanPipeline
-from registration import (
+from realsense_measure.config import PipelineConfig, RegistrationConfig
+from realsense_measure.pipeline import ScanPipeline
+from realsense_measure.registration import (
     PairRegistrationResult,
     create_depth_mask_from_pcd,
     derive_head_roi,
@@ -209,7 +209,7 @@ def test_head_roi_derivation_with_landmarks(monkeypatch: pytest.MonkeyPatch):
         "chin": {"position": chin_point},
     }
 
-    import landmarks
+    import realsense_measure.landmarks as landmarks
     monkeypatch.setattr(landmarks, "detect_face_landmarks_3d", lambda *args, **kwargs: mock_landmarks)
 
     cfg = RegistrationConfig()
@@ -241,7 +241,7 @@ def test_head_roi_derivation_propagation(monkeypatch: pytest.MonkeyPatch):
     frame = _make_dummy_frame()
 
     # Mock landmark detector returning None (e.g. profile or back of head)
-    import landmarks
+    import realsense_measure.landmarks as landmarks
     monkeypatch.setattr(landmarks, "detect_face_landmarks_3d", lambda *args, **kwargs: None)
 
     # Create points around [0.05, -0.02, 0.70]
@@ -283,7 +283,7 @@ def test_head_roi_derivation_fallback(monkeypatch: pytest.MonkeyPatch, caplog: p
     fall back to full cloud and log warning per frame.
     """
     frame = _make_dummy_frame()
-    import landmarks
+    import realsense_measure.landmarks as landmarks
     monkeypatch.setattr(landmarks, "detect_face_landmarks_3d", lambda *args, **kwargs: None)
 
     cfg = RegistrationConfig()
@@ -474,9 +474,9 @@ def test_run_replay_batch_summary_csv(tmp_path: Path, monkeypatch: pytest.Monkey
 
 def test_seeded_replay_reproducibility(tmp_path: Path):
     """Verify that two replay runs with the same random seed produce identical results."""
-    from camera.recording import save_raw_capture
-    from pipeline import ScanPipeline
-    from config import TargetConfig
+    from realsense_measure.camera.recording import save_raw_capture
+    from realsense_measure.pipeline import ScanPipeline
+    from realsense_measure.config import TargetConfig
 
     frames = [_make_dummy_frame(i, timestamp=100.0 + i * 2.0) for i in range(3)]
     raw_dir = tmp_path / "raw"

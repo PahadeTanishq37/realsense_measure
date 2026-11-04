@@ -15,8 +15,8 @@ import cv2
 import numpy as np
 import open3d as o3d
 
-from config import HeadRefinementConfig, PreprocessConfig
-from preprocessing import downsample_and_denoise, extract_largest_cluster
+from realsense_measure.config import HeadRefinementConfig, PreprocessConfig
+from realsense_measure.preprocessing import downsample_and_denoise, extract_largest_cluster
 
 logger = logging.getLogger(__name__)
 

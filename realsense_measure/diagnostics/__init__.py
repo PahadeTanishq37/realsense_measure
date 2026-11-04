@@ -7,22 +7,13 @@ and capture quality assessment.
 
 from __future__ import annotations
 
-try:
-    from realsense_measure.diagnostics.temporal_noise import (
-        MatchedPopulationComparison,
-        SingleStreamNoiseMetrics,
-        TemporalNoiseComparison,
-        compare_raw_vs_filtered_noise,
-        compute_temporal_depth_noise,
-    )
-except ImportError:
-    from diagnostics.temporal_noise import (
-        MatchedPopulationComparison,
-        SingleStreamNoiseMetrics,
-        TemporalNoiseComparison,
-        compare_raw_vs_filtered_noise,
-        compute_temporal_depth_noise,
-    )
+from realsense_measure.diagnostics.temporal_noise import (
+    MatchedPopulationComparison,
+    SingleStreamNoiseMetrics,
+    TemporalNoiseComparison,
+    compare_raw_vs_filtered_noise,
+    compute_temporal_depth_noise,
+)
 
 __all__ = [
     "SingleStreamNoiseMetrics",

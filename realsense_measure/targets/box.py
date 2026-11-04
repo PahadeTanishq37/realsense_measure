@@ -10,9 +10,9 @@ from __future__ import annotations
 import numpy as np
 import open3d as o3d
 
-from config import PreprocessConfig
-from preprocessing import extract_largest_cluster, remove_dominant_plane
-from targets.base import Target, register_target
+from realsense_measure.config import PreprocessConfig
+from realsense_measure.preprocessing import extract_largest_cluster, remove_dominant_plane
+from realsense_measure.targets.base import Target, register_target
 
 
 def _fit_plane_rms_mm(pts: np.ndarray) -> float:
@@ -164,7 +164,7 @@ class BoxTarget(Target):
             Box points only.  Falls back to the input cloud if plane removal
             produces an empty result.
         """
-        from config import TargetConfig
+        from realsense_measure.config import TargetConfig
         target_cfg = TargetConfig()
         no_plane, _ = remove_dominant_plane(pcd, self.cfg, target_cfg=target_cfg)
 

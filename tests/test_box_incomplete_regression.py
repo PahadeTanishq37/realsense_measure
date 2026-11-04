@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import numpy as np
 import open3d as o3d
-from targets.box import BoxTarget
+from realsense_measure.targets.box import BoxTarget
 
 
 def run_tests() -> bool:

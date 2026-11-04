@@ -21,9 +21,9 @@ import numpy as np
 import open3d as o3d
 import pytest
 
-from config import PipelineConfig, TargetConfig
-from pipeline import ScanPipeline
-from targets.box import BoxTarget
+from realsense_measure.config import PipelineConfig, TargetConfig
+from realsense_measure.pipeline import ScanPipeline
+from realsense_measure.targets.box import BoxTarget
 from test_head_synthetic import create_synthetic_head
 
 

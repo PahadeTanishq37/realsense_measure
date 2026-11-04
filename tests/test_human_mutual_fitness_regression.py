@@ -19,9 +19,9 @@ import numpy as np
 import open3d as o3d
 import pytest
 
-from camera.frame import RGBDFrame
-from config import RegistrationConfig
-from registration import compute_mutual_fitness, register_rgbd_pair
+from realsense_measure.camera.frame import RGBDFrame
+from realsense_measure.config import RegistrationConfig
+from realsense_measure.registration import compute_mutual_fitness, register_rgbd_pair
 from test_head_synthetic import create_synthetic_head
 
 

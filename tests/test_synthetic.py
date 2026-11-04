@@ -19,11 +19,11 @@ import copy
 import numpy as np
 import open3d as o3d
 
-from config import PreprocessConfig, RegistrationConfig, TargetConfig
-from preprocessing import isolate_object
-from reconstruction import fuse_point_clouds
-from registration import register_sequence
-from targets.box import BoxTarget
+from realsense_measure.config import PreprocessConfig, RegistrationConfig, TargetConfig
+from realsense_measure.preprocessing import isolate_object
+from realsense_measure.reconstruction import fuse_point_clouds
+from realsense_measure.registration import register_sequence
+from realsense_measure.targets.box import BoxTarget
 
 # ---------------------------------------------------------------------------
 # Ground-truth box dimensions (metres)

@@ -14,8 +14,8 @@ from pathlib import Path
 import numpy as np
 import open3d as o3d
 
-from config import PipelineConfig, TargetConfig, CameraConfig
-from pipeline import ScanPipeline
+from realsense_measure.config import PipelineConfig, TargetConfig, CameraConfig
+from realsense_measure.pipeline import ScanPipeline
 from test_head_synthetic import create_synthetic_head
 
 

@@ -1,11 +1,11 @@
 # camera/__init__.py
-from camera.frame import RGBDFrame
-from camera.indexed_pcd import (
+from realsense_measure.camera.frame import RGBDFrame
+from realsense_measure.camera.indexed_pcd import (
     FrameMetadata,
     IndexedPointCloud,
     create_indexed_pcd_from_rgbd,
 )
-from camera.realsense_capture import (
+from realsense_measure.camera.realsense_capture import (
     CameraError,
     CameraNotStartedError,
     DeviceDisconnectedError,

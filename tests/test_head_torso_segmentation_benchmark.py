@@ -27,7 +27,7 @@ import open3d as o3d
 import pytest
 from scipy.spatial import cKDTree
 
-from targets.head import HeadTarget
+from realsense_measure.targets.head import HeadTarget
 
 
 # ===========================================================================

@@ -35,8 +35,8 @@ from tools.realsense_hardware_smoke_test import (
     save_smoke_test_recording,
     validate_stream_dimensions,
 )
-from config import CameraConfig
-from camera.recording import load_raw_capture
+from realsense_measure.config import CameraConfig
+from realsense_measure.camera.recording import load_raw_capture
 
 
 # ===========================================================================

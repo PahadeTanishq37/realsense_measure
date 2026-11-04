@@ -28,9 +28,9 @@ import sys
 import numpy as np
 import open3d as o3d
 
-from camera.frame import RGBDFrame
-from config import RegistrationConfig, PreprocessConfig
-from registration import (
+from realsense_measure.camera.frame import RGBDFrame
+from realsense_measure.config import RegistrationConfig, PreprocessConfig
+from realsense_measure.registration import (
     register_rgbd_pair,
     register_sequence_rgbd_human,
     rigid_transform_from_correspondences,
@@ -38,7 +38,7 @@ from registration import (
     compute_translation_mm,
     check_pose_jump_gate,
 )
-from reconstruction import fuse_tsdf_volume
+from realsense_measure.reconstruction import fuse_tsdf_volume
 
 
 def make_synthetic_scene():
@@ -489,7 +489,7 @@ def test_g_multi_frame_skip_recovery():
 # ===========================================================================
 def test_h_loop_closure_fitness_threshold():
     print("\n--- Test H: Non-Consecutive Loop Closure Fitness Threshold Gating (0.65) ---")
-    from registration import build_pose_graph_rgbd
+    from realsense_measure.registration import build_pose_graph_rgbd
     from open3d.pipelines.registration import PoseGraph
 
     mesh = make_synthetic_scene()
@@ -567,7 +567,7 @@ def test_i_non_overlapping_pair_colored_icp_skip():
 
     # 1. Verify pre-check skips Colored ICP and logs the overlap failure without raising
     import logging
-    reg_logger = logging.getLogger("registration")
+    reg_logger = logging.getLogger("realsense_measure.registration")
     log_stream = io.StringIO()
     handler = logging.StreamHandler(log_stream)
     reg_logger.addHandler(handler)
@@ -600,7 +600,7 @@ def test_i_non_overlapping_pair_colored_icp_skip():
     f2 = render_synthetic_rgbd_frame(scene, np.eye(4), 2, intr, intr_tensor)
     f3 = render_synthetic_rgbd_frame(scene, np.eye(4), 3, intr, intr_tensor)
     
-    import registration
+    import realsense_measure.registration as registration
     orig_colored_icp = registration.registration_colored_icp
 
     def mock_colored_icp_raise(*args, **kwargs):
@@ -641,8 +641,8 @@ def test_j_glasses_weighted_kabsch_and_dense_sanity():
           rather than accepting a corrupted seed.
     """
     print("\n--- Test J: Subject with Glasses (Weighted Kabsch & Dense Sanity) ---")
-    from registration import rigid_transform_from_correspondences, register_rgbd_pair
-    from landmarks import LANDMARK_INDICES
+    from realsense_measure.registration import rigid_transform_from_correspondences, register_rgbd_pair
+    from realsense_measure.landmarks import LANDMARK_INDICES
 
     # Ground truth transform
     R_gt = o3d.geometry.get_rotation_matrix_from_xyz((np.radians(6.0), np.radians(-4.0), np.radians(5.0)))
@@ -747,7 +747,7 @@ def test_j_glasses_weighted_kabsch_and_dense_sanity():
         p_b = bogus_R.T @ d_val["position"]
         bogus_src_lm[name] = {"position": p_b, "valid_ratio": 1.0, "variance": 1e-6, "low_confidence": False}
 
-    import landmarks
+    import realsense_measure.landmarks as landmarks
     orig_detect = landmarks.detect_face_landmarks_3d
 
     def mock_detect(color, depth, intrinsics, **kwargs):
@@ -860,7 +860,7 @@ def test_k_systematic_bias_fpfh_crosscheck():
     assert glob_eval.fitness >= 0.30, "Global dense fitness would deceptively pass without cross-checks"
 
     # 3. Assert cross-check detects disagreement and triggers fallthrough to Tier 2
-    import landmarks
+    import realsense_measure.landmarks as landmarks
     orig_detect = landmarks.detect_face_landmarks_3d
 
     def mock_detect(color, depth, intrinsics, **kwargs):
@@ -961,7 +961,7 @@ def test_l_profile_transition_rejection_cascade():
 
     # Step 1: Demonstrate that rear frames 4 and 5 have sufficient local geometric
     # overlap with their immediate predecessors when tested directly.
-    import registration
+    import realsense_measure.registration as registration
     res_4_to_3 = registration.register_rgbd_pair(frames[4], frames[3], cfg)
     res_5_to_4 = registration.register_rgbd_pair(frames[5], frames[4], cfg)
     print(f"  Pre-check: pair 4->3 direct registration: accepted={res_4_to_3[3]}, method={res_4_to_3[4]}, fitness={res_4_to_3[1]:.2f}")
@@ -1050,8 +1050,8 @@ def test_m_structured_residuals_threading():
     3. pipeline.py stage 4 fusion uses structured residuals directly.
     """
     print("\n--- Test M: Structured Residual Threading ---")
-    import registration
-    from registration import PairRegistrationResult, build_pose_graph_rgbd, register_sequence_rgbd_human
+    import realsense_measure.registration as registration
+    from realsense_measure.registration import PairRegistrationResult, build_pose_graph_rgbd, register_sequence_rgbd_human
 
     # 1. Test PairRegistrationResult
     T_dummy = np.eye(4)

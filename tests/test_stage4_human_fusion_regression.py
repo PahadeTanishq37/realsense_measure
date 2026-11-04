@@ -17,9 +17,9 @@ import numpy as np
 import open3d as o3d
 import pytest
 
-from config import PipelineConfig, PreprocessConfig, TargetConfig
-from pipeline import ScanPipeline
-from reconstruction import fuse_point_clouds
+from realsense_measure.config import PipelineConfig, PreprocessConfig, TargetConfig
+from realsense_measure.pipeline import ScanPipeline
+from realsense_measure.reconstruction import fuse_point_clouds
 
 
 def _create_synthetic_dense_with_sparse_flank() -> list[o3d.geometry.PointCloud]:
@@ -258,8 +258,8 @@ def test_streak_removal_removes_streaks_preserves_sparse_isotropic():
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(all_pts)
 
-    from config import RegistrationConfig
-    from reconstruction import fuse_point_clouds
+    from realsense_measure.config import RegistrationConfig
+    from realsense_measure.reconstruction import fuse_point_clouds
 
     cfg = PreprocessConfig(voxel_size_m=0.004, outlier_neighbors=20, outlier_std_ratio=1.5)
     reg_cfg = RegistrationConfig(

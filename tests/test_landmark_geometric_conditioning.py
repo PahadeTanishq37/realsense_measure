@@ -26,8 +26,8 @@ import numpy as np
 import open3d as o3d
 import pytest
 
-from config import RegistrationConfig
-from registration import (
+from realsense_measure.config import RegistrationConfig
+from realsense_measure.registration import (
     check_landmark_geometric_conditioning,
     compute_rotation_deg,
     evaluate_point_set_geometry,
@@ -92,9 +92,9 @@ def test_1_well_distributed_landmarks_accepted(default_cfg, well_distributed_lan
     pcd, color, depth, intr = _make_dummy_frame_data()
     mock_rigid = MagicMock(return_value=(np.eye(4), 1.0))
 
-    with patch("landmarks.detect_face_landmarks_3d", side_effect=[well_distributed_landmarks, well_distributed_landmarks]), \
-         patch("registration.rigid_transform_from_correspondences", mock_rigid), \
-         patch("registration.register_frame_pair", return_value=(np.eye(4), 0.5, 0.001)):
+    with patch("realsense_measure.landmarks.detect_face_landmarks_3d", side_effect=[well_distributed_landmarks, well_distributed_landmarks]), \
+         patch("realsense_measure.registration.rigid_transform_from_correspondences", mock_rigid), \
+         patch("realsense_measure.registration.register_frame_pair", return_value=(np.eye(4), 0.5, 0.001)):
 
         register_frame_pair_landmark_guided(pcd, color, depth, pcd, color, depth, intr, default_cfg)
 
@@ -128,9 +128,9 @@ def test_2_collinear_midline_landmarks_rejected(default_cfg):
     mock_rigid = MagicMock(return_value=(np.eye(4), 0.5))
     mock_fallback = MagicMock(return_value=(np.eye(4), 0.7, 0.002))
 
-    with patch("landmarks.detect_face_landmarks_3d", side_effect=[collinear_lm, collinear_lm]), \
-         patch("registration.rigid_transform_from_correspondences", mock_rigid), \
-         patch("registration.register_frame_pair", mock_fallback):
+    with patch("realsense_measure.landmarks.detect_face_landmarks_3d", side_effect=[collinear_lm, collinear_lm]), \
+         patch("realsense_measure.registration.rigid_transform_from_correspondences", mock_rigid), \
+         patch("realsense_measure.registration.register_frame_pair", mock_fallback):
 
         T, fit, rmse, method, res_mm = register_frame_pair_landmark_guided(
             pcd, color, depth, pcd, color, depth, intr, default_cfg
@@ -297,9 +297,9 @@ def test_7_missing_landmarks_insufficient_spread_fallback(default_cfg):
     mock_rigid = MagicMock()
     mock_fallback = MagicMock(return_value=(np.eye(4), 0.6, 0.002))
 
-    with patch("landmarks.detect_face_landmarks_3d", side_effect=[tiny_lm, tiny_lm]), \
-         patch("registration.rigid_transform_from_correspondences", mock_rigid), \
-         patch("registration.register_frame_pair", mock_fallback):
+    with patch("realsense_measure.landmarks.detect_face_landmarks_3d", side_effect=[tiny_lm, tiny_lm]), \
+         patch("realsense_measure.registration.rigid_transform_from_correspondences", mock_rigid), \
+         patch("realsense_measure.registration.register_frame_pair", mock_fallback):
 
         T, fit, rmse, method, res_mm = register_frame_pair_landmark_guided(
             pcd, color, depth, pcd, color, depth, intr, default_cfg
@@ -351,9 +351,9 @@ def test_8_deceptively_low_residual_rejected_before_kabsch(default_cfg):
     mock_rigid = MagicMock()
     mock_fallback = MagicMock(return_value=(np.eye(4), 0.75, 0.002))
 
-    with patch("landmarks.detect_face_landmarks_3d", side_effect=[src_lm, dst_lm]), \
-         patch("registration.rigid_transform_from_correspondences", mock_rigid), \
-         patch("registration.register_frame_pair", mock_fallback):
+    with patch("realsense_measure.landmarks.detect_face_landmarks_3d", side_effect=[src_lm, dst_lm]), \
+         patch("realsense_measure.registration.rigid_transform_from_correspondences", mock_rigid), \
+         patch("realsense_measure.registration.register_frame_pair", mock_fallback):
 
         T, fit, rmse, method, res_mm = register_frame_pair_landmark_guided(
             pcd, color, depth, pcd, color, depth, intr, default_cfg
@@ -408,9 +408,9 @@ def test_10_disable_conditioning_gate_via_config(default_cfg, well_distributed_l
     pcd, color, depth, intr = _make_dummy_frame_data()
     mock_rigid = MagicMock(return_value=(np.eye(4), 0.5))
 
-    with patch("landmarks.detect_face_landmarks_3d", side_effect=[collinear_lm, collinear_lm]), \
-         patch("registration.rigid_transform_from_correspondences", mock_rigid), \
-         patch("registration.register_frame_pair", return_value=(np.eye(4), 0.5, 0.001)):
+    with patch("realsense_measure.landmarks.detect_face_landmarks_3d", side_effect=[collinear_lm, collinear_lm]), \
+         patch("realsense_measure.registration.rigid_transform_from_correspondences", mock_rigid), \
+         patch("realsense_measure.registration.register_frame_pair", return_value=(np.eye(4), 0.5, 0.001)):
 
         register_frame_pair_landmark_guided(pcd, color, depth, pcd, color, depth, intr, default_cfg)
 

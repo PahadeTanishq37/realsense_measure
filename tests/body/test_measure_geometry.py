@@ -27,10 +27,6 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-# Make sure the package is on the path (conftest handles it, but be safe)
-_REPO = Path(__file__).resolve().parent.parent.parent
-sys.path.insert(0, str(_REPO))
-sys.path.insert(0, str(_REPO / "realsense_measure"))
 
 from realsense_measure.body.measure import (
     Measurement,

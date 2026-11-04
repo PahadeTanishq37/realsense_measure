@@ -18,10 +18,10 @@ import numpy as np
 import open3d as o3d
 import pytest
 
-from config import PipelineConfig
-from camera.recording import load_raw_capture
-from camera.rotation import rotate_intrinsics, rotate_rgbd_arrays
-from diagnostics.temporal_noise import (
+from realsense_measure.config import PipelineConfig
+from realsense_measure.camera.recording import load_raw_capture
+from realsense_measure.camera.rotation import rotate_intrinsics, rotate_rgbd_arrays
+from realsense_measure.diagnostics.temporal_noise import (
     MatchedPopulationComparison,
     SingleStreamNoiseMetrics,
     TemporalNoiseComparison,

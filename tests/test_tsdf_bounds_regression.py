@@ -16,8 +16,8 @@ from dataclasses import dataclass
 import numpy as np
 import open3d as o3d
 
-from config import PreprocessConfig
-from reconstruction import fuse_tsdf_volume
+from realsense_measure.config import PreprocessConfig
+from realsense_measure.reconstruction import fuse_tsdf_volume
 
 
 @dataclass

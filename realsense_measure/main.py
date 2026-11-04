@@ -42,8 +42,8 @@ from pathlib import Path
 
 logger = logging.getLogger("realsense_measure")
 
-from config import PipelineConfig
-from pipeline import ScanPipeline
+from realsense_measure.config import PipelineConfig
+from realsense_measure.pipeline import ScanPipeline
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -359,7 +359,7 @@ def main() -> None:
 
     # If --replay-batch is specified, execute batch runs and exit cleanly
     if args.replay_batch is not None:
-        from camera.recording import run_replay_batch
+        from realsense_measure.camera.recording import run_replay_batch
         configs = args.configs if args.configs else ["baseline", "multiway+tsdf", "head_only+multiway+tsdf"]
         run_replay_batch(
             raw_dir=args.replay_batch,
@@ -410,10 +410,7 @@ def main() -> None:
             cfg.save_raw_dir = cfg.output_dir / "raw_capture"
 
     if args.subject_id:
-        try:
-            from realsense_measure.body.capture_session import validate_anonymous_subject_id
-        except ImportError:
-            from body.capture_session import validate_anonymous_subject_id
+        from realsense_measure.body.capture_session import validate_anonymous_subject_id
         validate_anonymous_subject_id(args.subject_id)
         cfg.subject_id = args.subject_id
     if args.session_id:

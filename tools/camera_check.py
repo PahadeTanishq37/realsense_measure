@@ -21,16 +21,8 @@ import cv2
 import numpy as np
 import open3d as o3d
 
-import sys
-from pathlib import Path
-REPO_ROOT = Path(__file__).resolve().parent.parent
-PACKAGE_DIR = REPO_ROOT / 'realsense_measure'
-for p in [str(PACKAGE_DIR), str(REPO_ROOT)]:
-    if p not in sys.path:
-        sys.path.insert(0, p)
-
-from config import CameraConfig
-from camera.realsense_capture import RealSenseCamera
+from realsense_measure.config import CameraConfig
+from realsense_measure.camera.realsense_capture import RealSenseCamera
 
 
 def main():

@@ -16,7 +16,7 @@ import numpy as np
 import open3d as o3d
 
 if TYPE_CHECKING:
-    from camera.indexed_pcd import IndexedPointCloud
+    from realsense_measure.camera.indexed_pcd import IndexedPointCloud
 
 
 @dataclass
@@ -142,7 +142,7 @@ class RGBDFrame:
         """
         Compute or retrieve provenance-preserving IndexedPointCloud from color and depth.
         """
-        from camera.indexed_pcd import create_indexed_pcd_from_rgbd
+        from realsense_measure.camera.indexed_pcd import create_indexed_pcd_from_rgbd
 
         effective_mask = self.foreground_mask if mask is None else mask
         return create_indexed_pcd_from_rgbd(

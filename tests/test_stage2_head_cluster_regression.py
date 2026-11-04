@@ -19,8 +19,8 @@ import numpy as np
 import open3d as o3d
 import pytest
 
-from config import PreprocessConfig, TargetConfig
-from preprocessing import extract_plausible_cluster
+from realsense_measure.config import PreprocessConfig, TargetConfig
+from realsense_measure.preprocessing import extract_plausible_cluster
 
 
 def _make_head_cluster(

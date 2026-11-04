@@ -73,8 +73,8 @@ from open3d.pipelines.registration import (
     registration_icp,
     registration_ransac_based_on_feature_matching,
 )
-from camera.frame import RGBDFrame
-from config import RegistrationConfig
+from realsense_measure.camera.frame import RGBDFrame
+from realsense_measure.config import RegistrationConfig
 
 
 def rigid_transform_from_correspondences(
@@ -640,7 +640,7 @@ def register_frame_pair_landmark_guided(
         (transform, fitness, rmse, method, residual_mm) supporting 5-tuple unpacking
         and carrying trans_disagree_mm and rot_disagree_deg.
     """
-    from landmarks import detect_face_landmarks_3d
+    from realsense_measure.landmarks import detect_face_landmarks_3d
 
     lm_cfg = cfg.landmark_cfg
     src_lm = detect_face_landmarks_3d(source_color, source_depth, intrinsics_o3d, cfg=lm_cfg)
@@ -1296,7 +1296,7 @@ def derive_head_roi(
         and hasattr(frame, "intrinsics") and frame.intrinsics is not None
     ):
         try:
-            from landmarks import detect_face_landmarks_3d
+            from realsense_measure.landmarks import detect_face_landmarks_3d
             lm_cfg = cfg.landmark_cfg
             lm_dict = detect_face_landmarks_3d(frame.color_bgr, frame.depth_m, frame.intrinsics, cfg=lm_cfg)
             if lm_dict is not None and len(lm_dict) >= 4:

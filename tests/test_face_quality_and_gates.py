@@ -19,11 +19,11 @@ import numpy as np
 import open3d as o3d
 import pytest
 
-from camera.frame import RGBDFrame
-from camera.realsense_capture import RealSenseCamera, StreamNegotiationError
-from config import CameraConfig, PipelineConfig, RegistrationConfig, TargetConfig
-from main import _build_parser
-from pipeline import ScanPipeline
+from realsense_measure.camera.frame import RGBDFrame
+from realsense_measure.camera.realsense_capture import RealSenseCamera, StreamNegotiationError
+from realsense_measure.config import CameraConfig, PipelineConfig, RegistrationConfig, TargetConfig
+from realsense_measure.main import _build_parser
+from realsense_measure.pipeline import ScanPipeline
 
 
 # ===========================================================================
@@ -105,7 +105,7 @@ class TestRealSenseCaptureFaceQuality:
     def test_spatial_filter_magnitude_adjusted_in_face_quality_mode(self):
         """Spatial filter magnitude is lowered to 1.0 when human_face_quality_mode is True."""
         mock_rs = MagicMock()
-        with patch("camera.realsense_capture.rs", mock_rs):
+        with patch("realsense_measure.camera.realsense_capture.rs", mock_rs):
             cfg_default = CameraConfig(human_face_quality_mode=False)
             RealSenseCamera(cfg_default)
             # Find spatial filter call
@@ -139,7 +139,7 @@ class TestRealSenseCaptureFaceQuality:
         # First call fails (1280x720), second call succeeds (848x480)
         start_mock = MagicMock(side_effect=[RuntimeError("Unsupported 1280x720 format"), mock_profile])
 
-        with patch("camera.realsense_capture.rs", mock_rs):
+        with patch("realsense_measure.camera.realsense_capture.rs", mock_rs):
             cfg = CameraConfig(width=1280, height=720, human_face_quality_mode=True)
             cam = RealSenseCamera(cfg)
             cam.pipeline.start = start_mock

@@ -12,9 +12,9 @@ import numpy as np
 import open3d as o3d
 from scipy.spatial import cKDTree
 
-from config import PreprocessConfig
-from preprocessing import extract_largest_cluster
-from targets.base import Target, register_target
+from realsense_measure.config import PreprocessConfig
+from realsense_measure.preprocessing import extract_largest_cluster
+from realsense_measure.targets.base import Target, register_target
 
 
 def _sanitize_points(pts: np.ndarray) -> np.ndarray:

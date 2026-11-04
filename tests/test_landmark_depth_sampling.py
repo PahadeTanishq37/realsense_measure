@@ -26,9 +26,9 @@ import numpy as np
 import open3d as o3d
 import pytest
 
-from config import LandmarkConfig, RegistrationConfig
-from landmarks import LANDMARK_INDICES, detect_face_landmarks_3d
-from registration import register_frame_pair_landmark_guided
+from realsense_measure.config import LandmarkConfig, RegistrationConfig
+from realsense_measure.landmarks import LANDMARK_INDICES, detect_face_landmarks_3d
+from realsense_measure.registration import register_frame_pair_landmark_guided
 
 
 class MockNormalizedLandmark:
@@ -78,7 +78,7 @@ def test_non_finite_and_invalid_depth_exclusion(pinhole_intrinsics):
     color_bgr = np.zeros((h, w, 3), dtype=np.uint8)
     mock_face = _build_mock_face(w, h, {"nose_tip": (px, py)})
 
-    with patch("landmarks._get_landmarker", return_value=_create_mock_landmarker(mock_face)):
+    with patch("realsense_measure.landmarks._get_landmarker", return_value=_create_mock_landmarker(mock_face)):
         result = detect_face_landmarks_3d(color_bgr, depth_m, pinhole_intrinsics, quiet=True)
 
     assert result is not None
@@ -107,7 +107,7 @@ def test_step_edge_foreground_vs_background_center(pinhole_intrinsics):
     ], dtype=np.float32)
 
     mock_face = _build_mock_face(w, h, {"nose_tip": (px, py)})
-    with patch("landmarks._get_landmarker", return_value=_create_mock_landmarker(mock_face)):
+    with patch("realsense_measure.landmarks._get_landmarker", return_value=_create_mock_landmarker(mock_face)):
         result_a = detect_face_landmarks_3d(color_bgr, depth_a, pinhole_intrinsics, quiet=True)
 
     assert result_a is not None and "nose_tip" in result_a
@@ -124,7 +124,7 @@ def test_step_edge_foreground_vs_background_center(pinhole_intrinsics):
         [1.80, 1.80, 1.80],
     ], dtype=np.float32)
 
-    with patch("landmarks._get_landmarker", return_value=_create_mock_landmarker(mock_face)):
+    with patch("realsense_measure.landmarks._get_landmarker", return_value=_create_mock_landmarker(mock_face)):
         result_b = detect_face_landmarks_3d(color_bgr, depth_b, pinhole_intrinsics, quiet=True)
 
     # Must REJECT the landmark because center belongs to the farther cluster at a discontinuity
@@ -148,7 +148,7 @@ def test_invalid_center_depth_scenarios(pinhole_intrinsics):
         [1.80, 1.80, 1.80],
     ], dtype=np.float32)
 
-    with patch("landmarks._get_landmarker", return_value=_create_mock_landmarker(mock_face)):
+    with patch("realsense_measure.landmarks._get_landmarker", return_value=_create_mock_landmarker(mock_face)):
         res_wall = detect_face_landmarks_3d(color_bgr, depth_wall, pinhole_intrinsics, quiet=True)
 
     # Must NOT fabricate a 3D landmark on the wall when center is invalid with no face cluster!
@@ -162,7 +162,7 @@ def test_invalid_center_depth_scenarios(pinhole_intrinsics):
         [1.75, 1.75, 1.75],
     ], dtype=np.float32)
 
-    with patch("landmarks._get_landmarker", return_value=_create_mock_landmarker(mock_face)):
+    with patch("realsense_measure.landmarks._get_landmarker", return_value=_create_mock_landmarker(mock_face)):
         res_mixed = detect_face_landmarks_3d(color_bgr, depth_mixed, pinhole_intrinsics, quiet=True)
 
     assert res_mixed is not None and "chin" in res_mixed
@@ -178,7 +178,7 @@ def test_invalid_center_depth_scenarios(pinhole_intrinsics):
         [1.80, 1.80, 1.80],
     ], dtype=np.float32)
 
-    with patch("landmarks._get_landmarker", return_value=_create_mock_landmarker(mock_face)):
+    with patch("realsense_measure.landmarks._get_landmarker", return_value=_create_mock_landmarker(mock_face)):
         res_spike = detect_face_landmarks_3d(color_bgr, depth_spike, pinhole_intrinsics, quiet=True)
 
     # Single pixel is unreliable; must be rejected
@@ -194,7 +194,7 @@ def test_patch_with_no_usable_depth(pinhole_intrinsics):
     color_bgr = np.zeros((h, w, 3), dtype=np.uint8)
     mock_face = _build_mock_face(w, h, {"nose_tip": (320, 240)})
 
-    with patch("landmarks._get_landmarker", return_value=_create_mock_landmarker(mock_face)):
+    with patch("realsense_measure.landmarks._get_landmarker", return_value=_create_mock_landmarker(mock_face)):
         result = detect_face_landmarks_3d(color_bgr, depth_m, pinhole_intrinsics, quiet=True)
 
     assert result is None
@@ -209,7 +209,7 @@ def test_production_registration_variance_weighting():
     Intercepts the weights passed to rigid_transform_from_correspondences()
     to verify actual production code behavior.
     """
-    import registration
+    import realsense_measure.registration as registration
 
     captured_weights = {}
 
@@ -249,9 +249,9 @@ def test_production_registration_variance_weighting():
     dummy_depth = np.ones((10, 10), dtype=np.float32)
     intr = o3d.camera.PinholeCameraIntrinsic(10, 10, 10.0, 10.0, 5.0, 5.0)
 
-    with patch("registration.rigid_transform_from_correspondences", side_effect=spy_rigid), \
-         patch("landmarks.detect_face_landmarks_3d", side_effect=[src_landmarks, dst_landmarks]), \
-         patch("registration.register_frame_pair", return_value=(np.eye(4), 0.5, 0.001)):
+    with patch("realsense_measure.registration.rigid_transform_from_correspondences", side_effect=spy_rigid), \
+         patch("realsense_measure.landmarks.detect_face_landmarks_3d", side_effect=[src_landmarks, dst_landmarks]), \
+         patch("realsense_measure.registration.register_frame_pair", return_value=(np.eye(4), 0.5, 0.001)):
 
         register_frame_pair_landmark_guided(
             source_pcd=dummy_pcd,
@@ -303,8 +303,8 @@ def test_production_registration_reduced_correspondences_safety():
         "chin": {"position": np.array([0.0, -0.08, 0.5]), "valid_ratio": 1.0, "variance": 1e-6, "low_confidence": False},
     }
 
-    with patch("landmarks.detect_face_landmarks_3d", side_effect=[sparse_lm, sparse_lm]), \
-         patch("registration.register_frame_pair", return_value=(np.eye(4), 0.5, 0.001)):
+    with patch("realsense_measure.landmarks.detect_face_landmarks_3d", side_effect=[sparse_lm, sparse_lm]), \
+         patch("realsense_measure.registration.register_frame_pair", return_value=(np.eye(4), 0.5, 0.001)):
 
         T, fit, rmse, method, res_mm = register_frame_pair_landmark_guided(
             source_pcd=dummy_pcd,
@@ -335,7 +335,7 @@ def test_output_compatibility_all_13_landmarks(pinhole_intrinsics):
     }
     mock_face = _build_mock_face(w, h, coords)
 
-    with patch("landmarks._get_landmarker", return_value=_create_mock_landmarker(mock_face)):
+    with patch("realsense_measure.landmarks._get_landmarker", return_value=_create_mock_landmarker(mock_face)):
         result = detect_face_landmarks_3d(color_bgr, depth_m, pinhole_intrinsics, quiet=True)
 
     assert result is not None
