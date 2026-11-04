@@ -6,7 +6,7 @@ Verifies robust box computation rejects outliers without GUI.
 import numpy as np
 import open3d as o3d
 import pytest
-from visualizer import compute_robust_bounding_box, frame_view
+from realsense_measure.visualizer import compute_robust_bounding_box, frame_view
 
 
 def test_robust_bounding_box_outlier_rejection():
