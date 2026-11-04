@@ -15,7 +15,7 @@ from .capture_session import (
 )
 from .capture_motion import (
     evaluate_burst_stillness,
-    StillnessResult,
+    BurstMotionResult,
 )
 from .hardware_smoke_test import (
     CollisionError,
@@ -34,7 +34,7 @@ __all__ = [
     "CaptureQualityChecker",
     "CaptureSessionManifest",
     "evaluate_burst_stillness",
-    "StillnessResult",
+    "BurstMotionResult",
     "CollisionError",
     "check_capture_collision",
 ]
