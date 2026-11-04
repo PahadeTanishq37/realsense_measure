@@ -1,0 +1,231 @@
+"""
+realsense_measure/fullbody/keypoints.py
+
+Swappable 2D keypoint detection (KeypointDetector protocol),
+MediaPipePose backend, and robust 3D keypoint lifting via local depth window.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Dict, List, Optional, Protocol, Tuple, runtime_checkable
+
+import cv2
+import numpy as np
+import open3d as o3d
+
+from realsense_measure.fullbody.config import FullBodyConfig
+from realsense_measure.fullbody.types import Keypoints3D
+
+logger = logging.getLogger(__name__)
+
+# Core anatomical keypoints used across alignment, segmentation, and anthropometry
+CORE_LANDMARK_NAMES = [
+    "nose",
+    "left_eye", "right_eye",
+    "left_ear", "right_ear",
+    "left_shoulder", "right_shoulder",
+    "left_elbow", "right_elbow",
+    "left_wrist", "right_wrist",
+    "left_hip", "right_hip",
+    "left_knee", "right_knee",
+    "left_ankle", "right_ankle",
+    "left_heel", "right_heel",
+    "left_foot_index", "right_foot_index",
+]
+
+
+@runtime_checkable
+class KeypointDetector(Protocol):
+    """Protocol for pluggable 2D pose/keypoint detectors."""
+
+    def detect(
+        self, color_bgr: np.ndarray
+    ) -> Tuple[Dict[str, Tuple[float, float]], Dict[str, float], Dict[str, float]]:
+        """
+        Detect 2D keypoints on a BGR image.
+
+        Returns
+        -------
+        Tuple[Dict[str, Tuple[float, float]], Dict[str, float], Dict[str, float]]:
+            (pts_2d, confidence_dict, visibility_dict)
+            where pts_2d maps joint_name -> (u_px, v_px).
+        """
+        ...
+
+
+class MediaPipePoseDetector:
+    """
+    MediaPipe Pose backend for full-body 2D keypoint detection.
+    """
+
+    def __init__(self, static_image_mode: bool = True, model_complexity: int = 1):
+        self._pose = None
+        self._static_image_mode = static_image_mode
+        self._model_complexity = model_complexity
+
+    def _ensure_initialized(self):
+        if self._pose is None:
+            try:
+                import mediapipe as mp
+                # Try solutions.pose first (standard API across mediapipe versions)
+                if hasattr(mp, "solutions") and hasattr(mp.solutions, "pose"):
+                    self._pose = mp.solutions.pose.Pose(
+                        static_image_mode=self._static_image_mode,
+                        model_complexity=self._model_complexity,
+                        enable_segmentation=False,
+                        min_detection_confidence=0.5,
+                    )
+                else:
+                    self._pose = None
+            except Exception as exc:
+                logger.warning(f"  [keypoints] Could not initialize MediaPipe Pose: {exc}")
+                self._pose = None
+
+    def detect(
+        self, color_bgr: np.ndarray
+    ) -> Tuple[Dict[str, Tuple[float, float]], Dict[str, float], Dict[str, float]]:
+        self._ensure_initialized()
+        h, w = color_bgr.shape[:2]
+        pts_2d: Dict[str, Tuple[float, float]] = {}
+        conf_dict: Dict[str, float] = {}
+        vis_dict: Dict[str, float] = {}
+
+        if self._pose is None:
+            return pts_2d, conf_dict, vis_dict
+
+        try:
+            rgb = cv2.cvtColor(color_bgr, cv2.COLOR_BGR2RGB)
+            results = self._pose.process(rgb)
+            if not results.pose_landmarks:
+                return pts_2d, conf_dict, vis_dict
+
+            # Mapping from MediaPipe landmark indices
+            mp_indices = {
+                "nose": 0,
+                "left_eye": 2, "right_eye": 5,
+                "left_ear": 7, "right_ear": 8,
+                "left_shoulder": 11, "right_shoulder": 12,
+                "left_elbow": 13, "right_elbow": 14,
+                "left_wrist": 15, "right_wrist": 16,
+                "left_hip": 23, "right_hip": 24,
+                "left_knee": 25, "right_knee": 26,
+                "left_ankle": 27, "right_ankle": 28,
+                "left_heel": 29, "right_heel": 30,
+                "left_foot_index": 31, "right_foot_index": 32,
+            }
+
+            for name, idx in mp_indices.items():
+                lm = results.pose_landmarks.landmark[idx]
+                u = lm.x * (w - 1)
+                v = lm.y * (h - 1)
+                pts_2d[name] = (float(u), float(v))
+                conf_dict[name] = float(getattr(lm, "presence", 1.0))
+                vis_dict[name] = float(getattr(lm, "visibility", 1.0))
+
+        except Exception as exc:
+            logger.debug(f"  [keypoints] Pose detection error: {exc}")
+
+        return pts_2d, conf_dict, vis_dict
+
+
+def lift_keypoints_to_3d(
+    pts_2d: Dict[str, Tuple[float, float]],
+    conf_2d: Dict[str, float],
+    vis_2d: Dict[str, float],
+    depth_m: np.ndarray,
+    intrinsics: o3d.camera.PinholeCameraIntrinsic,
+    cfg: FullBodyConfig,
+) -> Keypoints3D:
+    """
+    Lift 2D pixel keypoints to 3D metric coordinates using local window depth.
+
+    Rejects depth outliers via Median Absolute Deviation (MAD) in a window around
+    the detected 2D position.
+    """
+    h, w = depth_m.shape[:2]
+    fx, fy = intrinsics.get_focal_length()
+    cx, cy = intrinsics.get_principal_point()
+    win = cfg.keypoint_window_size_px
+
+    names: List[str] = []
+    points_3d: List[List[float]] = []
+    conf_3d: List[float] = []
+    vis_3d: List[float] = []
+
+    for name, (u_f, v_f) in pts_2d.items():
+        u_int = int(round(u_f))
+        v_int = int(round(v_f))
+
+        u_min = max(0, u_int - win)
+        u_max = min(w, u_int + win + 1)
+        v_min = max(0, v_int - win)
+        v_max = min(h, v_int + win + 1)
+
+        patch = depth_m[v_min:v_max, u_min:u_max]
+        valid_depths = patch[(patch >= cfg.depth_min_m) & (patch <= cfg.depth_max_m)]
+
+        c2d = conf_2d.get(name, 0.0)
+        v2d = vis_2d.get(name, 0.0)
+
+        if len(valid_depths) < 3 or c2d < cfg.keypoint_min_confidence or v2d < cfg.keypoint_min_visibility:
+            names.append(name)
+            points_3d.append([0.0, 0.0, 0.0])
+            conf_3d.append(0.0)
+            vis_3d.append(0.0)
+            continue
+
+        med_z = float(np.median(valid_depths))
+        mad = float(np.median(np.abs(valid_depths - med_z)))
+        mad_thresh = max(0.015, cfg.keypoint_depth_mad_scale * mad)
+        inliers = valid_depths[np.abs(valid_depths - med_z) <= mad_thresh]
+
+        if len(inliers) == 0:
+            final_z = med_z
+        else:
+            final_z = float(np.median(inliers))
+
+        # Backproject
+        x = float((u_f - cx) * final_z / fx)
+        y = float((v_f - cy) * final_z / fy)
+        z = float(final_z)
+
+        # Depth coverage factor
+        frac = len(inliers) / float(patch.size)
+        final_conf = float(c2d * min(1.0, frac * 1.5))
+
+        names.append(name)
+        points_3d.append([x, y, z])
+        conf_3d.append(final_conf)
+        vis_3d.append(v2d)
+
+    # Compute derived anatomical midpoint landmarks
+    keypoints = Keypoints3D(
+        names=names,
+        points=np.array(points_3d, dtype=np.float32),
+        confidence=np.array(conf_3d, dtype=np.float32),
+        visibility=np.array(vis_3d, dtype=np.float32),
+        frame="camera",
+    )
+    _add_derived_midpoints(keypoints)
+    return keypoints
+
+
+def _add_derived_midpoints(kpts: Keypoints3D) -> None:
+    """Add mid_hip, mid_shoulder, and neck_base to Keypoints3D in place."""
+    pairs = [
+        ("mid_hip", "left_hip", "right_hip"),
+        ("mid_shoulder", "left_shoulder", "right_shoulder"),
+    ]
+    for mid_name, l_name, r_name in pairs:
+        p_l, c_l, v_l = kpts.get(l_name)
+        p_r, c_r, v_r = kpts.get(r_name)
+        if p_l is not None and p_r is not None and c_l > 0.1 and c_r > 0.1:
+            mid_pt = 0.5 * (p_l + p_r)
+            mid_c = min(c_l, c_r)
+            mid_v = min(v_l, v_r)
+            kpts.names.append(mid_name)
+            kpts.points = np.vstack([kpts.points, mid_pt[np.newaxis, :]])
+            kpts.confidence = np.append(kpts.confidence, mid_c)
+            kpts.visibility = np.append(kpts.visibility, mid_v)
+
