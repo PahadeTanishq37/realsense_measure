@@ -1,0 +1,9 @@
+# Full-body model-free scanning requirements
+# Clean commercial-friendly licenses only (Apache 2.0 / BSD / MIT)
+# Strictly NO SMPL, SMPL-X, STAR, or Anny dependencies
+numpy>=1.24.0
+scipy>=1.10.0
+opencv-python>=4.8.0
+open3d>=0.17.0
+mediapipe>=0.10.0
+
