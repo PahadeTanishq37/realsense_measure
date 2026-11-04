@@ -16,9 +16,13 @@ venv/
 # Scan & replay capture outputs
 scan_output*/
 stage_wise_output/
+stage*_output/
+*_out/
+*_output/
 head_scan_manual/
 my_head_scan/
 *_scan/
+raw_captures/
 raw_capture*/
 replay_*/
 *_replay/
@@ -34,12 +38,13 @@ stage4_gate_report.json
 capture_quality_report/
 seed_variation_summary.json
 
-# Large point cloud and array binaries
+# Large point cloud, array, and model binaries
 *.ply
 *.npy
 *.pcd
-models/
 *.task
+models/
+models/smpl/
 
 # IDE / OS / diagnostic artifacts
 .idea/
