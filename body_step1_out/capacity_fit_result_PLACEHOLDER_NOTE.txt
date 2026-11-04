@@ -1,1 +1,0 @@
-WARNING: Run on PLACEHOLDER data because data/tape_measurements.json was empty.
