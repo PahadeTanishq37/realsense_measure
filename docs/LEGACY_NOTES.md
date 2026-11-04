@@ -39,21 +39,7 @@ This document summarizes critical geometric insights, coordinate conventions, an
 
 ---
 
-## 3. SMPL Landmark Mapping Bugs (Stage 26 Audit)
-
-- **Perineum / Crotch Floor**:
-  - **Bug**: Index `3171` was assigned to perineum in `smpl_backend.py`. Vertex `3171` is at $[0.0, -0.090, +0.530]\text{ m}$ on the **submental chin notch**. This collapsed torso length to $156\text{ mm}$ and elevated waist/hip slicing planes up to the shoulder/neck.
-  - **Fix**: Canonical crotch floor is vertex `3170` at $[0.0, -0.021, -0.041]\text{ m}$.
-- **Hip Landmarks (Trochanterion)**:
-  - **Bug**: Indices `1383` and `4857` were assigned to hips. These vertices sit at $Y = +0.43\text{ m}$ on the anterior clavicles!
-  - **Fix**: Greater trochanter landmarks are bilateral vertices `847` (left) and `4333` (right).
-- **Shoulder Breadth (Acromiale)**:
-  - **Bug**: Assigned to deltoid muscle border vertices `1378` and `4851` ($X = \pm 0.268\text{ m}$), inflating shoulder breadth to $632\text{ mm}$ when scaled.
-  - **Fix**: Superior bony acromial shelf vertices are `1903` (left) and `5363` (right) ($X = \pm 0.198\text{ m}$).
-
----
-
-## 4. Empirical Observations & Full-Body Limitations
+## 3. Empirical Observations & Full-Body Limitations
 
 - **Turntable / Stop-and-Hold Registration**:
   - RealSense depth registration via unconstrained point-to-plane ICP between 90° yaw stops did not reliably improve coarse turntable yaw angles. Coarse mechanical/protocol angle priors were more stable than ICP on human surfaces prone to non-rigid posture shifts.
