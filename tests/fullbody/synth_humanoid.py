@@ -70,10 +70,13 @@ def build_articulated_humanoid_mesh(
         m.triangles = o3d.utility.Vector3iVector(np.array(fs, dtype=np.int32))
         return m
 
-    # Pelvis (Y: 0.80 - 1.02 m) and Torso (Y: 1.02 - 1.42 m)
+    # Pelvis (Y: 0.80 - 1.02 m), Lower Torso (Y: 1.02 - 1.24 m), Chest (Y: 1.24 - 1.42 m)
+    # The chest region maintains (a_chest, b_chest) across the slicing plane (Y ~ 1.28 m)
+    # so that the analytic ground truth matches the geometry at the measurement plane.
     m_pelvis = _tube(a_hip, b_hip, a_waist, b_waist, 0.80, 1.02)
-    m_torso = _tube(a_waist, b_waist, a_chest, b_chest, 1.02, 1.42)
-    meshes.extend([m_pelvis, m_torso])
+    m_waist_to_chest = _tube(a_waist, b_waist, a_chest, b_chest, 1.02, 1.24)
+    m_chest = _tube(a_chest, b_chest, a_chest, b_chest, 1.24, 1.42)
+    meshes.extend([m_pelvis, m_waist_to_chest, m_chest])
 
     # Head: sphere centered at Y = 1.65 m, radius 0.10 m -> crown exactly at Y = 1.75 m
     m_head = o3d.geometry.TriangleMesh.create_sphere(radius=0.10, resolution=20)

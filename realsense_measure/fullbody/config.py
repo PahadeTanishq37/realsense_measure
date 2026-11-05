@@ -54,7 +54,7 @@ class FullBodyConfig:
     # -------------------------------------------------------------------------
     min_confidence_threshold: float = 0.08
     incidence_angle_power: float = 2.0
-    edge_distance_falloff_px: float = 5.0
+    edge_distance_falloff_px: float = 8.0  # increased from 5 → 8 px: makes ring coverage robust to sensor noise at body edges
     noise_sigma_base_m: float = 0.001            # 1 mm at 0.6 m
     noise_reference_distance_m: float = 0.60
 
@@ -102,7 +102,7 @@ class FullBodyConfig:
     # -------------------------------------------------------------------------
     # Anthropometric Measurements
     # -------------------------------------------------------------------------
-    slice_thickness_m: float = 0.015    # 15 mm slab for 2D slicing
+    slice_thickness_m: float = 0.020    # 20 mm slab (increased from 15 mm: more points in slab reduces chest underestimate)
     num_angular_bins: int = 180         # 2 deg resolution
     min_angular_coverage_for_ok: float = 0.70
     min_angular_coverage_for_partial: float = 0.35

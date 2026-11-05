@@ -34,7 +34,8 @@ Unlike parametric model fitting (SMPL, SMPL-X, STAR, or Anny), this pipeline rec
 1. **Hardware Configuration**:
    - Intel RealSense D455 / D455f.
    - Portrait orientation (90° rotated mount).
-   - Mounting height: $\approx 0.90\text{ m}$ above the floor, level pitch ($0^\circ$).
+   - Mounting height: $\approx 0.90 - 1.00\text{ m}$ above the floor, level pitch ($0^\circ \pm 2^\circ$).
+     > **Camera Height & Pitch Recommendation**: For standard adult subjects (1.60 – 1.80 m), a mounting height of 0.90 – 0.95 m at 1.30 m distance provides optimal coverage from floor plane to crown tangent horizon ($Y \approx 1.733\text{ m}$). For tall subjects ($> 1.85\text{ m}$), mount camera at 1.00 – 1.10 m height (or step back to 1.45 m) to prevent excessive crown self-occlusion while keeping the floor visible in the lower 35% of the frame. Keep camera pitch strictly within $\pm 2^\circ$ of level.
    - Subject standing distance: $\approx 1.2 - 1.4\text{ m}$ from the camera lens.
    - Floor must remain clearly visible in the lower 35% of the frame.
 2. **Subject Posture**:

@@ -30,6 +30,54 @@ from realsense_measure.fullbody.types import Keypoints3D, MeasurementResult, Qua
 logger = logging.getLogger(__name__)
 
 
+def estimate_crown_by_head_fit(
+    pts,
+    cfg,
+):
+    """
+    Fit a sphere to the head-region point cloud and return (apex_y_m, uncertainty_mm).
+
+    The apex is the top of the fitted sphere: apex_y = cy + r.
+    Uncertainty is 2x the RMS fit residual. Returns (nan, nan) when < 20 head pts.
+    """
+    if len(pts) < 20:
+        return float("nan"), float("nan")
+
+    y_max = float(np.percentile(pts[:, 1], 99.9))
+    y_range = y_max - float(np.min(pts[:, 1]))
+    y_min_head = y_max - 0.25 * y_range
+    head_mask = (
+        (pts[:, 1] >= y_min_head)
+        & (np.abs(pts[:, 0]) < 0.20)
+        & (np.abs(pts[:, 2]) < 0.20)
+    )
+    head_pts = pts[head_mask]
+    if len(head_pts) < 20:
+        return float("nan"), float("nan")
+
+    # Linearised least-squares sphere fit
+    # 2*cx*x + 2*cy*y + 2*cz*z + (r^2 - cx^2 - cy^2 - cz^2) = x^2 + y^2 + z^2
+    A = np.column_stack([
+        2.0 * head_pts[:, 0],
+        2.0 * head_pts[:, 1],
+        2.0 * head_pts[:, 2],
+        np.ones(len(head_pts)),
+    ])
+    b_vec = np.sum(head_pts ** 2, axis=1)
+    result, _, _, _ = np.linalg.lstsq(A, b_vec, rcond=None)
+    cx_fit, cy_fit, cz_fit = result[0], result[1], result[2]
+    r_sq = result[3] + cx_fit ** 2 + cy_fit ** 2 + cz_fit ** 2
+    if r_sq <= 0.0:
+        return float("nan"), float("nan")
+    r_fit = float(np.sqrt(r_sq))
+    apex_y = float(cy_fit) + r_fit
+
+    centre = np.array([cx_fit, cy_fit, cz_fit])
+    residuals = np.abs(np.sqrt(np.sum((head_pts - centre) ** 2, axis=1)) - r_fit)
+    uncertainty_mm = float(2.0 * np.sqrt(np.mean(residuals ** 2)) * 1000.0)
+    return apex_y, uncertainty_mm
+
+
 def measure_fused_scan(
     pcd: o3d.geometry.PointCloud,
     keypoints: Optional[Keypoints3D],
@@ -86,6 +134,24 @@ def measure_fused_scan(
         uncertainty_mm=3.0,
         notes=stature_notes,
     )
+
+    # 3b. Head-fit crown estimation (secondary stature estimate via sphere fit)
+    apex_hf_y, apex_hf_unc_mm = estimate_crown_by_head_fit(pts, cfg)
+    if not math.isnan(apex_hf_y):
+        stature_hf_mm = (apex_hf_y - y_floor) * 1000.0
+        results["stature_head_fit"] = MeasurementResult(
+            name="stature_head_fit",
+            value_mm=stature_hf_mm,
+            method="head_sphere_fit",
+            coverage=stature_cov,
+            interpolated_fraction=0.0,
+            quality_flag=stature_flag,
+            uncertainty_mm=max(apex_hf_unc_mm, 3.0),
+            notes=(
+                f"stature from sphere fit to head region; "
+                f"sphere-fit uncertainty={apex_hf_unc_mm:.1f}mm"
+            ),
+        )
 
     # 4. Shoulder width and skeletal segment lengths from keypoints
     if keypoints is not None:
