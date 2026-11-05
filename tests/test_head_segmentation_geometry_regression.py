@@ -12,6 +12,7 @@ Covers Problem 9B requirements:
 """
 
 from __future__ import annotations
+import pytest
 
 import numpy as np
 import open3d as o3d
@@ -121,6 +122,7 @@ def test_tilted_subject_cross_sectional_validity():
     assert 220.0 <= dims["height_mm"] <= 260.0
 
 
+@pytest.mark.slow
 def test_compound_rotation_transverse_plane():
     """
     Requirement 3: Compound rotation.

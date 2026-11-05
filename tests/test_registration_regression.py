@@ -1,3 +1,4 @@
+import pytest
 """
 Regression test for the registration stage (no camera needed).
 
@@ -284,6 +285,7 @@ def test_register_against_candidates_all_candidates_raise_returns_none(caplog):
     assert "Candidate 1 registration failed with ValueError" in logged_warnings[1]
 
 
+@pytest.mark.slow
 def test_registration_regression_known_motions_and_junk_frame():
     """Verify known motion recovery and junk frame rejection across pipeline paths."""
     res = main()

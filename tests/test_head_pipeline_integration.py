@@ -8,6 +8,7 @@ Tests:
 """
 
 from __future__ import annotations
+import pytest
 
 import json
 from pathlib import Path
@@ -19,6 +20,7 @@ from realsense_measure.pipeline import ScanPipeline
 from test_head_synthetic import create_synthetic_head
 
 
+@pytest.mark.slow
 def test_pipeline_complete_head() -> None:
     print("\n" + "=" * 80)
     print("  [TEST 1] Pipeline Head Measurement -- Complete Synthetic Head")
@@ -55,6 +57,7 @@ def test_pipeline_complete_head() -> None:
     print("  -> TEST 1 PASSED [OK]")
 
 
+@pytest.mark.slow
 def test_pipeline_ambiguous_head() -> None:
     print("\n" + "=" * 80)
     print("  [TEST 2] Pipeline Head Measurement -- Ambiguous / Incomplete Head")

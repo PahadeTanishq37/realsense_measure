@@ -27,6 +27,7 @@ import copy
 import sys
 import numpy as np
 import open3d as o3d
+import pytest
 
 from realsense_measure.camera.frame import RGBDFrame
 from realsense_measure.config import RegistrationConfig, PreprocessConfig
@@ -136,6 +137,7 @@ def render_synthetic_rgbd_frame(
 # ===========================================================================
 # Test A — Known rigid camera motion
 # ===========================================================================
+@pytest.mark.slow
 def test_a_known_rigid_motion():
     print("\n--- Test A: Known Rigid Camera Motion ---")
     mesh = make_synthetic_scene()
@@ -185,6 +187,7 @@ def test_a_known_rigid_motion():
 # ===========================================================================
 # Test B — Sequential camera motion
 # ===========================================================================
+@pytest.mark.slow
 def test_b_sequential_camera_motion():
     print("\n--- Test B: Sequential Camera Motion (10 frames) ---")
     mesh = make_synthetic_scene()
@@ -245,6 +248,7 @@ def test_b_sequential_camera_motion():
 # ===========================================================================
 # Test C — Bad frame rejection and bounded recovery
 # ===========================================================================
+@pytest.mark.slow
 def test_c_bad_frame_rejection():
     print("\n--- Test C: Bad Frame Rejection and Bounded Recovery ---")
     mesh = make_synthetic_scene()
@@ -294,6 +298,7 @@ def test_c_bad_frame_rejection():
 # ===========================================================================
 # Test D — Smooth surface quality gating
 # ===========================================================================
+@pytest.mark.slow
 def test_d_smooth_surface_gating():
     print("\n--- Test D: Smooth Surface Registration & Quality Gating ---")
     # Smooth featureless face-like surface without color texture
@@ -387,6 +392,7 @@ def test_e_transformation_convention():
 # ===========================================================================
 # Test F — Post-registration physical plausibility pose jump check
 # ===========================================================================
+@pytest.mark.slow
 def test_f_pose_jump_rejection():
     print("\n--- Test F: Post-Registration Physical Plausibility Check ---")
     mesh = make_synthetic_scene()
@@ -437,6 +443,7 @@ def test_f_pose_jump_rejection():
 # ===========================================================================
 # Test G — Multi-frame skip recovery with scaled pose-jump bounds
 # ===========================================================================
+@pytest.mark.slow
 def test_g_multi_frame_skip_recovery():
     print("\n--- Test G: Multi-Frame Skip Recovery with Scaled Pose-Jump Bounds ---")
     mesh = make_synthetic_scene()
@@ -487,6 +494,7 @@ def test_g_multi_frame_skip_recovery():
 # ===========================================================================
 # Test H — Non-Consecutive Loop Closure Fitness Threshold Gating (0.65)
 # ===========================================================================
+@pytest.mark.slow
 def test_h_loop_closure_fitness_threshold():
     print("\n--- Test H: Non-Consecutive Loop Closure Fitness Threshold Gating (0.65) ---")
     from realsense_measure.registration import build_pose_graph_rgbd
@@ -541,6 +549,7 @@ def test_h_loop_closure_fitness_threshold():
 # ===========================================================================
 # Test I — Non-Overlapping Pair Colored ICP Skip & Graceful Fallback
 # ===========================================================================
+@pytest.mark.slow
 def test_i_non_overlapping_pair_colored_icp_skip():
     print("\n--- Test I: Non-Overlapping Pair Colored ICP Skip & Graceful Fallback ---")
     import io
@@ -769,6 +778,7 @@ def test_j_glasses_weighted_kabsch_and_dense_sanity():
     print("  [PASS] Part (b): Dense-surface sanity check successfully rejected corrupted landmark seed and fell through to Tier 2.")
 
 
+@pytest.mark.slow
 def test_k_systematic_bias_fpfh_crosscheck():
     print("\n--- Test K: Smooth Systematic Eye-Region Bias & FPFH / Local Face Cross-Check ---")
     scene = o3d.t.geometry.RaycastingScene()
@@ -892,6 +902,7 @@ def test_k_systematic_bias_fpfh_crosscheck():
 # ===========================================================================
 # Test L — Profile-Transition Rejection Cascade (Problem 5B Regression Test)
 # ===========================================================================
+@pytest.mark.slow
 def test_l_profile_transition_rejection_cascade():
     """
     Problem 5B Regression Test: Deterministic verification of the rejection cascade.

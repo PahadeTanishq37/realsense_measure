@@ -19,6 +19,7 @@ Covers:
 """
 
 from __future__ import annotations
+import pytest
 
 import numpy as np
 import open3d as o3d
@@ -227,6 +228,7 @@ def test_failed_or_insufficient_segmentation_remains_fail_closed():
     assert meas["segmentation"]["outcome"] == "insufficient_input"
 
 
+@pytest.mark.slow
 def test_repeated_measurement_without_mutation_safe():
     """Requirement: Repeated measurement without mutation remains safe and deterministic."""
     target = HeadTarget()

@@ -14,6 +14,7 @@ geometric safety gates (RMSE, rotation, translation, and pose jump).
 """
 
 from __future__ import annotations
+import pytest
 
 import numpy as np
 import open3d as o3d
@@ -118,6 +119,7 @@ def test_asymmetric_head_torso_registration_accepted():
     assert rmse < cfg.max_colored_icp_rmse_m
 
 
+@pytest.mark.slow
 def test_small_unrelated_patch_overlap_rejected():
     """
     Negative safety requirement:

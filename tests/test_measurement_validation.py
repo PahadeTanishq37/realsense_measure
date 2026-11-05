@@ -15,6 +15,7 @@ Covers:
 """
 
 from __future__ import annotations
+import pytest
 
 from pathlib import Path
 import numpy as np
@@ -166,6 +167,7 @@ def test_reference_dims_ordering_invariance(tmp_path: Path):
     assert np.isclose(ref_comp["height"]["reference_mm"], 100.0, atol=0.1)
 
 
+@pytest.mark.slow
 def test_reference_dims_head_target_branching(tmp_path: Path):
     """
     Verify HeadTarget behavior with reference_dims_m configured.

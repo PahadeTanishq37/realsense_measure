@@ -80,6 +80,7 @@ def create_chin_cropped_head(crop_height_m: float = 0.035, seed: int = 42) -> o3
 
 
 @pytest.mark.xfail(reason="Reproduced false positive: chin-cropped head passes validation and receives volume", strict=True)
+@pytest.mark.slow
 def test_scenario_1_missing_chin():
     """
     Scenario 1: Missing chin.
@@ -119,6 +120,7 @@ def create_crown_cropped_head(crop_height_m: float = 0.035, seed: int = 42) -> o
 
 
 @pytest.mark.xfail(reason="Reproduced false positive: crown-cropped head passes validation and receives volume", strict=True)
+@pytest.mark.slow
 def test_scenario_2_missing_crown():
     """
     Scenario 2: Missing crown.
@@ -157,6 +159,7 @@ def create_posterior_truncated_head(crop_depth_m: float = 0.020, seed: int = 42)
 
 
 @pytest.mark.xfail(reason="Reproduced false positive: controlled posterior-truncated head passes validation", strict=True)
+@pytest.mark.slow
 def test_scenario_3_posterior_truncation_controlled():
     """
     Scenario 3: Controlled posterior truncation (20 mm removed from back of head).
@@ -173,6 +176,7 @@ def test_scenario_3_posterior_truncation_controlled():
     assert metrics["obb_volume_m3"] is None
 
 
+@pytest.mark.slow
 def test_scenario_3_posterior_truncation_large_rejected():
     """
     Scenario 3 variation: Large posterior truncation (40 mm removed from back of head).
@@ -213,6 +217,7 @@ def create_headrest_occluded_head(seed: int = 42) -> o3d.geometry.PointCloud:
 
 
 @pytest.mark.xfail(reason="Reproduced false positive: headrest-occluded head passes validation and receives volume", strict=True)
+@pytest.mark.slow
 def test_scenario_4_headrest_occlusion():
     """
     Scenario 4: Headrest-like occlusion.
@@ -258,6 +263,7 @@ def create_non_head_oval(seed: int = 42) -> o3d.geometry.PointCloud:
 
 
 @pytest.mark.xfail(reason="Reproduced false positive: non-cranial ellipsoid passes validation and receives volume", strict=True)
+@pytest.mark.slow
 def test_scenario_5_non_head_oval():
     """
     Scenario 5: Non-head oval.

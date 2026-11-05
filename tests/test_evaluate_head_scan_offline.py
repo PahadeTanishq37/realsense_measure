@@ -13,6 +13,7 @@ Verifies:
 """
 
 from __future__ import annotations
+import pytest
 
 import csv
 import json
@@ -67,6 +68,7 @@ def temp_eval_dir(tmp_path: Path) -> Path:
     return test_dir
 
 
+@pytest.mark.slow
 def test_single_file_evaluation(temp_eval_dir: Path):
     """Test evaluating a single valid synthetic head PLY file."""
     ply_path = temp_eval_dir / "valid_head.ply"
@@ -152,6 +154,7 @@ def test_empty_point_cloud(temp_eval_dir: Path):
     assert down["validated_volume_m3"] is None
 
 
+@pytest.mark.slow
 def test_batch_resilience_and_output_generation(temp_eval_dir: Path, tmp_path: Path):
     """
     Test that run_evaluation handles mixed valid, empty, corrupt, and missing files,

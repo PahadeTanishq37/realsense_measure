@@ -12,6 +12,7 @@ Covers:
 """
 
 from __future__ import annotations
+import pytest
 
 import copy
 import numpy as np
@@ -99,6 +100,7 @@ def _render_ellipsoid_depth(
     return depth_m, color_bgr
 
 
+@pytest.mark.slow
 def test_synthetic_head_ellipsoid_refinement_and_chamfer():
     np.random.seed(0)
     rx, ry, rz = 0.08, 0.11, 0.10

@@ -20,6 +20,7 @@ Covers:
 """
 
 from __future__ import annotations
+import pytest
 
 from typing import Tuple
 import numpy as np
@@ -449,6 +450,7 @@ def test_segmentation_benchmark_full_reconciliation():
         print(f"  Method B (Multi-Axis 25°): Surv={len(pts_m_cam):5d} | RetHead={k0_m:5d} ({rec_m*100:5.1f}%) | RetTorso={k2_m:5d} | TorsoRej={rej_m*100:5.1f}% | HeadLoss={loss_m*100:5.1f}%")
 
 
+@pytest.mark.slow
 def test_measurement_validator_complete_synthetic_head():
     """
     P2 Evaluation: Test production HeadTarget().measure() on cleanly segmented complete head.

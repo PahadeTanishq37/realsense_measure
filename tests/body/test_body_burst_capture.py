@@ -46,6 +46,7 @@ def _create_synthetic_body_frame(
     return color_bgr, depth_m
 
 
+@pytest.mark.slow
 def test_still_subject_within_10mm_threshold():
     """Verify a stationary subject has motion <= 10.0 mm and is not flagged."""
     np.random.seed(42)

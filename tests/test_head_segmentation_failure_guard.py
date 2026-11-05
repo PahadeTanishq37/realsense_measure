@@ -58,6 +58,7 @@ def create_head_plus_neck_short_span(seed: int = 42) -> o3d.geometry.PointCloud:
     return pcd
 
 
+@pytest.mark.slow
 def test_case_1_head_plus_neck_short_span_rejected():
     """
     Case 1: Problem 11A reproduction.
@@ -170,6 +171,7 @@ def test_case_4_valid_constriction_cut_validated():
     assert 220.0 <= dims["height_mm"] <= 260.0
 
 
+@pytest.mark.slow
 def test_case_5_clearly_isolated_head_short_span_validated():
     """
     Case 5: Clearly isolated head that bypasses the neck search is validated according to policy.
@@ -198,6 +200,7 @@ def test_case_5_clearly_isolated_head_short_span_validated():
     assert 225.0 <= dims["height_mm"] <= 255.0
 
 
+@pytest.mark.slow
 def test_case_6_repeated_calls_do_not_reuse_stale_metadata():
     """
     Case 6: Repeated calls on the same HeadTarget instance do not reuse stale segmentation metadata.
