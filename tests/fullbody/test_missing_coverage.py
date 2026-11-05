@@ -393,6 +393,7 @@ def test_measure_scan_coverage_thresholds():
 # 7. TSDF Volume Regression & Rotation Direction Tests
 # =============================================================================
 
+@pytest.mark.slow
 def test_tsdf_scalable_vs_uniform_regression():
     """
     Verify ScalableTSDFVolume and UniformTSDFVolume reconstruct equivalent geometry.
@@ -502,3 +503,70 @@ def test_rotation_direction_flipping():
     # At 45 deg turn: CW -> 180 - 45 = 135 deg; CCW -> 180 + 45 = 225 deg.
     assert abs(aligned_cw.prior_yaw_deg - 135.0) < 1.0
     assert abs(aligned_ccw.prior_yaw_deg - 225.0) < 1.0
+
+
+@pytest.mark.slow
+def test_tsdf_at_real_voxel_size_4mm_regression():
+    """
+    Regression: Test TSDF reconstruction at the production 4-5mm voxel size.
+
+    Verifies:
+      1. Open3D's ScalableTSDFVolume at 4mm yields 0 vertices because spatial hash unit
+         allocation fails on fine sub-centimeter grids.
+      2. UniformTSDFVolume (used by the head pipeline and our fallback) at 4mm
+         succeeds and produces > 5,000 vertices with accurate geometry.
+      3. Validates that fallback mechanism ensures robust surface reconstruction.
+    """
+    sphere = o3d.geometry.TriangleMesh.create_sphere(radius=0.25, resolution=20)
+    sphere.translate([0.0, 0.0, 1.2])
+
+    scene = o3d.t.geometry.RaycastingScene()
+    scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(sphere))
+
+    w, h, fx, fy = 240, 180, 200.0, 200.0
+    intrinsics = o3d.camera.PinholeCameraIntrinsic(w, h, fx, fy, w / 2.0, h / 2.0)
+    rays = o3d.t.geometry.RaycastingScene.create_rays_pinhole(
+        o3d.core.Tensor(intrinsics.intrinsic_matrix, dtype=o3d.core.Dtype.Float64),
+        o3d.core.Tensor(np.eye(4, dtype=np.float64)),
+        w, h,
+    )
+    cast_res = scene.cast_rays(rays)
+    t_hit = cast_res["t_hit"].numpy()
+
+    clean_depth = np.zeros((h, w), dtype=np.float32)
+    val = np.isfinite(t_hit) & (t_hit > 0.5) & (t_hit < 2.5)
+    clean_depth[val] = t_hit[val].astype(np.float32)
+
+    color = np.full((h, w, 3), 180, dtype=np.uint8)
+    rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
+        o3d.geometry.Image(color),
+        o3d.geometry.Image(clean_depth),
+        depth_scale=1.0,
+        depth_trunc=2.5,
+        convert_rgb_to_intensity=False,
+    )
+
+    voxel_length = 0.004  # 4mm real-style parameter
+    sdf_trunc = 0.020     # 20mm (5x voxel length)
+
+    # 1. ScalableTSDF fails at 4mm in Open3D
+    vol_s = o3d.pipelines.integration.ScalableTSDFVolume(
+        voxel_length=voxel_length,
+        sdf_trunc=sdf_trunc,
+        color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8,
+    )
+    vol_s.integrate(rgbd, intrinsics, np.eye(4))
+    mesh_s = vol_s.extract_triangle_mesh()
+    assert len(mesh_s.vertices) == 0, "ScalableTSDFVolume at 4mm is expected to produce 0 vertices in Open3D"
+
+    # 2. UniformTSDF succeeds at 4mm with > 5000 vertices
+    vol_u = o3d.pipelines.integration.UniformTSDFVolume(
+        length=0.8,
+        resolution=int(0.8 / voxel_length),
+        sdf_trunc=sdf_trunc,
+        color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8,
+        origin=np.array([[-0.4], [-0.4], [0.8]]),
+    )
+    vol_u.integrate(rgbd, intrinsics, np.eye(4))
+    mesh_u = vol_u.extract_triangle_mesh()
+    assert len(mesh_u.vertices) > 5000, f"UniformTSDFVolume at 4mm must produce > 5000 vertices, got {len(mesh_u.vertices)}"

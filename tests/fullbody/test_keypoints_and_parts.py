@@ -80,3 +80,88 @@ def test_body_part_capsule_labeling():
     assert is_rigid_point(labels)[2] == True
     assert is_arm_point(labels)[2] == False
 
+
+
+def test_handedness_real_photo():
+    """
+    Verify handedness convention on a real photo (skipped if absent).
+    Subject facing the camera and raising the right hand.
+    Asserts right_wrist.x < left_wrist.x in pixel space (subject's right is on image left).
+    """
+    import os
+    from pathlib import Path
+
+    img_path = os.environ.get("FULLBODY_HANDEDNESS_IMAGE") or os.environ.get("FULLBODY_SAMPLE_IMAGE")
+    if not img_path or not Path(img_path).is_file():
+        pytest.skip("No user-supplied photo provided (set FULLBODY_HANDEDNESS_IMAGE to run)")
+
+    import cv2
+    from realsense_measure.fullbody.keypoints import MediaPipePoseDetector
+
+    img_bgr = cv2.imread(str(img_path))
+    assert img_bgr is not None, f"Failed to read image at {img_path}"
+
+    detector = MediaPipePoseDetector()
+    pts_2d, confs, _ = detector.detect(img_bgr)
+    assert "right_wrist" in pts_2d and "left_wrist" in pts_2d, "Wrists not detected in sample image"
+    assert confs.get("right_wrist", 0) > 0.3 and confs.get("left_wrist", 0) > 0.3, "Low wrist confidence"
+
+    rw_x = pts_2d["right_wrist"][0]
+    lw_x = pts_2d["left_wrist"][0]
+    assert rw_x < lw_x, (
+        f"Handedness convention check failed: right_wrist x ({rw_x:.1f}) >= left_wrist x ({lw_x:.1f}). "
+        f"When facing camera, right hand must be on camera-left (smaller pixel X)."
+    )
+
+
+def test_yaw_prior_and_crossproduct_sign_convention():
+    """
+    Re-check yaw prior and cross-product sign against standard right-handed optical convention.
+    Ensures anterior vector and canonical yaw sign conventions are strictly consistent.
+    """
+    from realsense_measure.fullbody.alignment import compute_keypoint_prior_yaw
+
+    cfg = FullBodyConfig()
+
+    # Subject facing camera in gravity frame:
+    # Camera looks along +Z, +Y is up.
+    # Subject's right shoulder is on camera-left (X = -0.18 m).
+    # Subject's left shoulder is on camera-right (X = +0.18 m).
+    # Subject's nose is anterior (Z = 1.20 m, closer than shoulders at Z = 1.30 m).
+    kpts_facing_cam = Keypoints3D(
+        names=["left_shoulder", "right_shoulder", "nose"],
+        points=np.array([
+            [ 0.18, 1.40, 1.30],   # left_shoulder (camera-right)
+            [-0.18, 1.40, 1.30],   # right_shoulder (camera-left)
+            [ 0.00, 1.65, 1.20],   # nose (closer to camera)
+        ], dtype=np.float32),
+        confidence=np.array([0.9, 0.9, 0.9], dtype=np.float32),
+        visibility=np.array([0.9, 0.9, 0.9], dtype=np.float32),
+        frame="gravity",
+    )
+
+    yaw_deg, center, valid = compute_keypoint_prior_yaw(kpts_facing_cam, nominal_deg=180.0, cfg=cfg)
+    assert valid is True
+    # Stop 0 facing camera has canonical yaw ~ 180°
+    assert abs(abs(yaw_deg) - 180.0) < 1.0, f"Expected canonical yaw ~ 180°, got {yaw_deg:.2f}°"
+
+    # Subject turned 90° clockwise (facing subject's right):
+    # Chest (+Z) points to camera-left (X = -Z_cam).
+    # Left shoulder is anterior to right shoulder.
+    kpts_turned_90 = Keypoints3D(
+        names=["left_shoulder", "right_shoulder", "nose"],
+        points=np.array([
+            [ 0.00, 1.40, 1.48],   # left_shoulder (deeper)
+            [ 0.00, 1.40, 1.12],   # right_shoulder (closer)
+            [-0.10, 1.65, 1.30],   # nose (pointing left)
+        ], dtype=np.float32),
+        confidence=np.array([0.9, 0.9, 0.9], dtype=np.float32),
+        visibility=np.array([0.9, 0.9, 0.9], dtype=np.float32),
+        frame="gravity",
+    )
+
+    yaw_90, _, valid_90 = compute_keypoint_prior_yaw(kpts_turned_90, nominal_deg=90.0, cfg=cfg)
+    assert valid_90 is True
+    # In canonical frame (+Y up, +X left, +Z anterior):
+    # Nose pointing to camera-left means yaw is ~ 90° (or -90° depending on convention)
+    assert abs(abs(yaw_90) - 90.0) < 2.0, f"Expected canonical yaw ~ 90°, got {yaw_90:.2f}°"

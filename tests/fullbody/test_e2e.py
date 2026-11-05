@@ -236,6 +236,7 @@ def test_e2e_synthetic_humanoid_pipeline_8_stops(capsys):
     assert len(val_report) >= 1
 
 
+@pytest.mark.slow
 def test_e2e_synthetic_humanoid_pipeline_4_stops():
     """
     Code-path test: 4-stop synthetic humanoid scan through pipeline.
@@ -285,6 +286,7 @@ def test_e2e_synthetic_humanoid_pipeline_4_stops():
     assert "crotch" in hole_map
 
 
+@pytest.mark.slow
 def test_e2e_cli_scan_and_measure():
     """
     Code-path test: Run CLI 'scan' and 'measure' end-to-end on synthetic capture files.
