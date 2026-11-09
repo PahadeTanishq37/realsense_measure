@@ -11,6 +11,7 @@ Multi-stop full-body alignment:
 from __future__ import annotations
 
 import logging
+import math
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -69,17 +70,57 @@ def compute_keypoint_prior_yaw(
        (l_hp is None or r_hp is None or c_lh < 0.2 or c_rh < 0.2):
         return nominal_deg, np.array([0.0, 0.9, 1.3], dtype=np.float64), False
 
-    # Lateral vector on X-Z plane (subject-right to subject-left = +X in ISB)
+    # Robust anatomical extraction of lateral orientation and body axis center
+    c_sh_cand, v_sh_cand = None, None
+    c_hp_cand, v_hp_cand = None, None
+
+    if l_sh is not None and r_sh is not None and c_ls >= 0.2 and c_rs >= 0.2:
+        sh_span = float(np.linalg.norm(l_sh - r_sh))
+        if 0.22 <= sh_span <= 0.50:
+            v_sh_cand = np.array([l_sh[0] - r_sh[0], 0.0, l_sh[2] - r_sh[2]])
+            c_sh_cand = 0.5 * (l_sh + r_sh)
+
+    if l_hp is not None and r_hp is not None and c_lh >= 0.2 and c_rh >= 0.2:
+        hp_span = float(np.linalg.norm(l_hp - r_hp))
+        if 0.12 <= hp_span <= 0.38:
+            v_hp_cand = np.array([l_hp[0] - r_hp[0], 0.0, l_hp[2] - r_hp[2]])
+            c_hp_cand = 0.5 * (l_hp + r_hp)
+
     lat_vecs = []
     centers = []
-    if l_sh is not None and r_sh is not None and c_ls >= 0.2 and c_rs >= 0.2:
-        v_sh = l_sh - r_sh
-        lat_vecs.append(np.array([v_sh[0], 0.0, v_sh[2]]))
-        centers.append(0.5 * (l_sh + r_sh))
-    if l_hp is not None and r_hp is not None and c_lh >= 0.2 and c_rh >= 0.2:
-        v_hp = l_hp - r_hp
-        lat_vecs.append(np.array([v_hp[0], 0.0, v_hp[2]]))
-        centers.append(0.5 * (l_hp + r_hp))
+
+    if c_sh_cand is not None and c_hp_cand is not None:
+        # Cross-check horizontal spine alignment (shoulders and hips should align vertically)
+        spine_disp_xz = float(np.linalg.norm([c_sh_cand[0] - c_hp_cand[0], c_sh_cand[2] - c_hp_cand[2]]))
+        if spine_disp_xz > 0.05:
+            # One pair has an outlier: compare spans against typical proportions (sh~0.36m, hp~0.20m)
+            sh_residual = abs(float(np.linalg.norm(l_sh - r_sh)) - 0.36)
+            hp_residual = abs(float(np.linalg.norm(l_hp - r_hp)) - 0.20)
+            if sh_residual < hp_residual:
+                lat_vecs.append(v_sh_cand)
+                centers.append(c_sh_cand)
+            else:
+                lat_vecs.append(v_hp_cand)
+                centers.append(c_hp_cand)
+        else:
+            lat_vecs.extend([v_sh_cand, v_hp_cand])
+            centers.extend([c_sh_cand, c_hp_cand])
+    elif c_sh_cand is not None:
+        lat_vecs.append(v_sh_cand)
+        centers.append(c_sh_cand)
+    elif c_hp_cand is not None:
+        lat_vecs.append(v_hp_cand)
+        centers.append(c_hp_cand)
+    else:
+        # Ultimate fallback
+        if l_sh is not None and r_sh is not None:
+            lat_vecs.append(np.array([l_sh[0] - r_sh[0], 0.0, l_sh[2] - r_sh[2]]))
+            centers.append(0.5 * (l_sh + r_sh))
+        elif l_hp is not None and r_hp is not None:
+            lat_vecs.append(np.array([l_hp[0] - r_hp[0], 0.0, l_hp[2] - r_hp[2]]))
+            centers.append(0.5 * (l_hp + r_hp))
+        else:
+            return nominal_deg, np.array([0.0, 0.9, 1.3], dtype=np.float64), False
 
     lat = np.mean(lat_vecs, axis=0)
     lat[1] = 0.0
@@ -148,6 +189,7 @@ def align_stops(
             )
             prior_yaw = nominal_canonical
 
+
         # Canonical transform: rotates yaw, centers X-Z body axis, sets floor at Y=0
         yaw_rad = np.deg2rad(prior_yaw)
         c_y, s_y = np.cos(yaw_rad), np.sin(yaw_rad)
@@ -192,6 +234,7 @@ def align_stops(
                 pcd_canonical=pcd_can,
                 keypoints_canonical=kpts_can,
                 body_part_labels=labels,
+                prior_T_canonical_camera=T_canon_cam.copy(),
             )
         )
 
@@ -254,8 +297,9 @@ def _refine_alignment_multiview(
             src_pcd.estimate_normals()
 
             # Run 4-DoF planar ICP
-            delta_T, inlier_frac, rmse_mm = _solve_4dof_icp(src_pcd, ref_pcd, cfg)
+            delta_T, inlier_frac, rmse_mm, rmse_before_mm = _solve_4dof_icp(src_pcd, ref_pcd, cfg)
 
+            stop.residual_before_mm = rmse_before_mm
             stop.residual_after_mm = rmse_mm
             stop.inlier_fraction = inlier_frac
 
@@ -285,8 +329,16 @@ def _solve_4dof_icp(
     src: o3d.geometry.PointCloud,
     ref: o3d.geometry.PointCloud,
     cfg: FullBodyConfig,
-) -> Tuple[np.ndarray, float, float]:
+) -> Tuple[np.ndarray, float, float, float]:
     """Solve 4-DoF point-to-plane registration restricted to yaw + XZ translation."""
+    res_before = o3d.pipelines.registration.evaluate_registration(
+        src,
+        ref,
+        cfg.alignment_icp_distance_threshold_m,
+        np.eye(4),
+    )
+    rmse_before_mm = float(res_before.inlier_rmse * 1000.0)
+
     reg = o3d.pipelines.registration.registration_icp(
         src,
         ref,
@@ -311,7 +363,7 @@ def _solve_4dof_icp(
 
     inlier_frac = float(reg.fitness)
     rmse_mm = float(reg.inlier_rmse * 1000.0)
-    return T, inlier_frac, rmse_mm
+    return T, inlier_frac, rmse_mm, rmse_before_mm
 
 
 def _enforce_loop_consistency(stops: List[AlignedStop]) -> None:

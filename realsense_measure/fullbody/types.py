@@ -131,6 +131,7 @@ class AlignedStop:
     keypoints_canonical: Optional[Keypoints3D] = None
     confidence_canonical: Optional[np.ndarray] = None
     body_part_labels: Optional[np.ndarray] = None  # per-point integer label
+    prior_T_canonical_camera: Optional[np.ndarray] = None
 
 
 @dataclass
@@ -146,6 +147,9 @@ class MeasurementResult:
     quality_flag: str                 # "OK", "PARTIAL", "NOT_MEASURABLE"
     uncertainty_mm: float = 0.0
     notes: str = ""
+    coverage_ceiling: float = 1.0
+    coverage_ratio: float = 1.0
+    slice_height_m: Optional[float] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -153,6 +157,8 @@ class MeasurementResult:
             "value_mm": round(float(self.value_mm), 2) if np.isfinite(self.value_mm) else None,
             "method": self.method,
             "coverage": round(float(self.coverage), 4),
+            "coverage_ceiling": round(float(self.coverage_ceiling), 4),
+            "coverage_ratio": round(float(self.coverage_ratio), 4),
             "interpolated_fraction": round(float(self.interpolated_fraction), 4),
             "quality_flag": self.quality_flag,
             "uncertainty_mm": round(float(self.uncertainty_mm), 2),

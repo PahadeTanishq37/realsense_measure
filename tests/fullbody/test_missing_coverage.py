@@ -506,7 +506,7 @@ def test_rotation_direction_flipping():
 
 
 @pytest.mark.slow
-def test_tsdf_at_real_voxel_size_4mm_regression():
+def test_tsdf_uniform_volume_minimal_reproducer():
     """
     Regression: Test TSDF reconstruction at the production 4-5mm voxel size.
 
@@ -549,17 +549,7 @@ def test_tsdf_at_real_voxel_size_4mm_regression():
     voxel_length = 0.004  # 4mm real-style parameter
     sdf_trunc = 0.020     # 20mm (5x voxel length)
 
-    # 1. ScalableTSDF fails at 4mm in Open3D
-    vol_s = o3d.pipelines.integration.ScalableTSDFVolume(
-        voxel_length=voxel_length,
-        sdf_trunc=sdf_trunc,
-        color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8,
-    )
-    vol_s.integrate(rgbd, intrinsics, np.eye(4))
-    mesh_s = vol_s.extract_triangle_mesh()
-    assert len(mesh_s.vertices) == 0, "ScalableTSDFVolume at 4mm is expected to produce 0 vertices in Open3D"
-
-    # 2. UniformTSDF succeeds at 4mm with > 5000 vertices
+    # UniformTSDF succeeds at 4mm with > 5000 vertices
     vol_u = o3d.pipelines.integration.UniformTSDFVolume(
         length=0.8,
         resolution=int(0.8 / voxel_length),
@@ -570,3 +560,60 @@ def test_tsdf_at_real_voxel_size_4mm_regression():
     vol_u.integrate(rgbd, intrinsics, np.eye(4))
     mesh_u = vol_u.extract_triangle_mesh()
     assert len(mesh_u.vertices) > 5000, f"UniformTSDFVolume at 4mm must produce > 5000 vertices, got {len(mesh_u.vertices)}"
+
+
+@pytest.mark.slow
+@pytest.mark.xfail(
+    reason=(
+        "Open3D ScalableTSDFVolume fails to allocate spatial hash units at fine sub-centimeter voxels "
+        "(voxel_length=4mm, sdf_trunc=20mm) producing 0 vertices. Cause is an Open3D internal spatial hash "
+        "block allocation limitation at sub-centimeter metric scale. UniformTSDFVolume is used instead."
+    ),
+    strict=True,
+)
+def test_tsdf_scalable_volume_minimal_reproducer():
+    """
+    Minimal reproducer: ScalableTSDFVolume fails (xfail) at fine sub-centimeter voxels (4mm).
+    Parameters: Open3D tutorial style with sdf_trunc >= 5x voxel length.
+    """
+    sphere = o3d.geometry.TriangleMesh.create_sphere(radius=0.25, resolution=20)
+    sphere.translate([0.0, 0.0, 1.2])
+
+    scene = o3d.t.geometry.RaycastingScene()
+    scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(sphere))
+
+    w, h, fx, fy = 240, 180, 200.0, 200.0
+    intrinsics = o3d.camera.PinholeCameraIntrinsic(w, h, fx, fy, w / 2.0, h / 2.0)
+    rays = o3d.t.geometry.RaycastingScene.create_rays_pinhole(
+        o3d.core.Tensor(intrinsics.intrinsic_matrix, dtype=o3d.core.Dtype.Float64),
+        o3d.core.Tensor(np.eye(4, dtype=np.float64)),
+        w, h,
+    )
+    cast_res = scene.cast_rays(rays)
+    t_hit = cast_res["t_hit"].numpy()
+
+    clean_depth = np.zeros((h, w), dtype=np.float32)
+    val = np.isfinite(t_hit) & (t_hit > 0.5) & (t_hit < 2.5)
+    clean_depth[val] = t_hit[val].astype(np.float32)
+
+    color = np.full((h, w, 3), 180, dtype=np.uint8)
+    rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
+        o3d.geometry.Image(color),
+        o3d.geometry.Image(clean_depth),
+        depth_scale=1.0,
+        depth_trunc=2.5,
+        convert_rgb_to_intensity=False,
+    )
+
+    voxel_length = 0.004
+    sdf_trunc = 0.020
+
+    vol_s = o3d.pipelines.integration.ScalableTSDFVolume(
+        voxel_length=voxel_length,
+        sdf_trunc=sdf_trunc,
+        color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8,
+    )
+    vol_s.integrate(rgbd, intrinsics, np.eye(4))
+    mesh_s = vol_s.extract_triangle_mesh()
+    # Scalable produces 0 vertices in Open3D at 4mm; asserting > 0 causes the expected failure (xfail)
+    assert len(mesh_s.vertices) > 0, "ScalableTSDFVolume at 4mm produced 0 vertices (expected limitation)"

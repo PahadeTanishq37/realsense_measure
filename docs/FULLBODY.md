@@ -35,7 +35,7 @@ Unlike parametric model fitting (SMPL, SMPL-X, STAR, or Anny), this pipeline rec
    - Intel RealSense D455 / D455f.
    - Portrait orientation (90° rotated mount).
    - Mounting height: $\approx 0.90 - 1.00\text{ m}$ above the floor, level pitch ($0^\circ \pm 2^\circ$).
-     > **Camera Height & Pitch Recommendation**: For standard adult subjects (1.60 – 1.80 m), a mounting height of 0.90 – 0.95 m at 1.30 m distance provides optimal coverage from floor plane to crown tangent horizon ($Y \approx 1.733\text{ m}$). For tall subjects ($> 1.85\text{ m}$), mount camera at 1.00 – 1.10 m height (or step back to 1.45 m) to prevent excessive crown self-occlusion while keeping the floor visible in the lower 35% of the frame. Keep camera pitch strictly within $\pm 2^\circ$ of level.
+     > **Camera Height & Pitch [Untested Hypothesis]**: Mounting at 0.90 – 0.95 m at 1.30 m distance has been hypothesized for coverage between floor plane and crown tangent horizon ($Y \approx 1.733\text{ m}$). However, optimal mounting height and pitch must be empirically verified using the two-configuration comparison protocol below, not assumed.
    - Subject standing distance: $\approx 1.2 - 1.4\text{ m}$ from the camera lens.
    - Floor must remain clearly visible in the lower 35% of the frame.
 2. **Subject Posture**:
@@ -50,6 +50,29 @@ Unlike parametric model fitting (SMPL, SMPL-X, STAR, or Anny), this pipeline rec
      - Under clockwise rotation, the subject rotates their front toward their right, meaning the canonical yaw sequence progresses $(180^\circ - \theta_{\text{nom}} + 360^\circ) \pmod{360^\circ}$.
      - Under counter-clockwise rotation, canonical yaw progresses $(180^\circ + \theta_{\text{nom}} + 360^\circ) \pmod{360^\circ}$.
    - **Camera Portrait Rotation (`camera_portrait_rotation`)**: Configurable as `"cw"` (90° clockwise roll) or `"ccw"` (90° counter-clockwise roll), aligning the sensor matrix to gravity. Both fields are saved in `meta.json`.
+
+---
+
+
+### 3.1 Two-Configuration Comparison Protocol (Low Level vs. High Tilted)
+
+To determine whether a higher, downward-tilted camera improves crown visibility without sacrificing floor plane stability or foot capture, capture sessions must be compared across two standardized physical configurations:
+
+| Parameter | Configuration A (Low Level - Baseline) | Configuration B (High Tilted - Alternative) |
+|---|---|---|
+| **Mounting Height** | $0.90\text{ m}$ above floor | $1.15\text{ m}$ above floor |
+| **Pitch Angle** | $0^\circ \pm 1^\circ$ (horizontal / level) | $-12^\circ \pm 1^\circ$ (tilted downwards) |
+| **Distance to Subject** | $1.30\text{ m}$ | $1.30\text{ m}$ |
+| **Floor in Frame** | Bottom 35% of image | Bottom 20% of image |
+| **Crown Tangent Horizon** | $Y \approx 1.733\text{ m}$ (tangent self-occlusion) | Directly views skull apex from above |
+| **Hypothesis** | Maximum floor robustness; crown clipped | Complete crown observed; steeper floor plane |
+
+#### Comparative Validation Criteria:
+1. **Floor Plane Stability**: RANSAC inlier ratio $\ge 85\%$, cross-stop normal consistency $\Delta \theta_{\text{floor}} < 3^\circ$.
+2. **Crown Hole Fraction**: $\text{hole\_map}[\text{"crown"}]$ must decrease from $> 0.20$ (Config A) to $< 0.10$ (Config B).
+3. **Stature Accuracy**: Absolute difference between true physical stature and (a) raw scan apex, (b) head-sphere-fit apex.
+4. **Foot / Ankle Completeness**: Floor grazing cutoff must not truncate medial/lateral malleoli or foot surface.
+5. **Trunk Coverage**: Chest, waist, and hip circumference angular coverage must remain $\ge 80\%$.
 
 ---
 

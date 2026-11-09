@@ -80,9 +80,9 @@ class FullBodyConfig:
     # -------------------------------------------------------------------------
     # Multi-Stop Alignment
     # -------------------------------------------------------------------------
-    alignment_max_yaw_correction_deg: float = 8.0
-    alignment_max_translation_correction_m: float = 0.04
-    alignment_icp_distance_threshold_m: float = 0.04
+    alignment_max_yaw_correction_deg: float = 15.0
+    alignment_max_translation_correction_m: float = 0.08
+    alignment_icp_distance_threshold_m: float = 0.06
     alignment_max_iterations: int = 15
     alignment_convergence_eps: float = 1e-4
     alignment_min_inlier_fraction: float = 0.40

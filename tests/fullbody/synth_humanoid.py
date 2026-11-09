@@ -28,6 +28,68 @@ def ramanujan_perimeter(a: float, b: float) -> float:
     """Analytic perimeter of an ellipse with semi-axes a and b using Ramanujan's formula."""
     return float(math.pi * (3.0 * (a + b) - math.sqrt((3.0 * a + b) * (a + 3.0 * b))))
 
+def compute_analytic_torso_circumference(y: float) -> float:
+    """
+    Compute exact Ramanujan perimeter at height y (in metres) for the synthetic humanoid.
+    Torso geometry:
+      - y in [0.80, 1.02]: pelvis lofted from hip (0.17, 0.13) to waist (0.14, 0.10)
+      - y in [1.02, 1.42]: torso lofted from waist (0.14, 0.10) to chest (0.16, 0.12)
+    """
+    a_chest, b_chest = 0.16, 0.12
+    a_waist, b_waist = 0.14, 0.10
+    a_hip, b_hip = 0.17, 0.13
+
+    if y <= 1.02:
+        t = max(0.0, min(1.0, (y - 0.80) / (1.02 - 0.80)))
+        a = a_hip + t * (a_waist - a_hip)
+        b = b_hip + t * (b_waist - b_hip)
+    else:
+        t = max(0.0, min(1.0, (y - 1.02) / (1.42 - 1.02)))
+        a = a_waist + t * (a_chest - a_waist)
+        b = b_waist + t * (b_chest - b_waist)
+
+    return ramanujan_perimeter(a, b) * 1000.0
+
+
+def compute_analytic_circumference_at_height(ring_name: str, y_m: float) -> float:
+    """
+    Compute ground truth circumference (in mm) at exact slicing height y_m.
+    Limb perimeters are constant along cylinder segments; torso rings taper continuously.
+    """
+    if "arm" in ring_name:
+        return 2.0 * math.pi * 0.04 * 1000.0
+    elif "thigh" in ring_name or "calf" in ring_name:
+        return 2.0 * math.pi * 0.06 * 1000.0
+    else:
+        return compute_analytic_torso_circumference(y_m)
+
+
+def compute_slice_sensitivity_table(
+    nominal_y: float = 1.28,
+    deltas_cm: Optional[List[float]] = None,
+) -> Dict[float, Dict[str, float]]:
+    """
+    Compute circumference sensitivity to slicing height offsets (+-1, +-2, +-3 cm).
+    Returns dict mapping delta_cm -> info dict with y_m, circumference_mm, delta_mm, pct_change.
+    """
+    if deltas_cm is None:
+        deltas_cm = [-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0]
+    base_c = compute_analytic_torso_circumference(nominal_y)
+    table = {}
+    for d_cm in deltas_cm:
+        y = nominal_y + d_cm * 0.01
+        c = compute_analytic_torso_circumference(y)
+        delta_c = c - base_c
+        pct = (delta_c / base_c) * 100.0
+        table[d_cm] = {
+            "y_m": round(y, 4),
+            "circumference_mm": round(c, 2),
+            "delta_mm": round(delta_c, 2),
+            "pct_change": round(pct, 2),
+        }
+    return table
+
+
 
 def build_articulated_humanoid_mesh(
     arm_abduction_deg: float = 35.0,
@@ -70,13 +132,10 @@ def build_articulated_humanoid_mesh(
         m.triangles = o3d.utility.Vector3iVector(np.array(fs, dtype=np.int32))
         return m
 
-    # Pelvis (Y: 0.80 - 1.02 m), Lower Torso (Y: 1.02 - 1.24 m), Chest (Y: 1.24 - 1.42 m)
-    # The chest region maintains (a_chest, b_chest) across the slicing plane (Y ~ 1.28 m)
-    # so that the analytic ground truth matches the geometry at the measurement plane.
+    # Pelvis (Y: 0.80 - 1.02 m) and Torso (Y: 1.02 - 1.42 m) continuously tapered
     m_pelvis = _tube(a_hip, b_hip, a_waist, b_waist, 0.80, 1.02)
-    m_waist_to_chest = _tube(a_waist, b_waist, a_chest, b_chest, 1.02, 1.24)
-    m_chest = _tube(a_chest, b_chest, a_chest, b_chest, 1.24, 1.42)
-    meshes.extend([m_pelvis, m_waist_to_chest, m_chest])
+    m_torso = _tube(a_waist, b_waist, a_chest, b_chest, 1.02, 1.42)
+    meshes.extend([m_pelvis, m_torso])
 
     # Head: sphere centered at Y = 1.65 m, radius 0.10 m -> crown exactly at Y = 1.75 m
     m_head = o3d.geometry.TriangleMesh.create_sphere(radius=0.10, resolution=20)
@@ -322,12 +381,24 @@ class SyntheticHumanoidCaptureRenderer:
             burst_depths = [_apply_noise(clean_depth) for _ in range(burst_count)]
             depth_out = burst_depths[0]
 
-            # 4. Compute ground-truth 3D keypoints in camera frame
+            # 4. Compute ground-truth 3D keypoints in camera frame with realistic noise
             kpt_names = list(skel_stop.keys())
             kpt_pts_cam = []
             for name in kpt_names:
                 pt_w = R_body @ skel_stop[name] + np.array([dx, 0.0, dz])
                 pt_c = T_cam_world[:3, :3] @ pt_w + T_cam_world[:3, 3]
+                if add_noise:
+                    # Realistic keypoint noise: sigma 1-3 cm per joint
+                    sigma = self.rng.uniform(0.01, 0.03)
+                    kpt_noise = self.rng.normal(0.0, sigma, size=3)
+                    # 5% outliers of 10-20 cm
+                    if self.rng.uniform(0.0, 1.0) < 0.05:
+                        outlier_mag = self.rng.uniform(0.10, 0.20)
+                        direction = self.rng.normal(0.0, 1.0, size=3)
+                        norm = np.linalg.norm(direction)
+                        if norm > 1e-6:
+                            kpt_noise += (direction / norm) * outlier_mag
+                    pt_c = pt_c + kpt_noise
                 kpt_pts_cam.append(pt_c)
 
             kpt_pts_cam_np = np.array(kpt_pts_cam, dtype=np.float32)

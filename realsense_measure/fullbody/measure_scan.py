@@ -31,29 +31,38 @@ logger = logging.getLogger(__name__)
 
 
 def estimate_crown_by_head_fit(
-    pts,
-    cfg,
-):
+    pts: np.ndarray,
+    cfg: FullBodyConfig,
+    y_neck: Optional[float] = None,
+) -> Tuple[float, float, float, float]:
     """
-    Fit a sphere to the head-region point cloud and return (apex_y_m, uncertainty_mm).
+    Fit a sphere to the head-region point cloud strictly restricted to the head
+    above the neck landmark (not 75th percentile of the whole body).
 
-    The apex is the top of the fitted sphere: apex_y = cy + r.
-    Uncertainty is 2x the RMS fit residual. Returns (nan, nan) when < 20 head pts.
+    Returns
+    -------
+    Tuple[float, float, float, float]:
+        (apex_y_m, uncertainty_mm, r_fit_mm, residual_rms_mm)
+        Returns (nan, nan, nan, nan) when < 20 head pts or fit degenerates.
     """
     if len(pts) < 20:
-        return float("nan"), float("nan")
+        return float("nan"), float("nan"), float("nan"), float("nan")
 
-    y_max = float(np.percentile(pts[:, 1], 99.9))
-    y_range = y_max - float(np.min(pts[:, 1]))
-    y_min_head = y_max - 0.25 * y_range
+    # Restrict strictly to cranium above neck landmark
+    if y_neck is not None and not math.isnan(y_neck):
+        y_min_head = float(y_neck + 0.02)
+    else:
+        y_max = float(np.percentile(pts[:, 1], 99.9))
+        y_min_head = float(y_max - 0.22)
+
     head_mask = (
         (pts[:, 1] >= y_min_head)
-        & (np.abs(pts[:, 0]) < 0.20)
-        & (np.abs(pts[:, 2]) < 0.20)
+        & (np.abs(pts[:, 0]) < 0.15)
+        & (np.abs(pts[:, 2]) < 0.15)
     )
     head_pts = pts[head_mask]
     if len(head_pts) < 20:
-        return float("nan"), float("nan")
+        return float("nan"), float("nan"), float("nan"), float("nan")
 
     # Linearised least-squares sphere fit
     # 2*cx*x + 2*cy*y + 2*cz*z + (r^2 - cx^2 - cy^2 - cz^2) = x^2 + y^2 + z^2
@@ -68,14 +77,21 @@ def estimate_crown_by_head_fit(
     cx_fit, cy_fit, cz_fit = result[0], result[1], result[2]
     r_sq = result[3] + cx_fit ** 2 + cy_fit ** 2 + cz_fit ** 2
     if r_sq <= 0.0:
-        return float("nan"), float("nan")
+        return float("nan"), float("nan"), float("nan"), float("nan")
     r_fit = float(np.sqrt(r_sq))
     apex_y = float(cy_fit) + r_fit
 
     centre = np.array([cx_fit, cy_fit, cz_fit])
     residuals = np.abs(np.sqrt(np.sum((head_pts - centre) ** 2, axis=1)) - r_fit)
-    uncertainty_mm = float(2.0 * np.sqrt(np.mean(residuals ** 2)) * 1000.0)
-    return apex_y, uncertainty_mm
+    residual_rms_mm = float(np.sqrt(np.mean(residuals ** 2)) * 1000.0)
+    uncertainty_mm = float(2.0 * residual_rms_mm)
+    r_fit_mm = float(r_fit * 1000.0)
+
+    # Anatomical cranial radius plausibility check: 75mm - 130mm, residual RMS <= 15mm
+    if r_fit < 0.075 or r_fit > 0.130 or residual_rms_mm > 15.0:
+        return float("nan"), float("nan"), float("nan"), float("nan")
+
+    return apex_y, uncertainty_mm, r_fit_mm, residual_rms_mm
 
 
 def measure_fused_scan(
@@ -135,8 +151,10 @@ def measure_fused_scan(
         notes=stature_notes,
     )
 
-    # 3b. Head-fit crown estimation (secondary stature estimate via sphere fit)
-    apex_hf_y, apex_hf_unc_mm = estimate_crown_by_head_fit(pts, cfg)
+    # 3b. Head-fit crown estimation (secondary stature estimate via sphere fit strictly above neck)
+    apex_hf_y, apex_hf_unc_mm, r_fit_mm, res_rms_mm = estimate_crown_by_head_fit(
+        pts, cfg, levels.get("neck_base")
+    )
     if not math.isnan(apex_hf_y):
         stature_hf_mm = (apex_hf_y - y_floor) * 1000.0
         results["stature_head_fit"] = MeasurementResult(
@@ -148,8 +166,8 @@ def measure_fused_scan(
             quality_flag=stature_flag,
             uncertainty_mm=max(apex_hf_unc_mm, 3.0),
             notes=(
-                f"stature from sphere fit to head region; "
-                f"sphere-fit uncertainty={apex_hf_unc_mm:.1f}mm"
+                f"stature from sphere fit to cranium above neck (y>={levels.get('neck_base', 0.0)+0.02:.2f}m); "
+                f"r_fit={r_fit_mm:.1f}mm, residual_rms={res_rms_mm:.1f}mm"
             ),
         )
 
@@ -226,7 +244,10 @@ def extract_ring_circumference(
     diff = points - plane.origin
     dist_to_plane = np.dot(diff, plane.normal)
     thickness = cfg.slice_thickness_m if not plane.is_limb else max(0.025, cfg.slice_thickness_m * 1.5)
-    slab_mask = np.abs(dist_to_plane) <= (thickness * 0.5)
+    raw_slab_mask = np.abs(dist_to_plane) <= (thickness * 0.5)
+    pts_slab_raw = points[raw_slab_mask]
+    labels_raw = labels[raw_slab_mask] if labels is not None else None
+    slab_mask = raw_slab_mask.copy()
 
     # 2. Filter points belonging to other body parts (mask arms from torso rings)
     if not plane.is_limb:
@@ -330,15 +351,37 @@ def extract_ring_circumference(
     # Bootstrap uncertainty over points
     uncertainty_mm = _bootstrap_polar_uncertainty(u_2d, v_2d, cfg)
 
+    # Coverage ceiling calculation (accounting for arm-masked sectors)
+    if not plane.is_limb and labels is not None:
+        raw_diff = pts_slab_raw - plane.origin
+        u_raw = np.dot(raw_diff, plane.u_axis)
+        v_raw = np.dot(raw_diff, plane.v_axis)
+        arm_pts_mask = is_arm_point(labels_raw) & (np.abs(pts_slab_raw[:, 0]) > 0.20)
+        if np.any(arm_pts_mask):
+            arm_angles = np.arctan2(v_raw[arm_pts_mask] - c_v, u_raw[arm_pts_mask] - c_u)
+            arm_bins = np.unique(np.clip(np.digitize(arm_angles, bin_edges) - 1, 0, M - 1))
+            blocked_frac = len(arm_bins) / float(M)
+            coverage_ceiling = float(max(0.70, min(1.0, 1.0 - blocked_frac)))
+        else:
+            coverage_ceiling = 1.0
+    else:
+        coverage_ceiling = 1.0
+
+    coverage_ratio = float(min(1.0, coverage / coverage_ceiling if coverage_ceiling > 0 else 1.0))
+    slice_h = float(plane.origin[1])
+
     res_polar = MeasurementResult(
         name=plane.name,
         value_mm=polar_perimeter_mm,
         method="polar_contour",
         coverage=coverage,
+        coverage_ceiling=coverage_ceiling,
+        coverage_ratio=coverage_ratio,
         interpolated_fraction=interpolated_frac,
         quality_flag=q_flag,
         uncertainty_mm=uncertainty_mm,
-        notes="periodic-interpolated polar radius with bias correction",
+        slice_height_m=slice_h,
+        notes=f"periodic-interpolated polar radius with bias correction (cov/ceil={coverage*100:.0f}%/{coverage_ceiling*100:.0f}%)",
     )
 
     res_hull = MeasurementResult(
@@ -346,10 +389,13 @@ def extract_ring_circumference(
         value_mm=hull_perimeter_mm,
         method="convex_hull",
         coverage=coverage,
+        coverage_ceiling=coverage_ceiling,
+        coverage_ratio=coverage_ratio,
         interpolated_fraction=interpolated_frac,
         quality_flag=q_flag,
         uncertainty_mm=uncertainty_mm,
-        notes="2D convex hull tape proxy",
+        slice_height_m=slice_h,
+        notes=f"2D convex hull tape proxy (cov/ceil={coverage*100:.0f}%/{coverage_ceiling*100:.0f}%)",
     )
 
     return res_polar, res_hull
