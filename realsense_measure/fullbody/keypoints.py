@@ -229,3 +229,41 @@ def _add_derived_midpoints(kpts: Keypoints3D) -> None:
             kpts.confidence = np.append(kpts.confidence, mid_c)
             kpts.visibility = np.append(kpts.visibility, mid_v)
 
+
+def average_burst_keypoints_2d(
+    burst_detections: List[Tuple[Dict[str, Tuple[float, float]], Dict[str, float], Dict[str, float]]],
+) -> Tuple[Dict[str, Tuple[float, float]], Dict[str, float], Dict[str, float]]:
+    """
+    Robustly average 2D keypoints across a burst of frames before lifting to 3D.
+    Takes median pixel coordinates across valid detections to reject transient tracking glitches.
+    """
+    if not burst_detections:
+        return {}, {}, {}
+
+    joint_pts: Dict[str, List[Tuple[float, float]]] = {}
+    joint_confs: Dict[str, List[float]] = {}
+    joint_vis: Dict[str, List[float]] = {}
+
+    for pts_2d, confs, vis in burst_detections:
+        for name, pt in pts_2d.items():
+            c = confs.get(name, 0.0)
+            v = vis.get(name, 0.0)
+            if c > 0.1:
+                joint_pts.setdefault(name, []).append(pt)
+                joint_confs.setdefault(name, []).append(c)
+                joint_vis.setdefault(name, []).append(v)
+
+    avg_pts: Dict[str, Tuple[float, float]] = {}
+    avg_confs: Dict[str, float] = {}
+    avg_vis: Dict[str, float] = {}
+
+    for name, pts in joint_pts.items():
+        if not pts:
+            continue
+        pts_np = np.array(pts, dtype=np.float64)
+        avg_pts[name] = (float(np.median(pts_np[:, 0])), float(np.median(pts_np[:, 1])))
+        avg_confs[name] = float(np.mean(joint_confs[name]))
+        avg_vis[name] = float(np.mean(joint_vis[name]))
+
+    return avg_pts, avg_confs, avg_vis
+

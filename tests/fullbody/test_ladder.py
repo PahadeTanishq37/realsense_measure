@@ -39,7 +39,12 @@ import numpy as np
 import open3d as o3d
 import pytest
 
-from realsense_measure.fullbody.alignment import align_stops
+from realsense_measure.fullbody.alignment import (
+    align_stops,
+    compute_ghosting_metric_mm,
+    compute_gravity_transform,
+    compute_keypoint_prior_yaw_legacy,
+)
 from realsense_measure.fullbody.burst import process_stop_burst
 from realsense_measure.fullbody.config import FullBodyConfig
 from realsense_measure.fullbody.confidence import compute_confidence_map
@@ -107,6 +112,11 @@ class LadderLevelResult:
     hole_crown: float
     hole_crotch: float
     hole_underarms: float
+    ghosting_mm: float = 0.0
+    n_clamped_stops: int = 0
+    n_needs_review_stops: int = 0
+    legacy_prior_yaw_err_deg: float = 0.0
+    legacy_prior_trans_err_mm: float = 0.0
 
 
 def run_ladder_level(
@@ -169,6 +179,9 @@ def run_ladder_level(
     # Compute pose errors — distinguish injected, prior-only, refined
     injected_yaws, prior_yaws, refined_yaws = [], [], []
     prior_trans_errors, refined_trans_errors = [], []
+    legacy_prior_yaws, legacy_prior_trans = [], []
+    T_grav_cam = compute_gravity_transform(consensus_floor)
+
     for a, s in zip(aligned, stops):
         if s.gt_yaw_deg is None or s.gt_T_canonical_camera is None:
             continue
@@ -190,7 +203,21 @@ def run_ladder_level(
             t_ref = a.T_canonical_camera[:3, 3]
             refined_trans_errors.append(float(np.linalg.norm(t_ref - t_gt) * 1000.0))
 
+        # Legacy non-robust prior evaluation under same noise model
+        kpts_leg = s.single_frame_keypoints_camera or s.keypoints_camera
+        if kpts_leg is not None:
+            kpts_grav_leg = kpts_leg.transform(T_grav_cam, "gravity")
+            leg_yaw, leg_c, _ = compute_keypoint_prior_yaw_legacy(kpts_grav_leg, nom_canonical, cfg)
+            legacy_prior_yaws.append(abs((leg_yaw - s.gt_yaw_deg + 180.0) % 360.0 - 180.0))
+            yaw_rad = np.deg2rad(leg_yaw)
+            c_y, s_y = np.cos(yaw_rad), np.sin(yaw_rad)
+            t_leg = np.array([-c_y * leg_c[0] + s_y * leg_c[2], 0.0, -s_y * leg_c[0] - c_y * leg_c[2]])
+            legacy_prior_trans.append(float(np.linalg.norm(t_leg - t_gt) * 1000.0))
+
     mesh, fused_pcd, hole_map = fuse_aligned_stops(stops, aligned, cfg)
+    ghosting_mm = compute_ghosting_metric_mm(aligned, mesh)
+    n_clamped = sum(1 for a in aligned if a.hit_clamp)
+    n_review = sum(1 for a in aligned if a.review_status == "NEEDS_REVIEW" or not a.accepted)
     ref_kpts = aligned[0].keypoints_canonical if aligned else None
     measurements = measure_fused_scan(fused_pcd, ref_kpts, cfg, hole_map=hole_map)
 
@@ -278,6 +305,11 @@ def run_ladder_level(
         hole_crown=hole_map.get("crown", 1.0),
         hole_crotch=hole_map.get("crotch", 1.0),
         hole_underarms=hole_map.get("underarms", 1.0),
+        ghosting_mm=ghosting_mm,
+        n_clamped_stops=n_clamped,
+        n_needs_review_stops=n_review,
+        legacy_prior_yaw_err_deg=float(np.mean(legacy_prior_yaws)) if legacy_prior_yaws else 0.0,
+        legacy_prior_trans_err_mm=float(np.mean(legacy_prior_trans)) if legacy_prior_trans else 0.0,
     )
 
 
@@ -405,6 +437,12 @@ def test_fullbody_error_ladder_multiseed(capsys):
         ch_gt_mean = a.get("chest_true_mm_mean", float("nan"))
         ch_signed = ch_measured_mean - ch_gt_mean if not math.isnan(ch_measured_mean) else float("nan")
 
+        leg_yaw = a.get("legacy_prior_yaw_err_deg_mean", 0.0)
+        leg_trans = a.get("legacy_prior_trans_err_mm_mean", 0.0)
+        ghost = a.get("ghosting_mm_mean", 0.0)
+        clamped = a.get("n_clamped_stops_mean", 0.0)
+        needs_review = a.get("n_needs_review_stops_mean", 0.0)
+
         row = (
             f"{lname:<6} | {ldesc:<32} | {prior_yaw:>8.2f}° | {ref_yaw:>7.2f}° | "
             f"{prior_trans:>9.1f}mm | {ref_trans:>7.1f}mm | "
@@ -417,10 +455,26 @@ def test_fullbody_error_ladder_multiseed(capsys):
         print(f"{'':>6}   {'± SD / HeadFit (r, res)':>32}             {ref_yaw_sd:>7.2f}° "
               f"          {ref_trans_sd:>7.1f}mm   (r={r_fit:.1f}mm, res={res_rms:.1f}mm)   "
               f"chest_signed={ch_signed:+.1f}mm")
+        print(f"{'':>6}   {'Robust vs Legacy Prior | Ghosting':>32}   "
+              f"Prior Gain: yaw {leg_yaw:.2f}°->{prior_yaw:.2f}°, trans {leg_trans:.1f}->{prior_trans:.1f}mm | "
+              f"ghosting={ghost:.2f}mm, clamped={clamped:.1f}, review={needs_review:.1f}")
 
     print("=" * 145)
 
-    # 3. Diagnostic explanation of L0 translation vs L1-L4
+    # 3. Head-fit Stature Report across L1-L4 with Uncertainty (Item 5)
+    print("\n" + "=" * 80)
+    print("HEAD-FIT STATURE ACROSS LEVELS L1-L4 (Mean ± Residual Uncertainty):")
+    print("=" * 80)
+    for lvl_idx in [1, 2, 3, 4]:
+        a = aggs[lvl_idx]
+        lname = LEVEL_CONFIGS[lvl_idx]["level_name"]
+        hf_mean = a.get("stature_head_fit_mm_mean", float("nan"))
+        hf_err = a.get("stature_head_fit_err_mm_mean", float("nan"))
+        res_rms = a.get("head_fit_residual_mm_mean", float("nan"))
+        print(f"  {lname}: {hf_mean:.1f} ± {res_rms:.1f} mm  (error vs 1750mm true: {hf_err:.1f} mm)")
+    print("=" * 80)
+
+    # 4. Diagnostic explanation of L0 translation vs L1-L4
     print("\nDiagnostic Finding (Item 4 - L0 vs L1-L4 Translation):")
     print("  In single-frame L0 (burst=1), grazing angle invalidation clips the lateral torso silhouettes")
     print("  asymmetrically. Point-to-plane ICP on an elliptical cylinder has an unconstrained tangential sliding null-space.")

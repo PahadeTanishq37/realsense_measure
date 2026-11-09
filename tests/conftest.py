@@ -43,5 +43,3 @@ except (ImportError, AttributeError):
 
     mock_rs = MockRs()
     sys.modules["pyrealsense2"] = mock_rs
-    import realsense_measure.camera.realsense_capture as rsc
-    rsc.rs = mock_rs

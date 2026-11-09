@@ -89,6 +89,10 @@ class FullBodyConfig:
     arm_refinement_max_rotation_deg: float = 20.0
     arm_refinement_max_translation_m: float = 0.05
     rigid_parts_only: bool = True
+    body_axis_drift_sigma_m: float = 0.02
+    icp_prior_weight: float = 0.5
+    icp_tangent_penalty_weight: float = 2.0
+    max_inter_stop_residual_mm: float = 15.0
 
     # -------------------------------------------------------------------------
     # TSDF Fusion

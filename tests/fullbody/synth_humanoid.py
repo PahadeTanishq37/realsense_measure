@@ -383,25 +383,36 @@ class SyntheticHumanoidCaptureRenderer:
 
             # 4. Compute ground-truth 3D keypoints in camera frame with realistic noise
             kpt_names = list(skel_stop.keys())
-            kpt_pts_cam = []
-            for name in kpt_names:
-                pt_w = R_body @ skel_stop[name] + np.array([dx, 0.0, dz])
-                pt_c = T_cam_world[:3, :3] @ pt_w + T_cam_world[:3, 3]
-                if add_noise:
-                    # Realistic keypoint noise: sigma 1-3 cm per joint
-                    sigma = self.rng.uniform(0.01, 0.03)
-                    kpt_noise = self.rng.normal(0.0, sigma, size=3)
-                    # 5% outliers of 10-20 cm
-                    if self.rng.uniform(0.0, 1.0) < 0.05:
-                        outlier_mag = self.rng.uniform(0.10, 0.20)
-                        direction = self.rng.normal(0.0, 1.0, size=3)
-                        norm = np.linalg.norm(direction)
-                        if norm > 1e-6:
-                            kpt_noise += (direction / norm) * outlier_mag
-                    pt_c = pt_c + kpt_noise
-                kpt_pts_cam.append(pt_c)
+            
+            def _sample_noisy_kpts() -> np.ndarray:
+                pts = []
+                for name in kpt_names:
+                    pt_w = R_body @ skel_stop[name] + np.array([dx, 0.0, dz])
+                    pt_c = T_cam_world[:3, :3] @ pt_w + T_cam_world[:3, 3]
+                    if add_noise:
+                        sigma = self.rng.uniform(0.01, 0.03)
+                        kpt_noise = self.rng.normal(0.0, sigma, size=3)
+                        if self.rng.uniform(0.0, 1.0) < 0.05:
+                            outlier_mag = self.rng.uniform(0.10, 0.20)
+                            direction = self.rng.normal(0.0, 1.0, size=3)
+                            norm = np.linalg.norm(direction)
+                            if norm > 1e-6:
+                                kpt_noise += (direction / norm) * outlier_mag
+                        pt_c = pt_c + kpt_noise
+                    pts.append(pt_c)
+                return np.array(pts, dtype=np.float32)
 
-            kpt_pts_cam_np = np.array(kpt_pts_cam, dtype=np.float32)
+            # Single-frame sample (previous non-burst/non-robust baseline)
+            single_frame_pts = _sample_noisy_kpts()
+
+            if burst_count > 1 and add_noise:
+                # Average keypoints across the whole burst (~30 frames) before lifting
+                burst_samples = [_sample_noisy_kpts() for _ in range(burst_count)]
+                # Robust median across the burst frames
+                kpt_pts_cam_np = np.median(np.stack(burst_samples, axis=0), axis=0).astype(np.float32)
+            else:
+                kpt_pts_cam_np = single_frame_pts
+
             kpts_cam = Keypoints3D(
                 names=kpt_names,
                 points=kpt_pts_cam_np,
@@ -418,6 +429,14 @@ class SyntheticHumanoidCaptureRenderer:
             T_canonical_cam_gt = T_canonical_world @ np.linalg.inv(T_cam_world)
             gt_canonical_yaw = (180.0 - actual_yaw + 360.0) % 360.0
 
+            single_kpts_cam = Keypoints3D(
+                names=kpt_names,
+                points=single_frame_pts,
+                confidence=np.ones(len(kpt_names), dtype=np.float32),
+                visibility=np.ones(len(kpt_names), dtype=np.float32),
+                frame="camera",
+            )
+
             stop_data = StopData(
                 stop_id=stop_idx,
                 nominal_angle_deg=nominal_yaw,
@@ -425,6 +444,7 @@ class SyntheticHumanoidCaptureRenderer:
                 depth=depth_out,
                 intrinsics=self.intrinsics,
                 keypoints_camera=kpts_cam,
+                single_frame_keypoints_camera=single_kpts_cam,
                 raw_burst_colors=burst_colors,
                 raw_burst_depths=burst_depths,
                 gt_yaw_deg=gt_canonical_yaw,

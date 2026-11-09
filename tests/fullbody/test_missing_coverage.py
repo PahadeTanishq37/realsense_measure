@@ -617,3 +617,192 @@ def test_tsdf_scalable_volume_minimal_reproducer():
     mesh_s = vol_s.extract_triangle_mesh()
     # Scalable produces 0 vertices in Open3D at 4mm; asserting > 0 causes the expected failure (xfail)
     assert len(mesh_s.vertices) > 0, "ScalableTSDFVolume at 4mm produced 0 vertices (expected limitation)"
+
+
+# =============================================================================
+# 9. Robust Prior, Common Axis, Loop Closure, and Ghosting Metrics
+# =============================================================================
+
+def test_robust_prior_estimator_joint_outlier_rejection():
+    """Verify that robust prior rejects a 15 cm outlier joint whereas legacy estimator fails."""
+    from realsense_measure.fullbody.alignment import compute_keypoint_prior_yaw_legacy
+
+    cfg = FullBodyConfig()
+    # Ground truth: subject facing camera (180 deg in canonical), shoulders at X = +-0.18, Z = 1.30
+    kpts_clean = Keypoints3D(
+        names=["left_shoulder", "right_shoulder", "left_hip", "right_hip", "nose"],
+        points=np.array([
+            [ 0.18, 1.40, 1.30],
+            [-0.18, 1.40, 1.30],
+            [ 0.10, 0.90, 1.30],
+            [-0.10, 0.90, 1.30],
+            [ 0.00, 1.60, 1.20],
+        ], dtype=np.float32),
+        confidence=np.ones(5, dtype=np.float32),
+        visibility=np.ones(5, dtype=np.float32),
+        frame="gravity",
+    )
+
+    yaw_clean, c_clean, v_clean = compute_keypoint_prior_yaw(kpts_clean, 180.0, cfg)
+    assert v_clean is True
+    assert abs(yaw_clean - 180.0) < 1.0
+
+    # Inject 15 cm outlier into left shoulder
+    kpts_outlier = Keypoints3D(
+        names=list(kpts_clean.names),
+        points=kpts_clean.points.copy(),
+        confidence=kpts_clean.confidence.copy(),
+        visibility=kpts_clean.visibility.copy(),
+        frame="gravity",
+    )
+    kpts_outlier.points[0] += np.array([0.15, 0.0, 0.15], dtype=np.float32)
+
+    # Robust prior estimator must reject corrupted shoulder pair and use hips, keeping error < 5 deg
+    yaw_robust, c_robust, v_robust = compute_keypoint_prior_yaw(kpts_outlier, 180.0, cfg)
+    assert v_robust is True
+    err_robust = abs((yaw_robust - 180.0 + 180.0) % 360.0 - 180.0)
+    assert err_robust < 5.0, f"Robust yaw error {err_robust:.2f} deg must be < 5 deg"
+
+    # Legacy prior is corrupted (> 10 deg error)
+    yaw_legacy, _, _ = compute_keypoint_prior_yaw_legacy(kpts_outlier, 180.0, cfg)
+    err_legacy = abs((yaw_legacy - 180.0 + 180.0) % 360.0 - 180.0)
+    assert err_legacy > err_robust, "Robust estimator must outperform legacy under joint outlier"
+
+
+def test_common_vertical_axis_and_drift_shrinkage():
+    """Verify joint Huber estimation of common turning axis and MAP shrinkage of per-stop sway."""
+    from realsense_measure.fullbody.alignment import estimate_common_vertical_axis_and_drift
+
+    cfg = FullBodyConfig(body_axis_drift_sigma_m=0.02)
+    true_axis = np.array([0.05, 1.25], dtype=np.float64)  # (X, Z)
+
+    # 8 stops with 2 cm random sway plus one 15 cm outlier stop
+    rng = np.random.RandomState(42)
+    centers = []
+    weights = []
+    for i in range(8):
+        sway = rng.normal(0.0, 0.015, size=2)
+        c = np.array([true_axis[0] + sway[0], 0.90, true_axis[1] + sway[1]], dtype=np.float64)
+        centers.append(c)
+        weights.append(1.0)
+
+    # Add outlier at stop 7
+    centers[7] += np.array([0.15, 0.0, 0.15])
+    weights[7] = 0.2
+
+    est_axis, reg_centers = estimate_common_vertical_axis_and_drift(centers, weights, cfg)
+    axis_err = float(np.linalg.norm(est_axis - true_axis))
+    assert axis_err < 0.02, f"Estimated axis error {axis_err*1000:.1f}mm exceeds 20mm"
+
+    # Verify outlier stop 7 is shrunk toward common axis
+    raw_dist = float(np.linalg.norm(centers[7][[0, 2]] - true_axis))
+    shrunk_dist = float(np.linalg.norm(reg_centers[7][[0, 2]] - true_axis))
+    assert shrunk_dist < raw_dist, "Outlier stop must be shrunk toward common vertical axis"
+
+
+def test_loop_closure_drift_and_needs_review_flag():
+    """Verify loop closure check distributes small drift and flags large drift as NEEDS_REVIEW."""
+    from realsense_measure.fullbody.alignment import check_and_enforce_loop_closure
+    from realsense_measure.fullbody.types import AlignedStop
+
+    cfg = FullBodyConfig(turn_direction="cw")
+
+    # 4 stops with small 4 deg loop closure drift
+    stops_small = []
+    nominal_yaws = [180.0, 90.0, 0.0, 270.0]
+    for i, y in enumerate(nominal_yaws):
+        s = AlignedStop(
+            stop_id=i,
+            nominal_angle_deg=float(i * 90),
+            T_canonical_camera=np.eye(4),
+            prior_yaw_deg=y,
+            refined_yaw_deg=y + (1.0 if i == 3 else 0.0),
+            prior_translation_m=np.zeros(3),
+            refined_translation_m=np.zeros(3),
+            residual_before_mm=0.0,
+            residual_after_mm=5.0,
+            inlier_fraction=1.0,
+            accepted=True,
+        )
+        stops_small.append(s)
+
+    drift = check_and_enforce_loop_closure(stops_small, cfg)
+    assert abs(drift) <= 20.0
+    assert stops_small[0].review_status == "ACCEPTED"
+
+    # Stops with massive 40 deg drift -> must be flagged as NEEDS_REVIEW
+    stops_bad = []
+    for i, y in enumerate(nominal_yaws):
+        s = AlignedStop(
+            stop_id=i,
+            nominal_angle_deg=float(i * 90),
+            T_canonical_camera=np.eye(4),
+            prior_yaw_deg=y,
+            refined_yaw_deg=y + (40.0 if i == 3 else 0.0),
+            prior_translation_m=np.zeros(3),
+            refined_translation_m=np.zeros(3),
+            residual_before_mm=0.0,
+            residual_after_mm=5.0,
+            inlier_fraction=1.0,
+            accepted=True,
+        )
+        stops_bad.append(s)
+
+    drift_bad = check_and_enforce_loop_closure(stops_bad, cfg)
+    assert abs(drift_bad) > 20.0
+    assert stops_bad[0].review_status == "NEEDS_REVIEW"
+
+
+def test_ghosting_metric_calculation():
+    """Verify that ghosting metric is near zero for perfectly aligned clouds and positive for shifted clouds."""
+    from realsense_measure.fullbody.alignment import compute_ghosting_metric_mm
+    from realsense_measure.fullbody.types import AlignedStop
+
+    # Ground truth reference box
+    box_pcd = o3d.geometry.PointCloud()
+    pts = np.array([
+        [0.0, 0.0, 0.0],
+        [0.1, 0.0, 0.0],
+        [0.0, 0.1, 0.0],
+        [0.1, 0.1, 0.0],
+    ], dtype=np.float64)
+    box_pcd.points = o3d.utility.Vector3dVector(pts)
+
+    s0 = AlignedStop(
+        stop_id=0,
+        nominal_angle_deg=0.0,
+        T_canonical_camera=np.eye(4),
+        prior_yaw_deg=0.0,
+        refined_yaw_deg=0.0,
+        prior_translation_m=np.zeros(3),
+        refined_translation_m=np.zeros(3),
+        residual_before_mm=0.0,
+        residual_after_mm=0.0,
+        inlier_fraction=1.0,
+        accepted=True,
+        pcd_canonical=o3d.geometry.PointCloud(box_pcd),
+    )
+
+    # Identical cloud -> 0.0 mm ghosting
+    ghost_zero = compute_ghosting_metric_mm([s0], box_pcd)
+    assert ghost_zero == pytest.approx(0.0, abs=1e-3)
+
+    # Offset cloud by 10 mm in X -> ghosting ~ 10 mm
+    pcd_shifted = o3d.geometry.PointCloud(box_pcd)
+    pcd_shifted.translate([0.010, 0.0, 0.0])
+    s1 = AlignedStop(
+        stop_id=1,
+        nominal_angle_deg=0.0,
+        T_canonical_camera=np.eye(4),
+        prior_yaw_deg=0.0,
+        refined_yaw_deg=0.0,
+        prior_translation_m=np.zeros(3),
+        refined_translation_m=np.zeros(3),
+        residual_before_mm=0.0,
+        residual_after_mm=0.0,
+        inlier_fraction=1.0,
+        accepted=True,
+        pcd_canonical=pcd_shifted,
+    )
+    ghost_shifted = compute_ghosting_metric_mm([s1], box_pcd)
+    assert ghost_shifted == pytest.approx(10.0, abs=1.0)

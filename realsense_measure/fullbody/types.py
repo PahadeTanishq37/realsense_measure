@@ -108,6 +108,7 @@ class StopData:
     gt_yaw_deg: Optional[float] = None
     gt_translation_m: Optional[np.ndarray] = None
     gt_T_canonical_camera: Optional[np.ndarray] = None
+    single_frame_keypoints_camera: Optional[Keypoints3D] = None
 
 
 @dataclass
@@ -132,6 +133,8 @@ class AlignedStop:
     confidence_canonical: Optional[np.ndarray] = None
     body_part_labels: Optional[np.ndarray] = None  # per-point integer label
     prior_T_canonical_camera: Optional[np.ndarray] = None
+    hit_clamp: bool = False
+    review_status: str = "ACCEPTED"  # "ACCEPTED", "CLAMPED_PRIOR", "NEEDS_REVIEW"
 
 
 @dataclass
