@@ -127,3 +127,14 @@ class FullBodyConfig:
     save_debug_visualizations: bool = False
     verbose: bool = False
 
+    def __post_init__(self) -> None:
+        if self.turn_direction not in ("cw", "ccw"):
+            raise ValueError(
+                f"Invalid turn_direction '{self.turn_direction}'. Must be 'cw' or 'ccw'."
+            )
+        if self.camera_portrait_rotation not in ("cw", "ccw"):
+            raise ValueError(
+                f"Invalid camera_portrait_rotation '{self.camera_portrait_rotation}'. Must be 'cw' or 'ccw'."
+            )
+
+

@@ -3,36 +3,30 @@ realsense_measure/fullbody/cli.py
 
 Command-line interface for the model-free full-body scanning package.
 Subcommands:
-  scan        Run full acquisition/replay, alignment, fusion, and measurement.
-  measure     Extract anthropometric measurements from an existing fused scan.
-  validate    Compare scan measurements against physical tape measurements.
-  sweet-spot  Evaluate capture geometry and report under-covered anatomical regions.
-  review      Open 3D interactive viewer for fused mesh and point cloud.
+  capture       Live eight-stop capture controller with operator preview.
+  check-camera  Verify RealSense orientation, FOV, and depth sanity (no session).
+  scan          Run full acquisition/replay, alignment, fusion, and measurement.
+  measure       Extract anthropometric measurements from an existing fused scan.
+  validate      Compare scan measurements against physical tape measurements.
+  sweet-spot    Evaluate capture geometry and report under-covered anatomical regions.
+  review        Open 3D interactive viewer for fused mesh and point cloud.
+  keypoints-check Audit MediaPipe Pose detection on a single frame.
+
+Strictly lazy imports so importing this module never pulls in Open3D or pyrealsense2.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 from pathlib import Path
 import sys
-from typing import List, Optional
+import time
+from typing import Any, List, Optional
 
 import cv2
 import numpy as np
-import open3d as o3d
-
-from realsense_measure.fullbody.alignment import align_stops
-from realsense_measure.fullbody.config import FullBodyConfig
-from realsense_measure.fullbody.confidence import compute_confidence_map
-from realsense_measure.fullbody.floor import fit_floor_plane, verify_floor_consistency
-from realsense_measure.fullbody.fusion import fuse_aligned_stops
-from realsense_measure.fullbody.io import load_capture_session, load_scan_result, save_scan_result
-from realsense_measure.fullbody.keypoints import MediaPipePoseDetector, lift_keypoints_to_3d
-from realsense_measure.fullbody.measure_scan import measure_fused_scan
-from realsense_measure.fullbody.sweet_spot import evaluate_capture_configuration
-from realsense_measure.fullbody.types import ScanResult
-from realsense_measure.fullbody.validate import compare_with_tape, format_validation_table, load_tape_measurements
 
 logger = logging.getLogger("realsense_measure.fullbody")
 
@@ -44,7 +38,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="subcommand", required=True)
 
-    # 1. scan
+    # 1. capture (Stage 27 live capture controller)
+    p_cap = subparsers.add_parser("capture", help="Live eight-stop capture controller with operator preview.")
+    p_cap.add_argument("--out", type=str, required=True, help="Destination directory for the capture session.")
+    p_cap.add_argument("--subject-id", type=str, required=True, help="Anonymous subject ID (e.g. SUBJ_01, TEST_42).")
+    p_cap.add_argument("--stops", type=int, default=8, help="Number of stops (default: 8).")
+    p_cap.add_argument("--turn", type=str, choices=["cw", "ccw"], default="cw", help="Turn direction ('cw' or 'ccw').")
+    p_cap.add_argument("--portrait", type=str, choices=["cw", "ccw"], default="cw", help="Portrait camera orientation ('cw' or 'ccw').")
+    p_cap.add_argument("--fake", action="store_true", help="Use synthetic FakeCamera instead of hardware RealSense.")
+    p_cap.add_argument("--burst-frames", type=int, default=30, help="Frames per stop burst (default: 30).")
+    p_cap.add_argument("--headless", action="store_true", help="Run without opening GUI preview window.")
+
+    # 2. check-camera (Stage 27 hardware sanity check snapshot)
+    p_chk = subparsers.add_parser("check-camera", help="Verify RealSense orientation, FOV, and depth sanity (no session).")
+    p_chk.add_argument("--portrait", type=str, choices=["cw", "ccw"], default="cw", help="Portrait rotation ('cw' or 'ccw').")
+    p_chk.add_argument("--out", type=str, default="scan_output", help="Output directory to save check snapshot into DIR/check/.")
+    p_chk.add_argument("--fake", action="store_true", help="Use synthetic FakeCamera for headless testing.")
+
+    # 3. scan
     p_scan = subparsers.add_parser("scan", help="Run full-body alignment, fusion, and measurement.")
     p_scan.add_argument("--capture", type=str, required=True, help="Path to raw capture directory.")
     p_scan.add_argument("--out", type=str, default="scan_output/fullbody", help="Output directory.")
@@ -53,24 +64,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_scan.add_argument("--no-viz", action="store_true", help="Run without opening GUI windows.")
     p_scan.add_argument("--verbose", action="store_true", help="Enable debug logging.")
 
-    # 2. measure
+    # 4. measure
     p_meas = subparsers.add_parser("measure", help="Extract measurements from an existing fused scan.")
     p_meas.add_argument("--scan", type=str, required=True, help="Directory containing fused.ply or scan_result.json.")
 
-    # 3. validate
+    # 5. validate
     p_val = subparsers.add_parser("validate", help="Compare scan measurements with physical tape values.")
     p_val.add_argument("--scan", type=str, required=True, help="Scan output directory.")
     p_val.add_argument("--tape", type=str, default="data/tape_measurements.json", help="Tape measurements JSON.")
 
-    # 4. sweet-spot
+    # 6. sweet-spot
     p_sw = subparsers.add_parser("sweet-spot", help="Evaluate capture geometry information score.")
     p_sw.add_argument("--scan", type=str, required=True, help="Scan directory or capture path.")
 
-    # 5. review
+    # 7. review
     p_rev = subparsers.add_parser("review", help="Review fused 3D assets in Open3D.")
     p_rev.add_argument("--scan", type=str, required=True, help="Scan output directory.")
 
-    # 6. keypoints-check
+    # 8. keypoints-check
     p_kpt = subparsers.add_parser(
         "keypoints-check",
         help="Run MediaPipe Pose on color image, overlay 33 joints, and print confidence.",
@@ -82,8 +93,191 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def run_pipeline(capture_dir: Path, out_dir: Path, cfg: FullBodyConfig) -> ScanResult:
+def _run_capture(args: argparse.Namespace) -> int:
+    """Execute live 8-stop capture controller with operator preview."""
+    from realsense_measure.fullbody.capture_controller import CaptureController, CaptureThresholds, ControllerState
+    from realsense_measure.fullbody.capture_ui import run_ui_loop
+    from realsense_measure.fullbody.session_format import SessionWriter, validate_anonymous_subject_id
+
+    try:
+        subject_id = validate_anonymous_subject_id(args.subject_id)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if getattr(args, "fake", False):
+        from tests.fullbody.fake_camera import FakeCamera
+        cam = FakeCamera(
+            width=480,
+            height=848,
+            depth_scale=0.001,
+            depth_units="sensor_units",
+            fps=30.0,
+        )
+    else:
+        from realsense_measure.fullbody.capture_camera import RealSenseCaptureAdapter, full_body_camera_config
+        cam_cfg = full_body_camera_config(portrait_rotation=args.portrait)
+        cam = RealSenseCaptureAdapter(camera_config=cam_cfg, portrait_rotation=args.portrait)
+
+    try:
+        cam.start()
+    except Exception as exc:
+        print(f"Error: Failed to start camera: {exc}", file=sys.stderr)
+        return 1
+
+    accepted_stops = 0
+    controller: Optional[CaptureController] = None
+
+    try:
+        writer = SessionWriter(
+            root=out_dir,
+            subject_id=subject_id,
+            n_stops=args.stops,
+            turn_direction=args.turn,
+            camera_portrait_rotation=args.portrait,
+            intrinsics=cam.intrinsics,
+            depth_scale=cam.depth_scale,
+            depth_units=cam.depth_units,
+            device_info=cam.device_info(),
+        )
+
+        thresholds = CaptureThresholds(burst_frames=args.burst_frames)
+        controller = CaptureController(camera=cam, writer=writer, thresholds=thresholds)
+
+        headless = bool(getattr(args, "headless", False))
+        run_ui_loop(controller, headless=headless)
+
+    except KeyboardInterrupt:
+        print("\nCapture interrupted by operator (Ctrl-C).")
+    except Exception as exc:
+        print(f"\nCapture error: {exc}", file=sys.stderr)
+    finally:
+        cam.stop()
+
+        # Check how many stops were accepted
+        for stop_idx in range(args.stops):
+            s_json = out_dir / f"stop_{stop_idx:02d}" / "stop.json"
+            if s_json.exists():
+                try:
+                    with open(s_json, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    if data.get("accepted_attempt") is not None:
+                        accepted_stops += 1
+                except Exception:
+                    pass
+
+    if controller is not None and controller.state == ControllerState.DONE:
+        print(f"\nCapture session successfully finalized at: {out_dir}")
+        print(f"Accepted all {args.stops} stops.")
+        return 0
+    else:
+        print(f"\nSession unfinalized at {out_dir}. Accepted stops: {accepted_stops} of {args.stops}.")
+        print("Raw attempt data and integrity hashes remain intact on disk.")
+        return 1
+
+
+def _run_check_camera(args: argparse.Namespace) -> int:
+    """Verify RealSense orientation, FOV, and depth sanity (no session)."""
+    if getattr(args, "fake", False):
+        from tests.fullbody.fake_camera import FakeCamera
+        cam = FakeCamera(width=480, height=848, depth_scale=0.001, depth_units="sensor_units")
+    else:
+        from realsense_measure.fullbody.capture_camera import RealSenseCaptureAdapter, full_body_camera_config
+        cam_cfg = full_body_camera_config(portrait_rotation=args.portrait)
+        cam = RealSenseCaptureAdapter(camera_config=cam_cfg, portrait_rotation=args.portrait)
+
+    try:
+        cam.start()
+    except Exception as exc:
+        print(f"Error starting camera: {exc}", file=sys.stderr)
+        return 1
+
+    last_color: Optional[np.ndarray] = None
+    last_depth: Optional[np.ndarray] = None
+
+    try:
+        # Stream for approx 5 seconds or until frames acquired
+        start_time = time.time()
+        while (time.time() - start_time) < 5.0:
+            c, r, f, ts = cam.read_raw_filtered()
+            if c is not None and r is not None:
+                last_color = c
+                last_depth = r
+            time.sleep(0.033)
+    finally:
+        cam.stop()
+
+    if last_color is None or last_depth is None:
+        print("Error: Could not acquire valid frames from camera.", file=sys.stderr)
+        return 1
+
+    dev_info = cam.device_info()
+    intr = cam.intrinsics
+    scale = cam.depth_scale
+    h, w = last_depth.shape[:2]
+
+    d_m = last_depth.astype(np.float32) * (scale if cam.depth_units == "sensor_units" else 1.0)
+    roi = d_m[int(0.25 * h) : int(0.75 * h), int(0.25 * w) : int(0.75 * w)]
+    valid_roi = roi[(roi > 0.3) & (roi < 3.5)]
+    med_depth_m = float(np.median(valid_roi)) if len(valid_roi) > 0 else 0.0
+    valid_frac = float(len(valid_roi)) / float(roi.size)
+
+    print("\n" + "=" * 60)
+    print("REALSENSE CAMERA CHECK REPORT")
+    print("=" * 60)
+    print(f"Device Name:        {dev_info.get('name', 'Intel RealSense')}")
+    print(f"Serial Number:      {dev_info.get('serial_number', 'UNKNOWN')}")
+    print(f"Firmware Version:   {dev_info.get('firmware_version', 'UNKNOWN')}")
+    print(f"Depth Scale:        {scale}")
+    print(f"Stream Resolution:  {intr.get('width')}x{intr.get('height')}")
+    print(f"Intrinsics (Rot):   fx={intr.get('fx'):.2f}, fy={intr.get('fy'):.2f}, cx={intr.get('cx'):.2f}, cy={intr.get('cy'):.2f}")
+    print(f"Portrait Rotation:  {args.portrait} (applied: {intr.get('is_post_rotation')})")
+    print(f"ROI Median Depth:   {med_depth_m:.3f} m")
+    print(f"ROI Valid Fraction: {valid_frac * 100.0:.1f} %")
+    print("=" * 60 + "\n")
+
+    check_dir = Path(args.out) / "check"
+    check_dir.mkdir(parents=True, exist_ok=True)
+
+    from realsense_measure.fullbody.capture_ui import colorize_depth_m
+    depth_vis = colorize_depth_m(d_m)
+
+    cv2.imwrite(str(check_dir / "check_color.png"), last_color)
+    cv2.imwrite(str(check_dir / "check_depth_colorized.png"), depth_vis)
+
+    metrics_txt = check_dir / "check_metrics.txt"
+    with open(metrics_txt, "w", encoding="utf-8") as f:
+        f.write(f"device_name: {dev_info.get('name')}\n")
+        f.write(f"serial_number: {dev_info.get('serial_number')}\n")
+        f.write(f"firmware_version: {dev_info.get('firmware_version')}\n")
+        f.write(f"depth_scale: {scale}\n")
+        f.write(f"resolution: {intr.get('width')}x{intr.get('height')}\n")
+        f.write(f"intrinsics: fx={intr.get('fx')}, fy={intr.get('fy')}, cx={intr.get('cx')}, cy={intr.get('cy')}\n")
+        f.write(f"portrait_rotation: {args.portrait}\n")
+        f.write(f"roi_median_depth_m: {med_depth_m:.3f}\n")
+        f.write(f"roi_valid_fraction: {valid_frac:.4f}\n")
+
+    print(f"Snapshot saved to: {check_dir}")
+    print("  - check_color.png")
+    print("  - check_depth_colorized.png")
+    print("  - check_metrics.txt\n")
+    return 0
+
+
+def run_pipeline(capture_dir: Path, out_dir: Path, cfg: Any) -> Any:
     """Execute the complete full-body reconstruction and measurement pipeline."""
+    from realsense_measure.fullbody.alignment import align_stops
+    from realsense_measure.fullbody.confidence import compute_confidence_map
+    from realsense_measure.fullbody.floor import fit_floor_plane, verify_floor_consistency
+    from realsense_measure.fullbody.fusion import fuse_aligned_stops
+    from realsense_measure.fullbody.io import load_capture_session, save_scan_result
+    from realsense_measure.fullbody.keypoints import MediaPipePoseDetector, lift_keypoints_to_3d
+    from realsense_measure.fullbody.measure_scan import measure_fused_scan
+    from realsense_measure.fullbody.types import ScanResult
+
     logger.info(f"Loading capture session from {capture_dir} ...")
     stops = load_capture_session(capture_dir, cfg)
 
@@ -108,44 +302,16 @@ def run_pipeline(capture_dir: Path, out_dir: Path, cfg: FullBodyConfig) -> ScanR
         )
         s.confidence_map = conf_map
 
-        # 4. Backproject filtered depth to camera-frame point cloud
-        h, w = filtered_depth.shape[:2]
-        fx, fy = s.intrinsics.get_focal_length()
-        cx, cy = s.intrinsics.get_principal_point()
-        u_grid, v_grid = np.meshgrid(np.arange(w), np.arange(h))
-        val = filtered_depth > 0
-        z_v = filtered_depth[val]
-        x_v = (u_grid[val] - cx) * z_v / fx
-        y_v = (v_grid[val] - cy) * z_v / fy
-        pts_3d = np.stack([x_v, y_v, z_v], axis=1)
+    rep_floor = verify_floor_consistency(detected_floors, cfg)
+    logger.info(f"Floor plane verification complete (normal={rep_floor.normal}, height={rep_floor.point_on_plane[1]:.3f} m).")
 
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(pts_3d)
-        # Assign colors
-        color_rgb = cv2.cvtColor(s.color, cv2.COLOR_BGR2RGB)
-        pcd.colors = o3d.utility.Vector3dVector(color_rgb[val] / 255.0)
-        s.pcd = pcd
+    # Alignment
+    logger.info("Aligning multi-stop point clouds with joint prior and 4-DoF MAP-ICP ...")
+    aligned = align_stops(stops, rep_floor, cfg)
 
-    # Consensus floor
-    if detected_floors:
-        _, consensus_floor = verify_floor_consistency(detected_floors, cfg)
-    else:
-        logger.warning("No floor planes detected, falling back to nominal horizontal floor.")
-        from realsense_measure.fullbody.types import FloorPlane
-        consensus_floor = FloorPlane(
-            coefficients=np.array([0.0, -1.0, 0.0, 0.90]),
-            normal=np.array([0.0, -1.0, 0.0]),
-            point_on_plane=np.array([0.0, 0.90, 1.30]),
-            gravity_R_cam=np.eye(3),
-        )
-
-    # Multi-stop alignment
-    logger.info("Aligning stops into canonical ISB subject frame ...")
-    aligned = align_stops(stops, consensus_floor, cfg)
-
-    # Volumetric fusion
-    logger.info("Executing TSDF volumetric fusion ...")
-    mesh, fused_pcd, hole_map = fuse_aligned_stops(stops, aligned, cfg)
+    # Fusion
+    logger.info("Fusing aligned point clouds via Open3D TSDF Integration ...")
+    mesh, fused_pcd, hole_map = fuse_aligned_stops(aligned, cfg)
 
     # Anthropometric measurements
     logger.info("Extracting tape-style anthropometric measurements ...")
@@ -174,7 +340,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    if args.subcommand == "scan":
+    if args.subcommand == "capture":
+        return _run_capture(args)
+
+    elif args.subcommand == "check-camera":
+        return _run_check_camera(args)
+
+    elif args.subcommand == "scan":
+        from realsense_measure.fullbody.config import FullBodyConfig
         cfg = FullBodyConfig()
         cfg.output_dir = Path(args.out)
         cfg.num_stops = args.stops
@@ -186,12 +359,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
 
     elif args.subcommand == "measure":
+        from realsense_measure.fullbody.io import load_scan_result
         p = Path(args.scan)
         scan = load_scan_result(p)
         print("\n" + scan.summary_table() + "\n")
         return 0
 
     elif args.subcommand == "validate":
+        from realsense_measure.fullbody.io import load_scan_result
+        from realsense_measure.fullbody.validate import compare_with_tape, format_validation_table, load_tape_measurements
         scan = load_scan_result(Path(args.scan))
         tape_vals, rep_floor, subj = load_tape_measurements(Path(args.tape))
         report = compare_with_tape(scan.measurements, tape_vals, rep_floor)
@@ -199,6 +375,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
 
     elif args.subcommand == "sweet-spot":
+        from realsense_measure.fullbody.config import FullBodyConfig
+        from realsense_measure.fullbody.io import load_scan_result
+        from realsense_measure.fullbody.sweet_spot import evaluate_capture_configuration
         scan = load_scan_result(Path(args.scan))
         cfg = FullBodyConfig()
         if scan.pcd is not None:
@@ -212,6 +391,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
 
     elif args.subcommand == "review":
+        import open3d as o3d
+        from realsense_measure.fullbody.io import load_scan_result
         scan = load_scan_result(Path(args.scan))
         geoms = []
         if scan.mesh is not None and len(scan.mesh.vertices) > 0:
@@ -318,9 +499,6 @@ def _run_keypoints_check(color_path: Path, depth_path: Optional[Path], out_path:
     print(f"Saved annotated keypoint overlay to: {out_file}")
     return 0
 
-    return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())
-

@@ -7,15 +7,21 @@ Zero SMPL, SMPL-X, STAR, or Anny dependencies.
 """
 
 from realsense_measure.fullbody.config import FullBodyConfig
-from realsense_measure.fullbody.types import (
-    AlignedStop,
-    FloorPlane,
-    Keypoints3D,
-    MeasurementResult,
-    QualityFlag,
-    ScanResult,
-    StopData,
-)
+
+def __getattr__(name: str):
+    # Lazy import types only when requested to prevent open3d DLL block on lightweight modules
+    if name in (
+        "StopData",
+        "AlignedStop",
+        "FloorPlane",
+        "Keypoints3D",
+        "MeasurementResult",
+        "QualityFlag",
+        "ScanResult",
+    ):
+        from realsense_measure.fullbody import types
+        return getattr(types, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
     "FullBodyConfig",
@@ -27,4 +33,5 @@ __all__ = [
     "QualityFlag",
     "ScanResult",
 ]
+
 

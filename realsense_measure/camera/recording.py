@@ -30,6 +30,12 @@ def save_raw_capture(
     raw_frames: list[RGBDFrame],
     output_dir: Path | str,
     cfg: PipelineConfig,
+    turn_direction: str | None = None,
+    camera_portrait_rotation: str | None = None,
+    depth_scale: float | None = None,
+    image_width: int | None = None,
+    image_height: int | None = None,
+    schema_version: str | None = None,
 ) -> Path:
     """
     Save raw captured frames before Stage 2 object isolation.
@@ -47,6 +53,18 @@ def save_raw_capture(
         Target directory to store images, numpy arrays, and meta.json.
     cfg:
         Active PipelineConfig providing camera and stream configuration.
+    turn_direction:
+        Optional subject turn direction ("cw" or "ccw").
+    camera_portrait_rotation:
+        Optional camera mounting rotation ("cw" or "ccw").
+    depth_scale:
+        Optional depth sensor scaling factor (e.g. 0.001 m/unit).
+    image_width:
+        Optional image width in pixels.
+    image_height:
+        Optional image height in pixels.
+    schema_version:
+        Optional schema version string for the metadata document.
 
     Returns
     -------
@@ -146,6 +164,34 @@ def save_raw_capture(
         if bg_ref_color is not None:
             cv2.imwrite(str(out_path / "background_color.png"), bg_ref_color)
 
+    # Resolve optional metadata fields with fallback to cfg attributes
+    eff_turn_dir = turn_direction if turn_direction is not None else getattr(cfg, "turn_direction", None)
+    eff_cam_rot = (
+        camera_portrait_rotation
+        if camera_portrait_rotation is not None
+        else (getattr(cfg, "camera_portrait_rotation", None) or getattr(cfg.camera, "rotate_90", None))
+    )
+    eff_depth_scale = (
+        depth_scale
+        if depth_scale is not None
+        else (getattr(cfg, "depth_scale", None) or getattr(cfg.camera, "depth_scale", None))
+    )
+    eff_width = (
+        image_width
+        if image_width is not None
+        else (getattr(cfg, "image_width", None) or intr_meta.get("width"))
+    )
+    eff_height = (
+        image_height
+        if image_height is not None
+        else (getattr(cfg, "image_height", None) or intr_meta.get("height"))
+    )
+    eff_schema_ver = (
+        schema_version
+        if schema_version is not None
+        else getattr(cfg, "schema_version", "1.0.0")
+    )
+
     meta_doc = {
         "intrinsics": intr_meta,
         "camera_config": cam_meta,
@@ -153,6 +199,12 @@ def save_raw_capture(
         "num_frames": len(raw_frames),
         "has_background_ref": has_bg_ref,
         "frames": frames_meta,
+        "turn_direction": eff_turn_dir,
+        "camera_portrait_rotation": eff_cam_rot,
+        "depth_scale": eff_depth_scale,
+        "image_width": eff_width,
+        "image_height": eff_height,
+        "schema_version": eff_schema_ver,
     }
 
     meta_path = out_path / "meta.json"

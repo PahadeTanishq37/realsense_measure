@@ -352,10 +352,8 @@ def align_stops(
         else:
             kpts_grav = Keypoints3D([], np.zeros((0, 3)), np.zeros(0), np.zeros(0), "gravity")
 
-        if cfg.turn_direction == "cw":
-            nominal_canonical = (180.0 - s.nominal_angle_deg + 360.0) % 360.0
-        else:
-            nominal_canonical = (180.0 + s.nominal_angle_deg + 360.0) % 360.0
+        from realsense_measure.fullbody.orientation import canonical_yaw_deg
+        nominal_canonical = canonical_yaw_deg(s.nominal_angle_deg, cfg.turn_direction)
 
         prior_yaw, center, is_kpt_valid = compute_keypoint_prior_yaw(kpts_grav, nominal_canonical, cfg)
 

@@ -47,8 +47,9 @@ Unlike parametric model fitting (SMPL, SMPL-X, STAR, or Anny), this pipeline rec
    - The subject turns in place through $N$ stops (default 8 stops, $45^\circ$ apart; 4 stops at $90^\circ$ supported).
    - At each stop, subject holds still for a $1.0 - 2.0\text{ s}$ burst ($\approx 30$ frames).
    - **Turn Direction (`turn_direction`)**: Configurable as `"cw"` (clockwise, viewed from top, default) or `"ccw"` (counter-clockwise).
-     - Under clockwise rotation, the subject rotates their front toward their right, meaning the canonical yaw sequence progresses $(180^\circ - \theta_{\text{nom}} + 360^\circ) \pmod{360^\circ}$.
-     - Under counter-clockwise rotation, canonical yaw progresses $(180^\circ + \theta_{\text{nom}} + 360^\circ) \pmod{360^\circ}$.
+     - Stored physical angle `nominal_angle_deg` is always the physical turning angle of the subject: $\theta_{\text{nom}} = i \cdot \frac{360^\circ}{N}$ for $i \in [0, N-1]$ for both `"cw"` and `"ccw"`.
+     - Under clockwise rotation (`"cw"`), the subject rotates their front toward their right, meaning the canonical yaw sequence progresses $(180^\circ - \theta_{\text{nom}} + 360^\circ) \pmod{360^\circ}$ (for $N=8$: $[180, 135, 90, 45, 0, 315, 270, 225]^\circ$).
+     - Under counter-clockwise rotation (`"ccw"`), the subject rotates their front toward their left, meaning the canonical yaw sequence progresses $(180^\circ + \theta_{\text{nom}} + 360^\circ) \pmod{360^\circ}$ (for $N=8$: $[180, 225, 270, 315, 0, 45, 90, 135]^\circ$).
    - **Camera Portrait Rotation (`camera_portrait_rotation`)**: Configurable as `"cw"` (90° clockwise roll) or `"ccw"` (90° counter-clockwise roll), aligning the sensor matrix to gravity. Both fields are saved in `meta.json`.
 
 ---
