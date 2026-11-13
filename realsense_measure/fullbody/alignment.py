@@ -265,17 +265,13 @@ def check_and_enforce_loop_closure(
         return 0.0
 
     yaws = np.array([s.refined_yaw_deg for s in stops], dtype=np.float64)
-    rel_yaws = []
-    for i in range(n):
-        next_idx = (i + 1) % n
-        diff = (yaws[next_idx] - yaws[i] + 180.0) % 360.0 - 180.0
-        rel_yaws.append(diff)
+    step_deg = 360.0 / float(n)
+    expected_step = -step_deg if cfg.turn_direction == "cw" else step_deg
+    expected_span = (n - 1) * expected_step
+    actual_span = (yaws[-1] - yaws[0] + 180.0) % 360.0 - 180.0
+    drift = float((actual_span - expected_span + 180.0) % 360.0 - 180.0)
 
-    total_rel = sum(rel_yaws)
-    expected = -360.0 if cfg.turn_direction == "cw" else 360.0
-    drift = total_rel - expected
-
-    logger.info(f"  [align] Loop closure: sum of relative yaws = {total_rel:.2f} deg (expected {expected:.1f} deg, drift = {drift:.2f} deg)")
+    logger.info(f"  [align] Loop closure drift = {drift:.2f} deg (expected span {expected_span:.1f} deg, actual {actual_span:.1f} deg)")
 
     if abs(drift) <= 20.0:
         for i, s in enumerate(stops):

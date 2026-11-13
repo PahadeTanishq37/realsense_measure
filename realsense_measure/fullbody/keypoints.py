@@ -61,14 +61,15 @@ class MediaPipePoseDetector:
 
     def __init__(self, static_image_mode: bool = True, model_complexity: int = 1):
         self._pose = None
+        self._landmarker = None
         self._static_image_mode = static_image_mode
         self._model_complexity = model_complexity
 
     def _ensure_initialized(self):
-        if self._pose is None:
+        if self._pose is None and self._landmarker is None:
             try:
                 import mediapipe as mp
-                # Try solutions.pose first (standard API across mediapipe versions)
+                # Try solutions.pose first (legacy mediapipe < 0.10)
                 if hasattr(mp, "solutions") and hasattr(mp.solutions, "pose"):
                     self._pose = mp.solutions.pose.Pose(
                         static_image_mode=self._static_image_mode,
@@ -76,11 +77,29 @@ class MediaPipePoseDetector:
                         enable_segmentation=False,
                         min_detection_confidence=0.5,
                     )
-                else:
-                    self._pose = None
+                elif hasattr(mp, "tasks") and hasattr(mp.tasks, "vision"):
+                    from mediapipe.tasks import python as mp_python
+                    from mediapipe.tasks.python import vision
+                    from pathlib import Path
+                    candidates = [
+                        Path(__file__).parent.parent / "models" / "pose_landmarker.task",
+                        Path(__file__).resolve().parents[2] / "models" / "pose_landmarker.task",
+                        Path("models/pose_landmarker.task"),
+                    ]
+                    model_path = next((p for p in candidates if p.exists()), None)
+                    if model_path is not None:
+                        base_options = mp_python.BaseOptions(model_asset_path=str(model_path))
+                        options = vision.PoseLandmarkerOptions(
+                            base_options=base_options,
+                            output_segmentation_masks=False,
+                            min_pose_detection_confidence=0.3,
+                            min_tracking_confidence=0.3,
+                        )
+                        self._landmarker = vision.PoseLandmarker.create_from_options(options)
+                    else:
+                        logger.warning("  [keypoints] pose_landmarker.task not found for mediapipe tasks API.")
             except Exception as exc:
                 logger.warning(f"  [keypoints] Could not initialize MediaPipe Pose: {exc}")
-                self._pose = None
 
     def detect(
         self, color_bgr: np.ndarray
@@ -91,40 +110,57 @@ class MediaPipePoseDetector:
         conf_dict: Dict[str, float] = {}
         vis_dict: Dict[str, float] = {}
 
-        if self._pose is None:
+        mp_indices = {
+            "nose": 0,
+            "left_eye": 2, "right_eye": 5,
+            "left_ear": 7, "right_ear": 8,
+            "left_shoulder": 11, "right_shoulder": 12,
+            "left_elbow": 13, "right_elbow": 14,
+            "left_wrist": 15, "right_wrist": 16,
+            "left_hip": 23, "right_hip": 24,
+            "left_knee": 25, "right_knee": 26,
+            "left_ankle": 27, "right_ankle": 28,
+            "left_heel": 29, "right_heel": 30,
+            "left_foot_index": 31, "right_foot_index": 32,
+        }
+
+        if self._landmarker is not None:
+            try:
+                import mediapipe as mp
+                rgb = cv2.cvtColor(color_bgr, cv2.COLOR_BGR2RGB)
+                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+                results = self._landmarker.detect(mp_image)
+                if not results.pose_landmarks:
+                    return pts_2d, conf_dict, vis_dict
+                landmarks = results.pose_landmarks[0]
+                for name, idx in mp_indices.items():
+                    lm = landmarks[idx]
+                    u = lm.x * (w - 1)
+                    v = lm.y * (h - 1)
+                    pts_2d[name] = (float(u), float(v))
+                    conf_dict[name] = float(getattr(lm, "presence", 1.0))
+                    vis_dict[name] = float(getattr(lm, "visibility", 1.0))
+            except Exception as exc:
+                logger.debug(f"  [keypoints] Tasks pose detection error: {exc}")
             return pts_2d, conf_dict, vis_dict
 
-        try:
-            rgb = cv2.cvtColor(color_bgr, cv2.COLOR_BGR2RGB)
-            results = self._pose.process(rgb)
-            if not results.pose_landmarks:
-                return pts_2d, conf_dict, vis_dict
+        if self._pose is not None:
+            try:
+                rgb = cv2.cvtColor(color_bgr, cv2.COLOR_BGR2RGB)
+                results = self._pose.process(rgb)
+                if not results.pose_landmarks:
+                    return pts_2d, conf_dict, vis_dict
 
-            # Mapping from MediaPipe landmark indices
-            mp_indices = {
-                "nose": 0,
-                "left_eye": 2, "right_eye": 5,
-                "left_ear": 7, "right_ear": 8,
-                "left_shoulder": 11, "right_shoulder": 12,
-                "left_elbow": 13, "right_elbow": 14,
-                "left_wrist": 15, "right_wrist": 16,
-                "left_hip": 23, "right_hip": 24,
-                "left_knee": 25, "right_knee": 26,
-                "left_ankle": 27, "right_ankle": 28,
-                "left_heel": 29, "right_heel": 30,
-                "left_foot_index": 31, "right_foot_index": 32,
-            }
+                for name, idx in mp_indices.items():
+                    lm = results.pose_landmarks.landmark[idx]
+                    u = lm.x * (w - 1)
+                    v = lm.y * (h - 1)
+                    pts_2d[name] = (float(u), float(v))
+                    conf_dict[name] = float(getattr(lm, "presence", 1.0))
+                    vis_dict[name] = float(getattr(lm, "visibility", 1.0))
 
-            for name, idx in mp_indices.items():
-                lm = results.pose_landmarks.landmark[idx]
-                u = lm.x * (w - 1)
-                v = lm.y * (h - 1)
-                pts_2d[name] = (float(u), float(v))
-                conf_dict[name] = float(getattr(lm, "presence", 1.0))
-                vis_dict[name] = float(getattr(lm, "visibility", 1.0))
-
-        except Exception as exc:
-            logger.debug(f"  [keypoints] Pose detection error: {exc}")
+            except Exception as exc:
+                logger.debug(f"  [keypoints] Solutions pose detection error: {exc}")
 
         return pts_2d, conf_dict, vis_dict
 

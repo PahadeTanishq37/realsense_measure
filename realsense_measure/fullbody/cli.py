@@ -48,6 +48,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_cap.add_argument("--fake", action="store_true", help="Use synthetic FakeCamera instead of hardware RealSense.")
     p_cap.add_argument("--burst-frames", type=int, default=30, help="Frames per stop burst (default: 30).")
     p_cap.add_argument("--headless", action="store_true", help="Run without opening GUI preview window.")
+    p_cap.add_argument("--dist-min", type=float, default=1.10, help="Minimum subject distance in metres (default: 1.10).")
+    p_cap.add_argument("--dist-max", type=float, default=1.50, help="Maximum subject distance in metres (default: 1.50).")
+    p_cap.add_argument("--no-head-feet-check", action="store_true", help="Disable strict head and feet unclipped check.")
+    p_cap.add_argument("--turn-prompt-timeout", type=float, default=10.0, help="Turn prompt timeout in seconds (default: 10.0).")
+    p_cap.add_argument("--motion-limit", type=float, default=10.0, help="Subject motion limit in mm (default: 10.0).")
+    p_cap.add_argument("--max-retakes", type=int, default=3, help="Max retakes per stop (default: 3).")
 
     # 2. check-camera (Stage 27 hardware sanity check snapshot)
     p_chk = subparsers.add_parser("check-camera", help="Verify RealSense orientation, FOV, and depth sanity (no session).")
@@ -144,8 +150,41 @@ def _run_capture(args: argparse.Namespace) -> int:
             device_info=cam.device_info(),
         )
 
-        thresholds = CaptureThresholds(burst_frames=args.burst_frames)
-        controller = CaptureController(camera=cam, writer=writer, thresholds=thresholds)
+        thresholds = CaptureThresholds(
+            burst_frames=args.burst_frames,
+            motion_limit_mm=getattr(args, "motion_limit", 10.0),
+            max_retakes=getattr(args, "max_retakes", 3),
+            dist_min_m=getattr(args, "dist_min", 1.10),
+            dist_max_m=getattr(args, "dist_max", 1.50),
+            require_head_feet=not getattr(args, "no_head_feet_check", False),
+            turn_prompt_timeout_s=getattr(args, "turn_prompt_timeout", 10.0),
+        )
+
+        landmark_fn = None
+        try:
+            from realsense_measure.fullbody.keypoints import MediaPipePoseDetector
+            detector = MediaPipePoseDetector()
+            def landmark_extractor(color_bgr: np.ndarray, depth_arr: np.ndarray) -> Optional[dict]:
+                try:
+                    pts_2d, conf, vis = detector.detect(color_bgr)
+                    return {
+                        "landmarks_2d": {k: [float(v[0]), float(v[1])] for k, v in pts_2d.items()},
+                        "confidence": {k: float(v) for k, v in conf.items()},
+                        "visibility": {k: float(v) for k, v in vis.items()},
+                    }
+                except Exception as k_exc:
+                    logger.warning(f"Keypoint extraction warning: {k_exc}")
+                    return None
+            landmark_fn = landmark_extractor
+        except Exception:
+            landmark_fn = None
+
+        controller = CaptureController(
+            camera=cam,
+            writer=writer,
+            thresholds=thresholds,
+            landmark_fn=landmark_fn,
+        )
 
         headless = bool(getattr(args, "headless", False))
         run_ui_loop(controller, headless=headless)
@@ -277,6 +316,7 @@ def run_pipeline(capture_dir: Path, out_dir: Path, cfg: Any) -> Any:
     from realsense_measure.fullbody.keypoints import MediaPipePoseDetector, lift_keypoints_to_3d
     from realsense_measure.fullbody.measure_scan import measure_fused_scan
     from realsense_measure.fullbody.types import ScanResult
+    import open3d as o3d
 
     logger.info(f"Loading capture session from {capture_dir} ...")
     stops = load_capture_session(capture_dir, cfg)
@@ -302,7 +342,38 @@ def run_pipeline(capture_dir: Path, out_dir: Path, cfg: Any) -> Any:
         )
         s.confidence_map = conf_map
 
-    rep_floor = verify_floor_consistency(detected_floors, cfg)
+        # 4. Point cloud in camera frame
+        color_rgb = np.ascontiguousarray(s.color[:, :, ::-1])
+        depth_m = s.depth.copy()
+        depth_m[depth_m < cfg.depth_min_m] = 0.0
+        depth_m[depth_m > cfg.depth_max_m] = 0.0
+        if s.confidence_map is not None:
+            depth_m[s.confidence_map < cfg.min_confidence_threshold] = 0.0
+        rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
+            o3d.geometry.Image(color_rgb),
+            o3d.geometry.Image(depth_m),
+            depth_scale=1.0,
+            depth_trunc=cfg.depth_max_m,
+            convert_rgb_to_intensity=False,
+        )
+        s.pcd = o3d.geometry.PointCloud.create_from_rgbd_image(rgbd, s.intrinsics)
+
+    if detected_floors:
+        is_consistent, rep_floor = verify_floor_consistency(detected_floors, cfg)
+        if not is_consistent:
+            logger.warning("Floor planes across stops are not fully consistent; using consensus plane.")
+    else:
+        logger.warning("No floor planes detected across stops; falling back to nominal gravity floor.")
+        from realsense_measure.fullbody.types import FloorPlane
+        rep_floor = FloorPlane(
+            coefficients=np.array([0.0, -1.0, 0.0, 1.0]),
+            normal=np.array([0.0, -1.0, 0.0]),
+            point_on_plane=np.array([0.0, 1.0, 1.3]),
+            inlier_count=0,
+            inlier_ratio=0.0,
+            rmse_m=0.0,
+            gravity_R_cam=np.eye(3),
+        )
     logger.info(f"Floor plane verification complete (normal={rep_floor.normal}, height={rep_floor.point_on_plane[1]:.3f} m).")
 
     # Alignment
@@ -311,15 +382,24 @@ def run_pipeline(capture_dir: Path, out_dir: Path, cfg: Any) -> Any:
 
     # Fusion
     logger.info("Fusing aligned point clouds via Open3D TSDF Integration ...")
-    mesh, fused_pcd, hole_map = fuse_aligned_stops(aligned, cfg)
+    mesh, fused_pcd, hole_map = fuse_aligned_stops(stops, aligned, cfg)
 
     # Anthropometric measurements
     logger.info("Extracting tape-style anthropometric measurements ...")
     ref_kpts = aligned[0].keypoints_canonical if aligned else None
     measurements = measure_fused_scan(fused_pcd, ref_kpts, cfg, hole_map=hole_map)
 
+    subj_id = "subject_01"
+    meta_p = Path(capture_dir) / "meta.json"
+    if meta_p.exists():
+        try:
+            with open(meta_p, "r", encoding="utf-8") as mf:
+                subj_id = json.load(mf).get("subject_id", subj_id)
+        except Exception:
+            pass
+
     scan_res = ScanResult(
-        subject_id="subject_01",
+        subject_id=subj_id,
         mesh=mesh,
         pcd=fused_pcd,
         aligned_stops=aligned,

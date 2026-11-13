@@ -360,10 +360,10 @@ class CaptureController:
 
         # State dispatch
         if self.state == ControllerState.WAIT_FOR_SUBJECT:
-            self._step_wait_for_subject(now, color, depth)
+            self._step_wait_for_subject(now, color, depth, cmd)
 
         elif self.state == ControllerState.POSITION_CHECK:
-            self._step_position_check(now, color, depth)
+            self._step_position_check(now, color, depth, cmd)
 
         elif self.state == ControllerState.TURN_PROMPT:
             self._step_turn_prompt(now, cmd)
@@ -389,7 +389,11 @@ class CaptureController:
     # State handlers
     # -------------------------------------------------------------------------
 
-    def _step_wait_for_subject(self, now: float, color: Optional[np.ndarray], depth: Optional[np.ndarray]) -> None:
+    def _step_wait_for_subject(self, now: float, color: Optional[np.ndarray], depth: Optional[np.ndarray], cmd: Optional[str] = None) -> None:
+        if cmd == "confirm":
+            self._transition(ControllerState.POSITION_CHECK, now)
+            return
+
         if depth is None:
             self._wait_subject_consecutive = 0
             return
@@ -407,7 +411,11 @@ class CaptureController:
         else:
             self._wait_subject_consecutive = 0
 
-    def _step_position_check(self, now: float, color: Optional[np.ndarray], depth: Optional[np.ndarray]) -> None:
+    def _step_position_check(self, now: float, color: Optional[np.ndarray], depth: Optional[np.ndarray], cmd: Optional[str] = None) -> None:
+        if cmd == "confirm":
+            self._transition(ControllerState.TURN_PROMPT, now)
+            return
+
         if depth is None:
             if (now - self._state_entry_time) > self.thresholds.position_check_timeout_s:
                 self._transition(ControllerState.WAIT_FOR_SUBJECT, now)
